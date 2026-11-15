@@ -8,8 +8,8 @@ from rc2016.shaders.interpolants import FLAG, _flag_mul, _stream_terms, linear_f
 from rc2016.shaders.ir import DAG
 
 
-def reference_flag_mul(p, q, limit=None):
-    """The original product."""
+def reference_flag_mul(p, q, limit=None, over_limit_none=False):
+    """The original product (it never stops early, which over_limit_none allows)."""
     if limit is not None and len(p) * len(q) > 64 * limit:
         return None
     result = {}
@@ -55,6 +55,39 @@ class FlagMulTests(unittest.TestCase):
             for limit in (None, 1, 4):
                 self.assertEqual(_flag_mul(p, q, limit), reference_flag_mul(p, q, limit))
                 self.assertEqual(list(_flag_mul(p, q, limit) or ()), list(reference_flag_mul(p, q, limit) or ()))
+
+    def test_large_products_are_the_same_dict_to_the_bit(self):
+        """Products of VECTOR_PAIRS pairs or more go through NumPy: same keys, key order and float sums (cancelling terms
+        dropped, repeated factors and shared flags as the loop makes them); over the limit they may be None when asked."""
+        import struct
+        rng = random.Random(5)
+        names = [f'{FLAG}{k}' for k in range(5)] + ['vertex.semantic1.x', 'vertex.semantic1.y', 'CB1[0]', 'CB1[1]', 'op#7']
+
+        def poly(n):
+            out = {}
+            for _ in range(n):
+                factors = rng.sample(names, rng.randint(0, 3))
+                key = tuple(sorted(set(f for f in factors if f.startswith(FLAG)) | {f for f in factors if not f.startswith(FLAG)}
+                                   )) + tuple(sorted(rng.choice(names[5:]) for _ in range(rng.randint(0, 1))))
+                out[tuple(sorted(key))] = rng.choice((1., -1., .5, 2., 0.1, -0.3, 1e-8))
+            return out
+        checked = 0
+        for _ in range(60):
+            p, q = poly(rng.randint(60, 140)), poly(rng.randint(60, 140))
+            if len(p) * len(q) < interpolants.VECTOR_PAIRS:
+                continue
+            checked += 1
+            want = reference_flag_mul(p, q)
+            got = _flag_mul(p, q)
+            self.assertEqual(list(got), list(want))
+            self.assertEqual([struct.pack('<d', got[k]) for k in got], [struct.pack('<d', want[k]) for k in want])
+            for limit in (8, 10000):
+                small = _flag_mul(p, q, limit, over_limit_none=True)
+                if len(want) > limit:
+                    self.assertIn(small, (None, want))
+                else:
+                    self.assertEqual(small, want)
+        self.assertGreater(checked, 20)
 
 
 class SharedFormTests(unittest.TestCase):

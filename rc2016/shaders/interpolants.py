@@ -346,10 +346,16 @@ MAX_FORM_TERMS = 256
 FLAG = 'runtime_flag@'
 
 
-def _flag_mul(p, q, limit=None):
-    """Polynomial product where runtime flags are 0/1 (f*f = f); None past limit terms."""
+VECTOR_PAIRS = 2048   # products with at least this many term pairs are formed in NumPy (_flag_mul_vector)
+
+
+def _flag_mul(p, q, limit=None, over_limit_none=False):
+    """Polynomial product where runtime flags are 0/1 (f*f = f); None past limit terms. With ``over_limit_none`` a product
+    of more than ``limit`` terms may also be None (the caller discards it anyway)."""
     if limit is not None and len(p) * len(q) > 64 * limit:
         return None
+    if len(p) * len(q) >= VECTOR_PAIRS:
+        return _flag_mul_vector(p, q, limit if over_limit_none else None)
     result = {}
     # A key holds each flag once, so only flags shared by both factors repeat; otherwise the
     # product's key is just both factor lists sorted together.
@@ -367,6 +373,43 @@ def _flag_mul(p, q, limit=None):
                 key = tuple(sorted(a + b))
             result[key] = get(key, 0.) + x * y
     return {k: v for k, v in result.items() if v}
+
+
+def _flag_mul_vector(p, q, limit=None):
+    """_flag_mul's product with the pairs formed in NumPy, the same dict to the bit: monomials are exponent vectors over
+    the factor names (flags capped at 1, as f*f = f), keys come in first-occurrence order of the (p, q) pair loop, and
+    each key's coefficients are summed in that order by bincount, as the loop adds them. None when ``limit`` is given
+    and more than ``limit`` terms are left."""
+    import numpy as np
+    symbols = sorted({f for key in p for f in key} | {f for key in q for f in key})
+    column = {s: k for k, s in enumerate(symbols)}
+
+    def exponents(poly):
+        e = np.zeros((len(poly), len(symbols)), np.int16)
+        for row, key in enumerate(poly):
+            for f in key:
+                e[row, column[f]] += 1
+        return e
+    e = (exponents(p)[:, None, :] + exponents(q)[None, :, :]).reshape(-1, len(symbols))
+    flags = np.array([s.startswith(FLAG) for s in symbols], bool)
+    if flags.any():
+        e[:, flags] = np.minimum(e[:, flags], 1)
+    coef = (np.fromiter(p.values(), np.float64, len(p))[:, None] * np.fromiter(q.values(), np.float64, len(q))[None, :]).ravel()
+    rows = np.ascontiguousarray(e).view(np.dtype((np.void, e.dtype.itemsize * e.shape[1]))).ravel()
+    _unique, first, inverse = np.unique(rows, return_index=True, return_inverse=True)
+    order = np.argsort(first, kind='stable')
+    rank = np.empty_like(order)
+    rank[order] = np.arange(len(order))
+    sums = np.bincount(rank[inverse.ravel()], weights=coef, minlength=len(order))
+    keep = np.nonzero(sums)[0]   # NaN is non-zero, as the loop's `if v` keeps it
+    if limit is not None and len(keep) > limit:
+        return None
+    unique_rows = e[first[order][keep]]
+    nz_row, nz_col = np.nonzero(unique_rows)
+    keys = [[] for _ in range(len(keep))]
+    for row, col, count in zip(nz_row.tolist(), nz_col.tolist(), unique_rows[nz_row, nz_col].tolist()):
+        keys[row].extend((symbols[col],) * count)
+    return dict(zip(map(tuple, keys), sums[keep].tolist()))
 
 
 def _flag_only(p):
@@ -402,7 +445,7 @@ def linear_form(ir, root, limit=MAX_FORM_TERMS):
             elif op == 'neg':
                 p = {k: -v for k, v in parts[0].items()}
             elif op == 'mul':
-                p = _flag_mul(parts[0], parts[1], limit)
+                p = _flag_mul(parts[0], parts[1], limit, over_limit_none=True)
             else:
                 p = _add(parts[0], parts[1], -1. if op == 'sub' else 1.)
         elif op == 'select' and _flag_only(visit(args[0])):
