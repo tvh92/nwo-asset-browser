@@ -54,6 +54,11 @@ RECIPE_PROPERTY = 'rc_rcra_recipe_sha256'
 FORWARD_PREFIX = 'RC RA forward '
 FORWARD_PROPERTY = 'rc_rcra_forward_sha256'
 BLEND_MODES = ('opaque', 'additive', 'blended', 'modulate')
+# Blender's node creation slows as a tree grows (3,000 nodes in one tree take about 35 s, in groups of 100 about 0.6 s), so a
+# large recipe is emitted into chained part groups of at most PART_SIZE nodes; values cross parts through group sockets.
+PART_ABOVE = 400   # recipes with more operations are split
+PART_SIZE = 150
+SOCKET_KINDS = {'VALUE': 'NodeSocketFloat', 'VECTOR': 'NodeSocketVector', 'RGBA': 'NodeSocketColor'}
 LEAF_OPS = ('const', 'input', 'channel', 'ddx', 'ddy')   # recipe nodes _Emitter.value builds without its arguments
 MATH = {'add': 'ADD', 'mul': 'MULTIPLY', 'div': 'DIVIDE', 'min': 'MINIMUM', 'max': 'MAXIMUM', 'abs': 'ABSOLUTE',
         'sqrt': 'SQRT', 'rsq': 'INVERSE_SQRT', 'frc': 'FRACT', 'round_ne': 'ROUND', 'round_ni': 'FLOOR',
@@ -147,12 +152,17 @@ def build_brdf_group():
 class _Emitter:
     def __init__(self, tree, recipe, images, uv_maps, colour_attribute, interpolation='Linear', fixed=None):
         self.fixed = fixed or {}   # input name -> float, replacing the mesh/camera value (checks)
-        self.tree, self.nodes, self.links = tree, tree.nodes, tree.links
+        self.root = self.tree = tree
+        self.nodes, self.links = tree.nodes, tree.links
+        self.parts, self.carried, self.sockets = {}, {}, 0
+        self.split = len(recipe['nodes']) > PART_ABOVE
         self.recipe, self.images = recipe, images
         self.uv_maps, self.colour_attribute = uv_maps, colour_attribute
         self.interpolation = interpolation
         self.memo, self.inputs, self.samples, self.tables, self.specials = {}, {}, {}, {}, {}
         self.count = 0
+        if self.split:
+            self.new_part()
 
     def node(self, kind, **props):
         n = self.nodes.new(kind)
@@ -161,6 +171,52 @@ class _Emitter:
         n.location = ((self.count // 40) * 200, -(self.count % 40) * 60)
         self.count += 1
         return n
+
+    def new_part(self):
+        """Continue emitting in a new part group, chained in the root tree."""
+        tree = bpy.data.node_groups.new('%s part %d' % (self.root.name, len(self.parts) + 1), 'ShaderNodeTree')
+        gin, gout = tree.nodes.new('NodeGroupInput'), tree.nodes.new('NodeGroupOutput')
+        node = self.root.nodes.new('ShaderNodeGroup')
+        node.node_tree, node.name = tree, 'Part %d' % (len(self.parts) + 1)
+        node.location = (len(self.parts) * 220, 400)
+        self.parts[tree.name] = dict(tree=tree, node=node, gin=gin, gout=gout)
+        self.tree, self.nodes, self.links, self.count = tree, tree.nodes, tree.links, 0
+
+    def link(self, src, dst):
+        """Link an output socket to an input socket, carrying it across part groups when they are in different trees."""
+        tree = dst.id_data
+        if src.id_data != tree:
+            src = self.carry(src, tree)
+        tree.links.new(src, dst)
+
+    def carry(self, src, tree):
+        """``src`` as a socket in ``tree``: out of its part through the part's Group Output, then into ``tree``'s part through
+        its Group Input (the root links the two group nodes)."""
+        key = (src.as_pointer(), tree.name)
+        if key in self.carried:
+            return self.carried[key]
+        kind = SOCKET_KINDS.get(src.type, 'NodeSocketFloat')
+        root_key = (src.as_pointer(), self.root.name)
+        if src.id_data == self.root:
+            at_root = src
+        elif root_key in self.carried:
+            at_root = self.carried[root_key]
+        else:
+            part = self.parts[src.id_data.name]
+            self.sockets += 1
+            name = 'v%d' % self.sockets
+            part['tree'].interface.new_socket(name, in_out='OUTPUT', socket_type=kind)
+            part['tree'].links.new(src, part['gout'].inputs[name])
+            at_root = self.carried[root_key] = part['node'].outputs[name]
+        if tree == self.root:
+            return at_root
+        part = self.parts[tree.name]
+        self.sockets += 1
+        name = 'v%d' % self.sockets
+        part['tree'].interface.new_socket(name, in_out='INPUT', socket_type=kind)
+        self.root.links.new(at_root, part['node'].inputs[name])
+        self.carried[key] = part['gin'].outputs[name]
+        return self.carried[key]
 
     def math(self, operation, *args, clamp=False):
         n = self.node('ShaderNodeMath', operation=operation, use_clamp=clamp)
@@ -172,9 +228,9 @@ class _Emitter:
         if isinstance(value, (int, float)) and math.isfinite(value):
             socket.default_value = float(value)
         elif isinstance(value, (int, float)):   # a socket default does not keep inf or NaN; D3D arithmetic does
-            self.links.new(self.non_finite(value), socket)
+            self.link(self.non_finite(value), socket)
         else:
-            self.links.new(value, socket)
+            self.link(value, socket)
 
     def non_finite(self, value):
         """An output holding inf, -inf or NaN: Exponent(10000) overflows float32 to +inf in Cycles and EEVEE, and NaN is
@@ -197,12 +253,17 @@ class _Emitter:
             i, done = stack.pop()
             if done:
                 order.append(i)
+            elif i not in seen and i not in self.memo and nodes[i]['op'] == 'channel':
+                seen.add(i)   # a texture's address is built before the sample, so parts only ever feed later parts
+                stack.extend((x, False) for x in nodes[nodes[i]['args'][0]]['args'])
             elif i not in seen and i not in self.memo and nodes[i]['op'] not in LEAF_OPS:
                 seen.add(i)   # shared subexpressions are walked once
                 stack.append((i, True))
                 stack.extend((x, False) for x in nodes[i]['args'])
         for i in order:
             if i not in self.memo:
+                if self.split and self.count >= PART_SIZE:
+                    self.new_part()
                 self._value(i)
         return self._value(index)
 
@@ -270,7 +331,7 @@ class _Emitter:
     def game_vector(self, socket):
         """A Blender world vector as game (x, y, z) = Blender (x, z, -y)."""
         sep = self.node('ShaderNodeSeparateXYZ')
-        self.links.new(socket, sep.inputs[0])
+        self.link(socket, sep.inputs[0])
         return [sep.outputs[0], sep.outputs[2], self.math('MULTIPLY', sep.outputs[1], -1.0)]
 
     def frame(self):
@@ -280,8 +341,8 @@ class _Emitter:
         # Cycles turns the shading normal towards the viewer on back faces; the game's interpolant is not turned.
         facing = self.math('MULTIPLY_ADD', g.outputs['Backfacing'], -2.0, 1.0)
         normal = self.node('ShaderNodeVectorMath', operation='SCALE')
-        self.links.new(g.outputs['Normal'], normal.inputs[0])
-        self.links.new(facing, normal.inputs['Scale'])
+        self.link(g.outputs['Normal'], normal.inputs[0])
+        self.link(facing, normal.inputs['Scale'])
         probes = {}
         for name, colour in (('tangent', (1.0, 0.5, 0.5, 1.0)), ('bitangent', (0.5, 1.0, 0.5, 1.0))):
             probe = self.node('ShaderNodeNormalMap', space='TANGENT', uv_map=self.uv_maps[0] if self.uv_maps else '')
@@ -289,11 +350,11 @@ class _Emitter:
             probe.inputs['Strength'].default_value = 1.0
             probes[name] = probe.outputs[0]
         cross = self.node('ShaderNodeVectorMath', operation='CROSS_PRODUCT')
-        self.links.new(normal.outputs[0], cross.inputs[0])
-        self.links.new(probes['tangent'], cross.inputs[1])
+        self.link(normal.outputs[0], cross.inputs[0])
+        self.link(probes['tangent'], cross.inputs[1])
         dot = self.node('ShaderNodeVectorMath', operation='DOT_PRODUCT')
-        self.links.new(cross.outputs[0], dot.inputs[0])
-        self.links.new(probes['bitangent'], dot.inputs[1])
+        self.link(cross.outputs[0], dot.inputs[0])
+        self.link(probes['bitangent'], dot.inputs[1])
         sign = self.math('MULTIPLY_ADD', self.math('LESS_THAN', dot.outputs['Value'], 0.0), -2.0, 1.0)
         self.inputs['frame'] = dict(normal=self.game_vector(normal.outputs[0]), tangent=self.game_vector(probes['tangent']),
                                     sign=sign)
@@ -307,7 +368,7 @@ class _Emitter:
             else:
                 uv = self.node('ShaderNodeUVMap', uv_map=self.uv_maps[layer])
                 sep = self.node('ShaderNodeSeparateXYZ')
-                self.links.new(uv.outputs['UV'], sep.inputs[0])
+                self.link(uv.outputs['UV'], sep.inputs[0])
                 self.inputs[key] = [sep.outputs[0], self.math('SUBTRACT', 1.0, sep.outputs[1])]
         return self.inputs[key]
 
@@ -316,7 +377,7 @@ class _Emitter:
             if self.colour_attribute:
                 attr = self.node('ShaderNodeVertexColor', layer_name=self.colour_attribute)
                 sep = self.node('ShaderNodeSeparateColor')
-                self.links.new(attr.outputs['Color'], sep.inputs[0])
+                self.link(attr.outputs['Color'], sep.inputs[0])
                 self.inputs['colour'] = [sep.outputs[0], sep.outputs[1], sep.outputs[2], attr.outputs['Alpha']]
             else:
                 self.inputs['colour'] = [1.0, 1.0, 1.0, 1.0]
@@ -328,14 +389,14 @@ class _Emitter:
             g = self.geometry()
             camera = self.node('ShaderNodeCameraData')
             towards = self.node('ShaderNodeVectorMath', operation='SCALE')
-            self.links.new(g.outputs['Incoming'], towards.inputs[0])
-            self.links.new(camera.outputs['View Distance'], towards.inputs['Scale'])
+            self.link(g.outputs['Incoming'], towards.inputs[0])
+            self.link(camera.outputs['View Distance'], towards.inputs['Scale'])
             offset = self.node('ShaderNodeVectorMath', operation='SCALE')
-            self.links.new(towards.outputs[0], offset.inputs[0])
+            self.link(towards.outputs[0], offset.inputs[0])
             offset.inputs['Scale'].default_value = -1.0
             eye = self.node('ShaderNodeVectorMath', operation='ADD')
-            self.links.new(g.outputs['Position'], eye.inputs[0])
-            self.links.new(towards.outputs[0], eye.inputs[1])
+            self.link(g.outputs['Position'], eye.inputs[0])
+            self.link(towards.outputs[0], eye.inputs[1])
             self.inputs['view'] = (self.game_vector(offset.outputs[0]), self.game_vector(eye.outputs[0]))
         return self.inputs['view']
 
@@ -391,11 +452,11 @@ class _Emitter:
         combine.inputs[1].default_value = 0.5
         tex = self.node('ShaderNodeTexImage', image=self.tables[key], interpolation='Closest', extension='EXTEND')
         tex.name = 'Lookup %d' % n['low']
-        self.links.new(combine.outputs[0], tex.inputs['Vector'])
+        self.link(combine.outputs[0], tex.inputs['Vector'])
         sep = self.node('ShaderNodeSeparateColor')
-        self.links.new(tex.outputs['Color'], sep.inputs[0])
+        self.link(tex.outputs['Color'], sep.inputs[0])
         whole = self.node('ShaderNodeMath', operation='COMPARE')   # X is an integer: eq(X, key) can hold
-        self.links.new(x, whole.inputs[0])
+        self.link(x, whole.inputs[0])
         self.feed(self.math('ROUND', x), whole.inputs[1])
         whole.inputs[2].default_value = 0.0
         inside = self.math('MULTIPLY', self.math('GREATER_THAN', index, -0.5), self.math('LESS_THAN', index, width - 0.5))
@@ -423,9 +484,9 @@ class _Emitter:
         def lookup(img, label):
             tex = self.node('ShaderNodeTexImage', image=img, interpolation=self.interpolation, extension='REPEAT')
             tex.name = label
-            self.links.new(combine.outputs[0], tex.inputs['Vector'])
+            self.link(combine.outputs[0], tex.inputs['Vector'])
             sep = self.node('ShaderNodeSeparateColor')
-            self.links.new(tex.outputs['Color'], sep.inputs[0])
+            self.link(tex.outputs['Color'], sep.inputs[0])
             return [sep.outputs[0], sep.outputs[1], sep.outputs[2], tex.outputs['Alpha']]
         if not isinstance(image, list):
             self.samples[index] = lookup(image, 'Unit %s' % n['binding'])
@@ -436,7 +497,7 @@ class _Emitter:
         channels = [0.0, 0.0, 0.0, 0.0]
         for k, img in enumerate(image):
             pick = self.node('ShaderNodeMath', operation='COMPARE')
-            self.links.new(z, pick.inputs[0])
+            self.link(z, pick.inputs[0])
             pick.inputs[1].default_value = float(k)
             pick.inputs[2].default_value = 0.25
             looked = lookup(img, 'Unit %s slice %d' % (n['binding'], k))
@@ -457,9 +518,9 @@ class _Emitter:
         def look(image, label):
             tex = self.node('ShaderNodeTexEnvironment', image=image, interpolation=self.interpolation)
             tex.name = label
-            self.links.new(direction.outputs[0], tex.inputs['Vector'])
+            self.link(direction.outputs[0], tex.inputs['Vector'])
             sep = self.node('ShaderNodeSeparateColor')
-            self.links.new(tex.outputs['Color'], sep.inputs[0])
+            self.link(tex.outputs['Color'], sep.inputs[0])
             return sep.outputs
         rgb = look(cube.image, 'Unit %s cube' % n['binding'])
         alpha = look(cube.alpha, 'Unit %s cube alpha' % n['binding'])[0] if cube.alpha is not None else 1.0
@@ -487,9 +548,9 @@ class _Emitter:
             self.feed(self.math('SUBTRACT', 1.0, y), combine.inputs[1])   # atlas rows are stored top first
             tex = self.node('ShaderNodeTexImage', image=vol.image, interpolation=self.interpolation, extension='CLIP')
             tex.name = 'Unit %s volume %d' % (binding, int(step))
-            self.links.new(combine.outputs[0], tex.inputs['Vector'])
+            self.link(combine.outputs[0], tex.inputs['Vector'])
             sep = self.node('ShaderNodeSeparateColor')
-            self.links.new(tex.outputs['Color'], sep.inputs[0])
+            self.link(tex.outputs['Color'], sep.inputs[0])
             looked.append([sep.outputs[0], sep.outputs[1], sep.outputs[2], tex.outputs['Alpha']])
         return [self.math('MULTIPLY_ADD', f, self.math('SUBTRACT', b, a), a) for a, b in zip(*looked)]
 
@@ -516,8 +577,8 @@ def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpol
         for k, n in enumerate(names):
             em.feed(terms[n], node.inputs[k])
         return node.outputs[0]
-    group.links.new(combine(('albedo.r', 'albedo.g', 'albedo.b'), 'ShaderNodeCombineColor'), out.inputs['Albedo'])
-    group.links.new(combine(('f0.r', 'f0.g', 'f0.b'), 'ShaderNodeCombineColor'), out.inputs['F0'])
+    em.link(combine(('albedo.r', 'albedo.g', 'albedo.b'), 'ShaderNodeCombineColor'), out.inputs['Albedo'])
+    em.link(combine(('f0.r', 'f0.g', 'f0.b'), 'ShaderNodeCombineColor'), out.inputs['F0'])
     # Game normal (x, y, z) -> Blender (x, -z, y), normalised.
     normal = em.node('ShaderNodeCombineXYZ')
     em.feed(terms['normal.x'], normal.inputs[0])
@@ -525,8 +586,8 @@ def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpol
             else -terms['normal.z'], normal.inputs[1])
     em.feed(terms['normal.y'], normal.inputs[2])
     unit = em.node('ShaderNodeVectorMath', operation='NORMALIZE')
-    group.links.new(normal.outputs[0], unit.inputs[0])
-    group.links.new(unit.outputs[0], out.inputs['Normal'])
+    em.link(normal.outputs[0], unit.inputs[0])
+    em.link(unit.outputs[0], out.inputs['Normal'])
     for socket, term in (('Gloss', 'gloss'), ('Occlusion', 'occlusion'), ('Emission', 'emission')):
         em.feed(terms[term], out.inputs[socket])
     clip = terms['clip']
@@ -552,11 +613,11 @@ def build_forward_group(recipe, images, uv_maps, colour_attribute=None, interpol
     colour = em.node('ShaderNodeCombineColor')
     for k, name in enumerate(('colour.r', 'colour.g', 'colour.b')):
         em.feed(terms[name], colour.inputs[k])
-    group.links.new(colour.outputs[0], out.inputs['Colour'])
+    em.link(colour.outputs[0], out.inputs['Colour'])
     tint = em.node('ShaderNodeCombineColor')
     for k, name in enumerate(('background.r', 'background.g', 'background.b')):
         em.feed(terms.get(name, 0.0), tint.inputs[k])
-    group.links.new(tint.outputs[0], out.inputs['Background'])
+    em.link(tint.outputs[0], out.inputs['Background'])
     clip = terms['clip']
     keep = em.math('SUBTRACT', 1.0, clip) if not isinstance(clip, float) else 1.0 - clip
     alpha = terms['alpha']
@@ -737,9 +798,17 @@ def translated(material):
     return bool(material.get(RECIPE_PROPERTY) or material.get(FORWARD_PROPERTY))
 
 
+def _group_nodes(group):
+    """The nodes of a translated group and of its part groups."""
+    for node in group.nodes:
+        yield node
+        if node.type == 'GROUP' and node.node_tree is not None and node.node_tree.name.startswith(group.name + ' part '):
+            yield from _group_nodes(node.node_tree)
+
+
 def _images_missing(material, group):
     problems = []
-    for node in group.nodes:
+    for node in _group_nodes(group):
         if node.type in ('TEX_IMAGE', 'TEX_ENVIRONMENT'):
             image = node.image
             if image is None or not (image.packed_file or image.has_data or image.size[0]):
