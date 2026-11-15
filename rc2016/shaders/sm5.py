@@ -11,7 +11,10 @@ reuses it for a mask before the discard and a float after it. UAV stores stay ga
 
 A loop is unrolled while its continuation predicate folds to a constant (so a light loop over an empty light list
 disappears when its count is bound to 0); a loop whose trip count stays unknown poisons every register it writes with an
-'unknown' node, so outputs that do not depend on it still translate.
+'unknown' node, so outputs that do not depend on it still translate. Branch, break, return and discard conditions only
+act on active lanes, so they are folded under the facts the lane's active predicate implies (_given_active): a counter
+written as select(active, i + 1, i) is exactly the iteration count there, and a loop with an early break still ends at
+its count. A counter that differs between a continue path and the fall-through path does not fold this way.
 
 Constant buffer reads become 'input' nodes named '<cbuffer>.<variable>+<byte offset>' from the RDEF reflection;
 interpolants become 'input' nodes named '<semantic>.<component>'; texture samples and buffer loads become 'sample'/'load'
@@ -29,7 +32,7 @@ from rc2016.shaders import dxbc
 
 U32 = 0xFFFFFFFF
 MAX_LOOP_ITERATIONS = 64           # unrolled iterations while the loop's continuation folds to a constant
-MAX_PREDICATED_ITERATIONS = 4      # further iterations allowed while it does not (data-dependent trip count)
+MAX_PREDICATED_ITERATIONS = 8      # further iterations allowed while it does not (data-dependent trip count)
 TRUE_BITS = U32
 
 
@@ -316,6 +319,9 @@ class Graph:
                     if name == 'b_and':
                         return a[y] if v[x] else self.const('b', False)
                     return self.const('b', True) if v[x] else a[y]
+                n = self.nodes[a[x]]
+                if n['op'] == 'b_not' and n['args'][0] == a[y]:   # x and not x, x or not x
+                    return self.const('b', name == 'b_or')
             if a[0] == a[1]:
                 return a[0]
         if name == 'b_not' and self.nodes[a[0]]['op'] == 'b_not':
@@ -356,6 +362,9 @@ class Graph:
         c = self.value(cond)
         if c is not None:
             return a if c else b
+        va, vb = self.value(a), self.value(b)
+        if self.type(a) == 'b' == self.type(b) and va is not None and vb is not None:
+            return cond if va else self.op('b_not', cond)   # c ? true : false
         ta, tb = self.type(a), self.type(b)
         if ta != tb:
             # Mixed register contents: keep the float view when either side is a float constant 0.
@@ -675,6 +684,7 @@ class Translator:
                 cond = g.boolean(self.read(ins.operands[0], 'i')[0])
                 if not ins.nonzero:
                     cond = g.op('b_not', cond)
+                cond = self._given_active(cond, flow)   # both branches are entered only by active lanes
                 partners, close = self.match[i]
                 else_at = partners[0] if partners else None
                 taken = g.value(cond)
@@ -709,7 +719,7 @@ class Translator:
                     c = g.boolean(self.read(ins.operands[0], 'i')[0])
                     if not ins.nonzero:
                         c = g.op('b_not', c)
-                    cond = g.op('b_and', cond, c)
+                    cond = g.op('b_and', cond, self._given_active(c, flow))
                 if op.startswith('break'):
                     state = loops[-1]
                     state['broken'] = g.op('b_or', state['broken'], cond)
@@ -725,7 +735,7 @@ class Translator:
                     c = g.boolean(self.read(ins.operands[0], 'i')[0])
                     if not ins.nonzero:
                         c = g.op('b_not', c)
-                    cond = g.op('b_and', cond, c)
+                    cond = g.op('b_and', cond, self._given_active(c, flow))
                 self.alive = g.op('b_and', self.alive, g.op('b_not', cond))
                 flow.active = g.op('b_and', flow.active, g.op('b_not', cond))
                 i += 1
@@ -735,7 +745,7 @@ class Translator:
                 if not ins.nonzero:
                     c = g.op('b_not', c)
                 # Discarded lanes are don't-care for registers and targets: only the predicate records them.
-                self.discard = g.op('b_or', self.discard, g.op('b_and', flow.active, c))
+                self.discard = g.op('b_or', self.discard, g.op('b_and', flow.active, self._given_active(c, flow)))
                 i += 1
                 continue
             if op in ('case', 'default', 'endswitch', 'endif', 'endloop', 'else', 'label'):
@@ -776,6 +786,69 @@ class Translator:
         for state, (broken, continued) in zip(loops, saved_states):
             state['broken'], state['continued'] = broken, continued
         return result
+
+    def _given_active(self, cond, flow):
+        """``cond`` as it reads in an active lane: decided under the facts flow.active and the region entry imply.
+
+        The result is only ANDed with flow.active (a break, continue or return predicate), so it may differ from ``cond``
+        where the lane is inactive. A loop counter written as select(previous active, i + 1, i) is then exactly the
+        iteration count, and a test on it folds, so a loop with an early break still ends at its count."""
+        g = self.g
+        facts = {}
+
+        def learn(node, value):
+            if node in facts:
+                return
+            facts[node] = value
+            n = g.nodes[node]
+            if n['op'] == 'b_not':
+                learn(n['args'][0], not value)
+            elif n['op'] == ('b_and' if value else 'b_or'):
+                for a in n['args']:
+                    learn(a, value)
+        learn(flow.active, True)
+        learn(self.outer, True)
+        facts = {k: v for k, v in facts.items() if not g.is_const(k)}
+        if not facts:
+            return cond
+        memo = {}
+        leaves = ('const', 'input', 'unknown', 'channel', 'sample', 'load', 'cbload')
+
+        def under(i):
+            if i in memo:
+                return memo[i]
+            if i in facts:
+                result = g.const('b', facts[i])
+            else:
+                n = g.nodes[i]
+                if n['op'] in leaves:
+                    result = i
+                elif n['op'] == 'select':
+                    c = under(n['args'][0])
+                    taken = g.value(c)
+                    if taken is not None:
+                        result = under(n['args'][1] if taken else n['args'][2])
+                    else:
+                        result = g.select(c, under(n['args'][1]), under(n['args'][2]))
+                else:
+                    args = [under(a) for a in n['args']]
+                    result = i if args == n['args'] else g.op(n['op'], *args)
+            memo[i] = result
+            return result
+        stack, order, seen = [cond], [], set()   # post-order without recursion: counter chains are as deep as the loop
+        while stack:
+            i = stack.pop()
+            if i in seen or i in facts:
+                continue
+            seen.add(i)
+            order.append(i)
+            if g.nodes[i]['op'] not in leaves:
+                stack.extend(g.nodes[i]['args'])
+        for i in reversed(order):
+            n = g.nodes[i]
+            if n['op'] == 'select' or all(a in memo or a in facts or g.nodes[a]['op'] in leaves for a in n['args']):
+                under(i)
+        return under(cond)
 
     def _entered(self, entry):
         """Absolute entry predicate of a region entered by ``entry``: lanes that discarded before it do not enter it."""

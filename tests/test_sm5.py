@@ -149,6 +149,52 @@ class TranslatorTests(unittest.TestCase):
         value = sm5.evaluate(bound.graph, [bound.output(0, 0)], {'C.base': 4.0})[bound.output(0, 0)]
         self.assertEqual(value, 4.0)
 
+    def test_loops_with_an_early_break_end_at_their_count(self):
+        # The counter of an active lane is exact, so the loop folds even though some lanes leave it early.
+        cases = [
+            ("""float4 main(float4 a : TEXCOORD0) : SV_TARGET { float s = 0; float3 c = 0;
+                [loop] for (float i = 0; i < 6; i += 1) { if (a.x * i > a.z) { c = float3(i, s, 1); break; }
+                s += a.y; c = float3(s, i, 2); } return float4(c, s); }""",
+             lambda x, y, z: self._early_break(x, y, z)),
+            ("""float4 main(float4 a : TEXCOORD0) : SV_TARGET { float s = 0; [loop] for (int i = 0; i < 5; i++) {
+                if (s > a.w) break; s += a.y * i; } return float4(s, 0, 0, 1); }""",
+             lambda x, y, z, w: self._break_on_sum(x, y, z, w)),
+        ]
+        rnd = __import__('random').Random(7)
+        for source, reference in cases:
+            tr = sm5.translate(dxbc.shader(compile_hlsl(source)))
+            self.assertEqual(tr.status(), 'ready', source)
+            for _ in range(200):
+                x, y, z, w = (float(sm5.f32(rnd.uniform(-3, 3))) for _ in range(4))
+                inputs = {'TEXCOORD.x': x, 'TEXCOORD.y': y, 'TEXCOORD.z': z, 'TEXCOORD.w': w}
+                keys = sorted(k for k in tr.outputs if k[0] == 'o')
+                got = sm5.evaluate(tr.graph, [tr.outputs[k] for k in keys], inputs)
+                want = reference(x, y, z) if reference.__code__.co_argcount == 3 else reference(x, y, z, w)
+                values = [sm5.bits_float(got[tr.outputs[k]]) if tr.graph.type(tr.outputs[k]) == 'i' else got[tr.outputs[k]]
+                          for k in keys]   # a constant lane may be stored as the bits of the float
+                self.assertEqual(values[:len(want)], want, (source[:40], x, y, z, w))
+
+    @staticmethod
+    def _early_break(x, y, z):
+        f, s, c, i = sm5.f32, 0.0, (0.0, 0.0, 0.0), 0.0
+        while i < 6:
+            if f(x * i) > z:
+                c = (i, s, 1.0)
+                break
+            s = f(s + y)
+            c = (s, i, 2.0)
+            i = f(i + 1)
+        return [*c, s]
+
+    @staticmethod
+    def _break_on_sum(x, y, z, w):
+        f, s = sm5.f32, 0.0
+        for i in range(5):
+            if s > w:
+                break
+            s = f(s + f(y * i))
+        return [s]
+
     def test_switch_and_integer_packing(self):
         source = """cbuffer C : register(b0) { uint mode; uint packed; };
             float4 main() : SV_TARGET {
