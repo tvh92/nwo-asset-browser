@@ -105,6 +105,11 @@ class EmitterTests(unittest.TestCase):
         self.assertIn('vec3 rcraColour = vec3(rcraInf, rcraNan,', source)
         self.assertNotIn('uRcraZero', rcra_glsl.fragment_source(_receipt('blended'))['source'])
 
+    def test_array_index_clamps_to_the_slices(self):
+        from rc2016.games.rcra import blender_export
+        texture = dict(pixels=b'a', slices=[b'a', b'b'])
+        self.assertEqual([blender_export.slice_index(texture, k) for k in (-1, 0, 1, 5)], [0, 0, 1, 1])
+
     def test_nan_slice_index_reads_slice_zero(self):
         from rc2016.games.rcra import blender_export
         self.assertEqual(blender_export._slice_index(float('nan')), 0)

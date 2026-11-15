@@ -79,6 +79,18 @@ def _slices(payload, fmt, width, height, mips, count, label):
     return [payload[i * stride:i * stride + sizes[0]] for i in range(count)]
 
 
+# A texture a material binds that the install does not hold, with no graph default either: it reads 0 in every channel,
+# as an unbound D3D resource does (blender_export.replace_missing). One RGBA32F texel.
+UNBOUND = 'unbound/zero.texture'
+UNBOUND_FORMAT = 2
+
+
+def _unbound():
+    texel = bytes(16)
+    return dict(path=UNBOUND, width=1, height=1, format=UNBOUND_FORMAT, pixels=texel, slices=[texel], array_size=1,
+                faces=1, full_size=(1, 1), srgb=False)
+
+
 def _entry(source, texture_path):
     keys = [k for k in source.resolve(texture_path) if source.entries[k]['type'] == 'texture']
     if len(keys) != 1:
@@ -91,6 +103,8 @@ def read_top_mip(source, texture_path, full):
 
     ``full`` takes the HD stream whenever there is one; otherwise the SD top mip is used once it is
     at least MIN_PREVIEW_SIZE (smaller ones also take the stream)."""
+    if texture_path == UNBOUND:
+        return _unbound()
     key = _entry(source, texture_path)
     data = source.asset_data(key)
     info = parse_header(data)
@@ -132,6 +146,8 @@ def load_texture_full(source, texture_path):
 
 def texture_header(source, texture_path):
     """Header facts only (format and sizes), memoized on the source."""
+    if texture_path == UNBOUND:
+        return dict(format=UNBOUND_FORMAT, hd_width=0, hd_height=0, sd_width=1, sd_height=1, array_size=1)
     key = _entry(source, texture_path)
     cache = source.__dict__.setdefault('_texture_header_cache', {})
     facts = cache.get(key)
@@ -144,6 +160,8 @@ def texture_header(source, texture_path):
 def texture_size(source, texture_path):
     """(width, height, array size, mip count) of the full texture as a program's resinfo sees it with every streamed mip
     resident: the HD stream's top mip and both chains' mips (the SD chain starts where the HD mips end). Memoized."""
+    if texture_path == UNBOUND:
+        return 1, 1, 1, 1
     key = _entry(source, texture_path)
     cache = source.__dict__.setdefault('_texture_size_cache', {})
     if key not in cache:

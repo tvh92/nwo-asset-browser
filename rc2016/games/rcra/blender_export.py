@@ -24,6 +24,7 @@ Environment Texture node reads with the game direction as its Vector: every pixe
 """
 import json
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -63,9 +64,15 @@ CUBE_FACE_AXES = (((0, 1.0), (2, -1.0), (1, -1.0)), ((0, -1.0), (2, 1.0), (1, -1
                   ((2, 1.0), (0, 1.0), (1, -1.0)), ((2, -1.0), (0, -1.0), (1, -1.0)))
 
 
+def slice_index(texture, index):
+    """``index`` clamped to the texture's slices, as D3D clamps an array index."""
+    return min(max(int(index), 0), len(texture.get('slices', [texture['pixels']])) - 1)
+
+
 def texel_array(texture, index=0):
-    """Float32 (height, width, 4) of one slice as stored, missing channels 0 and alpha 1."""
+    """Float32 (height, width, 4) of one slice as stored (the index clamped, slice_index), missing channels 0 and alpha 1."""
     fmt, width, height = texture['format'], texture['width'], texture['height']
+    index = slice_index(texture, index)
     pixels = texture.get('slices', [texture['pixels']])[index]
     if fmt in FLOAT_FORMATS:
         dtype, channels = FLOAT_FORMATS[fmt]
@@ -322,6 +329,36 @@ def _images(source, results, folder, texture_cache):
             for binding, path in textures.items()}
 
 
+def replace_missing(source, graph_data, result):
+    """Replace in a translation result each texture the install does not hold: by the graph's default for that unit when
+    the install has it, else by texture.UNBOUND (reads 0, as an unbound D3D resource). The result's limitations say which;
+    the game's own fallback for a texture it cannot load is not known."""
+    from rc2016.games.rcra import shaders as rshaders
+    from rc2016.games.rcra.texture import UNBOUND
+
+    def present(path):
+        return path == UNBOUND or sum(source.entries[k]['type'] == 'texture' for k in source.resolve(path)) == 1
+    defaults = {}
+    if graph_data is not None:
+        rows, _offsets, _defaults = rshaders._layout(graph_data)
+        defaults = {'textureUnit%d' % (rshaders.FIRST_MATERIAL_UNIT + unit): re.sub('/+', '/', default)
+                    for unit, _key, default in rows if default}
+    notes = []
+    for binding, path in sorted(result['textures'].items()):
+        if present(path):
+            continue
+        default = defaults.get(binding)
+        stand_in = default if default and default != path and present(default) else UNBOUND
+        result['textures'][binding] = stand_in
+        notes.append('%s (%s): %s' % (path, binding, 'the graph default %s' % stand_in if stand_in != UNBOUND
+                                       else 'reads 0, as an unbound texture'))
+    if notes:
+        result['limitations'].append(MISSING_NOTE % '; '.join(notes))
+
+
+MISSING_NOTE = 'Textures the install does not hold, with their stand-ins: %s.'
+
+
 def _reads_background(recipe):
     """True when a forward recipe's background tint is not the constant 0."""
     nodes = recipe['nodes']
@@ -373,6 +410,8 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
             errors[name] = '%s: %s' % (type(error).__name__, error)
     if 'recipe' not in results and 'forward' not in results:
         return dict(error=errors.get('recipe') or errors.get('forward'), graph=graph_path, blend=blend)
+    for result in results.values():
+        replace_missing(source, graph, result)
     recipes = {name: rsurface.blender_recipe(rsurface.export_recipe(result)) for name, result in results.items()}
     for name in [n for n, r in recipes.items() if len(r['nodes']) > MAX_RECIPE_NODES]:
         errors[name] = 'Unsupported: %d operations, over the Blender limit of %d' % (len(recipes[name]['nodes']),

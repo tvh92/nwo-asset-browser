@@ -483,6 +483,18 @@ class RealSurfaceTests(unittest.TestCase):
             entry = blender_export.material_entry(self.source, FUR, Path(tmp))
         self.assertIn('recipe', entry)
 
+    def test_missing_textures_get_stand_ins(self):
+        from rc2016.games.rcra.texture import UNBOUND, texture_header
+        with tempfile.TemporaryDirectory() as tmp:
+            default = blender_export.material_entry(
+                self.source, 'material/character/hero/hero_ratchet_protosuit_glove/hero_ratchet_protosuit_glove.material', Path(tmp))
+            unbound = blender_export.material_entry(
+                self.source, 'material/characters/hero/hero_platform_shadow/hero_platform_shadow.material', Path(tmp))
+        for entry, stand_in in ((default, 'the graph default'), (unbound, 'reads 0')):
+            self.assertNotIn('error', entry)
+            self.assertTrue(any('install does not hold' in line and stand_in in line for line in entry['limitations']))
+        self.assertEqual(texture_header(self.source, UNBOUND)['format'], 2)
+
     def test_graph_named_by_file_name(self):
         from rc2016.games.rcra import material
         key = self.source.resolve('material/environment/kalebo/ground/kal_gnd_floor_bare_01/'

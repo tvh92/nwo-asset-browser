@@ -129,6 +129,8 @@ def _translate(graph, data, source, program=None):
             results[name] = fn(graph, data, texture_sizes=lambda path: texture_size(source, path))
         except (rsurface.Unsupported, ValueError, KeyError) as error:
             errors[name] = str(error)
+    for result in results.values():
+        bexp.replace_missing(source, graph, result)
     # Constant NaN resolved by D3D rules (as the Blender export does): GLSL's min, max and clamp of NaN are undefined.
     recipes = {name: rsurface.fold_nan(rsurface.export_recipe(r)) for name, r in results.items()}
     if blend == 'modulate' and 'forward' in recipes and bexp._reads_background(recipes['forward']):
@@ -248,8 +250,7 @@ def _build_atlas(texture, path):
 
 def _slice(texture, path, index):
     slices = texture.get('slices', [texture['pixels']])
-    if index >= len(slices):
-        raise NotTranslated('texture %s has no slice %d' % (path, index))
+    index = bexp.slice_index(texture, index)   # D3D clamps an array index to the slices
     if texture['format'] in bexp.FLOAT_FORMATS:
         return _float(bexp.texel_array(texture, index), '%s#float%d' % (path, index))
     if index == 0:
