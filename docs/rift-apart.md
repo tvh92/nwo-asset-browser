@@ -482,7 +482,8 @@ The engine vertex program that feeds slots 1, 4 and 5 is in the exe (vertex pull
 - **Types:** every node is a float, an integer bit pattern or a comparison result. Bitcasts fold for constants; folding uses float32 arithmetic.
 - **Branches:** each `if`, `else` and `switch` case runs as its own region and joins with one `select` per register.
 - **Loops:** a loop is unrolled while its exit condition folds. A data-dependent loop (a light list, for example) poisons only the registers it writes, with an `unknown` node, so outputs that do not depend on it still translate.
-- **Discard and return:** both become predicates.
+- **Discard and return:** both become predicates. A discarded pixel's registers are don't-care, so a discard does not predicate later register writes. This keeps a register one type when a program reuses it, a mask before the discard and a float after it, as the holo graphs do. UAV stores stay gated by the discard. On the materials both versions translate, the outputs are bit-identical on every kept pixel.
+- **Texture sizes:** `resinfo` on a texture whose size the bindings know (`Bindings.texture_size`) folds to SM5's values for its dimension, mip level and return type. `surface` and `forward` take `texture_sizes`, which is `texture.texture_size`: the full texture with every streamed mip resident (labelled). Array sizes and depths do not depend on streaming.
 - **Names:** constant-buffer reads become inputs named from the reflection, such as `GlobalWorldCBuffer.m_KeyLightVec+4` or `MultiCustomMaterialCB.g_CustomMaterial_Buffer+12`. Interpolants become inputs named by semantic, such as `TEXCOORD2.x`. Texture reads become `sample` and `load` nodes carrying the binding name.
 - **Compute programs:** UAV stores are kept with their predicate (`Translation.stores`).
 
@@ -491,6 +492,7 @@ A `Bindings` object can replace any input during translation.
 **Material binding.** The binding is the same for every graph:
 - `cb2` (`MultiCustomMaterialCB`) holds the graph's float defaults, overwritten by the material's values at the graph's offsets (`material_constants`).
 - Texture unit `t(5 + u)` (`textureUnit<5+u>`) is the graph's slot-table row `u`: the material's texture for that slot, else the row's default (`material_units`).
+- A graph without parameters has no parameter or default section, and some have only the slot table; `graph_layout` reads the parts that are there.
 
 **Neutral engine profile** (`NEUTRAL_INTEGERS`, `NEUTRAL_FLOATS`): no local lights or probes (lookup word counts 0), no debug view (`m_MiscFlags` 0), no optional features (`m_FeatureFlags`, `m_RTFlags` 0) and 8 sun-shadow taps. These are viewer choices, not game data. Every other engine input stays a named input.
 
@@ -546,11 +548,12 @@ Blended materials are drawn by their forward program (slot 1), which lights itse
 
 **Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps are unsupported: an image lookup cannot address them.
 
-**Coverage:** 1,115 of 1,747 blended materials. Not translated:
-- booleans read back as float bits (`bits2f(b2i(c))`, NaN when true) inside a discard, mostly holo graphs (about 120)
-- G-buffer reads (decals) and per-pixel volume flags
+**Coverage:** 1,450 of 1,747 blended materials. Not translated:
+- loops whose trip count depends on the pixel (88): parallax steps, ray marches, per-pixel volume flags
+- cube maps (77)
+- G-buffer reads (57), mostly screen effects and a few decals
 - lit materials that read the scene colour (27), and colour that is not affine in it (16)
-- cube maps (38), units outside the graph's slot table, unbounded loops
+- integer arithmetic left in the colour (about 32)
 
 ### Per-object values
 
@@ -585,9 +588,9 @@ Values a material does not own are bound and listed in its limitations:
 - **Neutral draw:** no dissolve, opaque, no render flags (lighting class 0), shader time 0.
 - **Review values:** screen position for dither, LOD fade and adapted luminance 1.
 
-**Coverage:** 4,875 of 5,721 materials. The rest are reported with a reason (`rc2016.games.rcra.surface.Unsupported`):
+**Coverage:** 5,255 of 5,721 materials. The rest are reported with a reason (`rc2016.games.rcra.surface.Unsupported`):
 - integer operations left in the writer
-- writers without the packed normal, as in the holo graphs
+- writers without the engine packing
 - unbounded loops
 
 ### Textures

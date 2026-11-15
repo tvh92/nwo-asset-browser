@@ -4,10 +4,14 @@ Every SM5 register component becomes a node of a hash-consed DAG. Node types are
 integer bits) and 'b' (a comparison result; SM5 stores it as 0xFFFFFFFF/0). A register keeps whatever node was written;
 reading it with another type inserts a bitcast, which folds for constants. Constant folding uses float32 arithmetic.
 
-Structured control flow is linearised by predication: if/else, switch, return and discard become select() and an
-accumulated discard predicate. A loop is unrolled while its continuation predicate folds to a constant (so a light loop
-over an empty light list disappears when its count is bound to 0); a loop whose trip count stays unknown poisons every
-register it writes with an 'unknown' node, so outputs that do not depend on it still translate.
+Structured control flow is linearised by predication: if/else, switch and return become select(), discard an accumulated
+discard predicate. A discarded pixel's registers are don't-care (its target is dropped), so a discard does not predicate
+later register writes: lanes keep computing as if it had not happened, which keeps a register one type when a program
+reuses it for a mask before the discard and a float after it. UAV stores stay gated by the discard.
+
+A loop is unrolled while its continuation predicate folds to a constant (so a light loop over an empty light list
+disappears when its count is bound to 0); a loop whose trip count stays unknown poisons every register it writes with an
+'unknown' node, so outputs that do not depend on it still translate.
 
 Constant buffer reads become 'input' nodes named '<cbuffer>.<variable>+<byte offset>' from the RDEF reflection;
 interpolants become 'input' nodes named '<semantic>.<component>'; texture samples and buffer loads become 'sample'/'load'
@@ -399,6 +403,9 @@ class Bindings:
     def resource(self, graph, op, binding, args):        # sample/ld on a named binding -> 4 node ids or None
         return None
 
+    def texture_size(self, binding):   # (width, height, depth or array size, mip count) of the texture bound there
+        return None
+
 
 def _cb_name(reflection, slot, byte):
     buffer = None
@@ -487,9 +494,12 @@ class Translator:
                 if e.mask >> c & 1:
                     self._inputs[(e.register, c)] = e
         self._indexable = {}
+        self._dimensions = {}     # t register -> declared resource dimension
         for d in shader.program.declarations:
             if d.opcode == 'dcl_indexabletemp':
                 self._indexable[d.data[0]] = (d.data[1], d.data[2])
+            elif d.opcode == 'dcl_resource' and d.operands:
+                self._dimensions[d.operands[0].indices[0][0]] = d.controls & 0x1F
 
     # ------------------------------------------------------------------ operands
     def _index(self, imm, rel):
@@ -724,10 +734,8 @@ class Translator:
                 c = g.boolean(self.read(ins.operands[0], 'i')[0])
                 if not ins.nonzero:
                     c = g.op('b_not', c)
-                hit = g.op('b_and', flow.active, c)
-                self.discard = g.op('b_or', self.discard, hit)
-                flow.active = g.op('b_and', flow.active, g.op('b_not', hit))
-                self.alive = g.op('b_and', self.alive, g.op('b_not', hit))
+                # Discarded lanes are don't-care for registers and targets: only the predicate records them.
+                self.discard = g.op('b_or', self.discard, g.op('b_and', flow.active, c))
                 i += 1
                 continue
             if op in ('case', 'default', 'endswitch', 'endif', 'endloop', 'else', 'label'):
@@ -754,7 +762,7 @@ class Translator:
         g = self.g
         saved_regs, saved_discard, saved_alive, saved_active = self.regs, self.discard, self.alive, flow.active
         saved_outer = self.outer
-        self.outer = g.op('b_and', saved_outer, entry)
+        self.outer = self._entered(entry)
         saved_states = [(s['broken'], s['continued']) for s in loops]
         self.regs = dict(saved_regs)
         self.discard, self.alive, flow.active = g.const('b', False), g.const('b', True), g.const('b', True)
@@ -768,6 +776,11 @@ class Translator:
         for state, (broken, continued) in zip(loops, saved_states):
             state['broken'], state['continued'] = broken, continued
         return result
+
+    def _entered(self, entry):
+        """Absolute entry predicate of a region entered by ``entry``: lanes that discarded before it do not enter it."""
+        g = self.g
+        return g.op('b_and', g.op('b_and', self.outer, g.op('b_not', self.discard)), entry)
 
     def _identity(self, loops):
         f = self.g.const('b', False)
@@ -839,9 +852,9 @@ class Translator:
         g = self.g
         entry = flow.active
         before, discard_before, alive_before = dict(self.regs), self.discard, self.alive
-        self.discard, self.alive = g.const('b', False), g.const('b', True)
         saved_outer = self.outer
-        self.outer = g.op('b_and', saved_outer, entry)
+        self.outer = self._entered(entry)
+        self.discard, self.alive = g.const('b', False), g.const('b', True)
         stores_before = len(self.stores)
         node_mark = len(g.nodes)
         predicated = 0
@@ -1071,7 +1084,7 @@ class Translator:
             self.stores.append(dict(binding=_binding_name(self.reflection, 'u', o[0].indices[0][0]),
                                     address=self.read(o[1], 'i'),
                                     values={lane: values[lane] for lane in self.lanes(o[0])},
-                                    active=g.op('b_and', self.outer, flow.active)))
+                                    active=self._entered(flow.active)))
             return
         if op == 'sync':
             return
@@ -1139,7 +1152,10 @@ class Translator:
         for e in extras:
             want = 'i' if op in ('ld_structured', 'ld_ms', 'gather4_po', 'gather4_po_c') and e in (2, 3) else 'f'
             args.extend(self.read(o[e], want))
-        bound = self.bindings.resource(g, op, binding, args)
+        if op == 'resinfo':
+            bound = self._resinfo(ins, register, binding, args)
+        else:
+            bound = self.bindings.resource(g, op, binding, args)
         rtype = 'f'
         if ins.return_types and ins.return_types[0] in (3, 4):
             rtype = 'i'
@@ -1156,6 +1172,33 @@ class Translator:
         swizzle = resource.selected()
         for lane in self.lanes(dst):
             self.write(dst, lane, channels[swizzle[lane]], ins.saturate, flow)
+
+
+    def _resinfo(self, ins, register, binding, args):
+        """resinfo of a texture whose size the bindings know, at a constant mip level: four constants, else None.
+
+        SM5: (width, height, depth or array size, mip count) by resource dimension, unused components 0; width, height
+        and depth at the level are max(1, size >> level), every size 0 past the last level; returned as float, as
+        reciprocals (rcpFloat, the mip count stays a float) or as uint (controls bits 0-1: 0, 1, 2)."""
+        g = self.g
+        size = self.bindings.texture_size(binding)
+        level = g.value(args[0]) if args else None
+        dimension = ins.resource_dimension or self._dimensions.get(register)
+        if size is None or level is None or dimension not in (2, 3, 4, 5, 6, 7, 8, 9, 10):
+            return None
+        width, height, depth, mips = size
+        inside = level < mips
+        at = lambda x: max(1, x >> level) if inside else 0   # noqa: E731
+        whole = depth if inside else 0
+        values = {2: (at(width), 0, 0), 7: (at(width), whole, 0), 5: (at(width), at(height), at(depth)),
+                  8: (at(width), at(height), whole), 9: (at(width), at(height), whole),
+                  10: (at(width), at(height), whole)}.get(dimension, (at(width), at(height), 0))
+        kind = ins.controls & 3
+        if kind == 2:
+            return [g.const('i', v) for v in values] + [g.const('i', mips)]
+        if kind == 1:
+            return [g.const('f', 1.0 / v if v else math.inf) for v in values] + [g.const('f', mips)]
+        return [g.const('f', v) for v in values] + [g.const('f', mips)]
 
 
 class Translation:

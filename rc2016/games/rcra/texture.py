@@ -141,6 +141,21 @@ def texture_header(source, texture_path):
     return dict(facts)
 
 
+def texture_size(source, texture_path):
+    """(width, height, array size, mip count) of the full texture as a program's resinfo sees it with every streamed mip
+    resident: the HD stream's top mip and both chains' mips (the SD chain starts where the HD mips end). Memoized."""
+    key = _entry(source, texture_path)
+    cache = source.__dict__.setdefault('_texture_size_cache', {})
+    if key not in cache:
+        info = parse_header(source.asset_data(key))
+        if info['hd_width']:
+            width, height, mips = info['hd_width'], info['hd_height'], info['hd_mips'] + info['sd_mips']
+        else:
+            width, height, mips = info['sd_width'], info['sd_height'], info['sd_mips']
+        cache[key] = (width, height, info['array_size'], max(1, mips))
+    return cache[key]
+
+
 def archive_textures(source):
     """Every texture in the install: [{'path', 'folder'}] sorted by path (no entry dicts built)."""
     from rc2016.viewer.textures import is_placeholder_texture

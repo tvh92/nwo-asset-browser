@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from rc2016.games.rcra import surface as rsurface
+from rc2016.games.rcra.texture import texture_size
 
 SRGB_FORMATS = frozenset({29, 72, 75, 78, 91, 93, 99})
 # DXGI float/integer formats as (numpy dtype, channels).
@@ -212,7 +213,7 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
         (('recipe', rsurface.surface),)
     for name, translate in passes:
         try:
-            results[name] = translate(graph, data)
+            results[name] = translate(graph, data, texture_sizes=lambda path: texture_size(source, path))
         except (rsurface.Unsupported, ValueError, KeyError) as error:
             errors[name] = '%s: %s' % (type(error).__name__, error)
     if 'recipe' not in results and 'forward' not in results:

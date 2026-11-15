@@ -171,6 +171,31 @@ class TranslatorTests(unittest.TestCase):
         for x, expected in ((0.2, True), (0.8, False)):
             self.assertEqual(sm5.evaluate(g, [tr.discard], {'TEXCOORD.x': x})[tr.discard], expected)
 
+    def test_writes_after_a_discard_are_not_predicated(self):
+        # A discarded pixel's registers are don't-care: the output is the plain expression, not a select on the clip.
+        source = 'float4 main(float4 a : TEXCOORD0) : SV_TARGET { clip(a.x - 0.5); return float4(a.y * 3, a.x, 0, 1); }'
+        tr = sm5.translate(dxbc.shader(compile_hlsl(source)))
+        g = tr.graph
+        self.assertEqual(g.nodes[tr.output(0, 0)]['op'], 'mul')
+        for x in (0.2, 0.8):
+            got = sm5.evaluate(g, [tr.output(0, 0), tr.discard], {'TEXCOORD.x': x, 'TEXCOORD.y': 2.0})
+            self.assertEqual(got[tr.output(0, 0)], 6.0)
+            self.assertEqual(got[tr.discard], x < 0.5)
+
+    def test_texture_size_folds_when_the_bindings_know_it(self):
+        source = """Texture2DArray t : register(t0); Texture3D v : register(t1);
+            float4 main() : SV_TARGET { uint w, h, n, m; t.GetDimensions(1, w, h, n, m);
+                float a, b, c; v.GetDimensions(a, b, c); return float4(w, h + n * 1000, m, a + b + c); }"""
+
+        class Sizes(sm5.Bindings):
+            def texture_size(self, binding):
+                return {'t': (256, 64, 3, 9), 'v': (16, 8, 4, 1)}[binding]
+        tr, out = run(source, bindings=Sizes())
+        self.assertEqual(tr.status(), 'ready')
+        self.assertEqual(out, [128.0, 32.0 + 3000.0, 9.0, 28.0])   # mip 1 halves width and height, not the array
+        loose, _ = run(source.replace('return', 'return v.Load(int4(0, 0, 0, 0)) + '), resource=lambda n, a: [0.0] * 4)
+        self.assertTrue(any(n['op'] == 'load' and n['opcode'] == 'resinfo' for n in loose.graph.nodes))
+
     def test_samples_and_named_constants(self):
         source = """struct S { float3 tint; float gloss; float4x4 m; };
             cbuffer Mat : register(b2) { S mat; float4 extra[2]; };

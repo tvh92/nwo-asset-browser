@@ -144,9 +144,10 @@ def graph_layout(data):
     the graph's float defaults. Section 0x1CAFE804 rows are (u32 string offset, u16, u16 unit, u64 slot hash)."""
     dat = data[36:]
     table = sections(dat)
-    if not {GRAPH_SLOT_TABLE, GRAPH_PARAM_RECORDS, GRAPH_DEFAULTS} <= set(table):
+    if not {GRAPH_SLOT_TABLE, GRAPH_PARAM_RECORDS, GRAPH_DEFAULTS} & set(table):
         raise ValueError('Material graph has no slot, parameter or default section')
-    offset, size = table[GRAPH_SLOT_TABLE]
+    # A graph without parameters lacks the parameter and default sections (some have only the slot table): empty parts.
+    offset, size = table.get(GRAPH_SLOT_TABLE, (0, 0))
     rows = []
     for at in range(offset, offset + size - 15, 16):
         name, _flags, unit, key, _high = struct.unpack_from('<IHHII', dat, at)
@@ -154,9 +155,9 @@ def graph_layout(data):
         if name >= len(dat) or stop < 0:
             raise ValueError('Material graph default texture string outside its data')
         rows.append((unit, key, dat[name:stop].decode('latin-1').replace('\\', '/').lower()))
-    offset, size = table[GRAPH_PARAM_RECORDS]
+    offset, size = table.get(GRAPH_PARAM_RECORDS, (0, 0))
     offsets = {key: at for at, _width, key in (struct.unpack_from('<HHI', dat, i) for i in range(offset, offset + size - 7, 8))}
-    offset, size = table[GRAPH_DEFAULTS]
+    offset, size = table.get(GRAPH_DEFAULTS, (0, 0))
     return rows, offsets, struct.unpack_from('<%df' % (size // 4), dat, offset)
 
 

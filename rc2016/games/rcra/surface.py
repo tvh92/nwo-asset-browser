@@ -67,11 +67,25 @@ REVIEW_VALUES = {'GlobalWorldCBuffer.m_AdaptedLuminance': 1.0, 'SV_POSITION.x': 
 class _Bindings(rshaders.NeutralEngine):
     """Material constants, the neutral engine and draw, and review values for every other non-geometry input."""
 
-    def __init__(self, material, reflection=None):
+    def __init__(self, material, reflection=None, units=None, texture_sizes=None):
         super().__init__(material)
         self.review = {}
         self.object = rshaders.object_words(reflection)
         self.object_read = False
+        self.units, self.texture_sizes = units or {}, texture_sizes
+        self.sized = set()
+
+    def texture_size(self, binding):
+        """The bound material texture's size (``texture_sizes(path)``), for the programs that query it (resinfo)."""
+        if binding not in self.units or self.texture_sizes is None:
+            return None
+        try:
+            size = self.texture_sizes(self.units[binding])
+        except (ValueError, KeyError, OSError):
+            return None
+        if size is not None:
+            self.sized.add(binding)
+        return size
 
     def resource(self, graph, op, binding, args):
         if binding == rshaders.OBJECT_BUFFER and op == 'ld_structured' and self.object is not None:
@@ -106,6 +120,8 @@ class _Bindings(rshaders.NeutralEngine):
         return self.graph.const('i', 0)
 
 
+SIZE_NOTE = ('Texture sizes the program queries (%s) are those of the full-resolution textures (every streamed mip resident); '
+             'array sizes and depths do not depend on streaming.')
 OBJECT_NOTE = (' Per-object values are a plain object: identity transform, alpha 1, white object colour, custom values, '
                'creation time and bias 0.')
 FORWARD_FLAGS_NAME = 'MatDrawCB.m_RenderFlags'
@@ -126,8 +142,8 @@ class _ForwardBindings(_Bindings):
             return self.graph.const('f', rshaders.FORWARD_VIEW_FLOATS[name])
         return super().constant(name)
 
-    def __init__(self, material, draw_flags, reflection=None):
-        super().__init__(material, reflection)
+    def __init__(self, material, draw_flags, reflection=None, units=None, texture_sizes=None):
+        super().__init__(material, reflection, units, texture_sizes)
         self.background_read = False
         self.draw_flags = draw_flags
 
@@ -318,14 +334,15 @@ def _split_select(g, i, condition):
     return i, i
 
 
-def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER):
-    """The material's surface terms as one expression DAG.
+def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes=None):
+    """The material's surface terms as one expression DAG. ``texture_sizes(path)`` gives a texture's (width, height, depth or
+    array size, mip count) for programs that query sizes (rc2016.games.rcra.texture.texture_size); without it they fail.
 
     Returns dict(graph, terms {name: node}, textures {binding: path}, inputs [names], limitations [text]).
     Raises Unsupported when the writer is not the engine packing or keeps non-portable operations."""
     shader = rshaders.pass_shader(graph_data, slot)
     cb2 = rshaders.material_constants(graph_data, material_data)
-    bindings = _Bindings(cb2, shader.reflection)
+    bindings = _Bindings(cb2, shader.reflection, rshaders.material_units(graph_data, material_data), texture_sizes)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = translator.run()
@@ -388,6 +405,8 @@ def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, wh
         raise Unsupported('%s depends on unknown values' % what)
     textures = {}
     units = rshaders.material_units(graph_data, material_data)
+    if bindings.sized:
+        limitations = list(limitations) + [SIZE_NOTE % ', '.join(sorted(bindings.sized))]
     for i in reach:
         n = g.nodes[i]
         if n['op'] == 'sample':
@@ -473,7 +492,7 @@ def _affine_split(g, root, names):
     return split(root)
 
 
-def forward(graph_data, material_data):
+def forward(graph_data, material_data, texture_sizes=None):
     """The forward program's target under the forward profile: colour (unclamped, HDR), alpha and the discard.
 
     Returns the same dict as ``surface`` with terms FORWARD_TERMS. Raises Unsupported when the target depends on anything
@@ -481,7 +500,8 @@ def forward(graph_data, material_data):
     shader = rshaders.pass_shader(graph_data, rshaders.SLOT_FORWARD)
     from rc2016.games.rcra.material import draw_flags
     flags = draw_flags(material_data)
-    bindings = _ForwardBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection)
+    bindings = _ForwardBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
+                                rshaders.material_units(graph_data, material_data), texture_sizes)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = translator.run()
