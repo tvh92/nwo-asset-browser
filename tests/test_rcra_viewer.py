@@ -94,6 +94,23 @@ class EmitterTests(unittest.TestCase):
         self.assertIn('rcraScene.g', source)
         self.assertNotIn('uSceneColour', rcra_glsl.fragment_source(_receipt('blended'))['source'])
 
+    def test_non_finite_constants_are_made_at_run_time(self):
+        receipt = _receipt('blended')
+        nodes = receipt['forward']['nodes'] + [dict(op='const', type='f', value=float('inf'), args=[]),
+                                               dict(op='const', type='f', value=float('nan'), args=[])]
+        terms = dict(receipt['forward']['terms'], **{'colour.r': len(nodes) - 2, 'colour.g': len(nodes) - 1})
+        receipt['forward'] = dict(receipt['forward'], nodes=nodes, terms=terms)
+        source = rcra_glsl.fragment_source(receipt)['source']
+        self.assertIn(rcra_glsl.NON_FINITE_DECLARATION.strip(), source)
+        self.assertIn('vec3 rcraColour = vec3(rcraInf, rcraNan,', source)
+        self.assertNotIn('uRcraZero', rcra_glsl.fragment_source(_receipt('blended'))['source'])
+
+    def test_nan_slice_index_reads_slice_zero(self):
+        from rc2016.games.rcra import blender_export
+        self.assertEqual(blender_export._slice_index(float('nan')), 0)
+        self.assertEqual(blender_export._slice_index(2.4), 2)
+        self.assertEqual(blender_export._slice_index(float('inf')), blender_export.ALL_SLICES)
+
     def test_forward_receipt_keeps_the_forward_discard_only(self):
         source = rcra_glsl.fragment_source(_receipt('blended'))['source']
         self.assertEqual(source.count('discard;'), 1)
@@ -312,6 +329,13 @@ class ViewportDrawTests(unittest.TestCase):
                 self.assertTrue(copies)
             finally:
                 root.destroy()
+
+    def test_non_finite_material_links(self):
+        def check(_view, receipt, _textures):
+            from rc2016.viewer import rcra_glsl
+            self.assertIn('uRcraZero', rcra_glsl.fragment_source(receipt)['source'])
+        self._link('characters/npc/npc_civ_average/animations/vertex_animations/cheer_stadium_suite/materials/'
+                   'cheer_stadium_npc_civ_average_01/cheer_stadium_npc_civ_average_01_arm_a.material', check)
 
     def test_fur_material_links(self):
         def check(_view, receipt, _textures):

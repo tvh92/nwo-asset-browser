@@ -129,7 +129,8 @@ def _translate(graph, data, source, program=None):
             results[name] = fn(graph, data, texture_sizes=lambda path: texture_size(source, path))
         except (rsurface.Unsupported, ValueError, KeyError) as error:
             errors[name] = str(error)
-    recipes = {name: rsurface.export_recipe(r) for name, r in results.items()}
+    # Constant NaN resolved by D3D rules (as the Blender export does): GLSL's min, max and clamp of NaN are undefined.
+    recipes = {name: rsurface.fold_nan(rsurface.export_recipe(r)) for name, r in results.items()}
     if blend == 'modulate' and 'forward' in recipes and bexp._reads_background(recipes['forward']):
         errors['forward'] = 'a modulate material that passes the scene behind through is not linear in it'
         del recipes['forward'], results['forward']

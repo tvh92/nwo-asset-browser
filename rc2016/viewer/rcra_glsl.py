@@ -55,10 +55,19 @@ LIMITATION = ('Viewer: the tangent frame comes from UV derivatives (the stored t
               'stand in for the game\'s lights.')
 
 
+# D3D's inf and NaN constants (a division by a zero profile value; NaN the receipt keeps after fold_nan): GLSL 1.20 has
+# no literal for them, so they are made at run time from a uniform that is never set (0 from the link), which the
+# compiler cannot fold: rcraInf = 1 / 0, rcraNan = 0 / 0.
+NON_FINITE_DECLARATION = 'uniform float uRcraZero;   // never set: 0, for inf and NaN at run time\n'
+NON_FINITE_LINE = '    float rcraInf = 1.0 / uRcraZero; float rcraNan = uRcraZero / uRcraZero;'
+
+
 def _literal(value):
     value = float(value)
-    if not math.isfinite(value):
-        raise ValueError('Non-finite recipe constant')
+    if value != value:
+        return 'rcraNan'
+    if math.isinf(value):
+        return 'rcraInf' if value > 0 else '(-rcraInf)'
     text = format(value, '.9g')
     return text if '.' in text or 'e' in text or 'n' in text else text + '.0'
 
@@ -294,6 +303,9 @@ def fragment_source(receipt):
     declarations += '\nuniform int %s;\n' % PASS_UNIFORM
     if scene:
         declarations += 'uniform sampler2D uSceneColour; uniform vec4 uSceneDepthInfo;   // frame copy, viewport size\n'
+    if any('rcraInf' in line or 'rcraNan' in line for line in body):
+        declarations += NON_FINITE_DECLARATION
+        body.insert(0, NON_FINITE_LINE)
     from rc2016.viewer.native_glsl import FRAME_HELPERS, HELPERS as NATIVE_HELPERS
     source = (_prefix() + declarations + NATIVE_HELPERS + FRAME_HELPERS + HELPERS + '\nvoid main() {\n'
               '    vec3 N = normalize(vNrm) * (gl_FrontFacing ? 1.0 : -1.0); sceneCaptureNormal = N;\n'

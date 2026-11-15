@@ -264,6 +264,14 @@ def merge_layouts(a, b):
     return ALL_SLICES
 
 
+def _slice_index(value):
+    """The array slice of a constant index: rounded; NaN reads slice 0, as D3D converts NaN to the integer 0, and an
+    infinite index is left to the run-time path (ALL_SLICES), which clamps it to the array."""
+    if value != value:
+        return 0
+    return int(round(value)) if math.isfinite(value) else ALL_SLICES
+
+
 def _slices(recipe):
     """{binding: slice} of the recipe's samples, ALL_SLICES where the slice is chosen at run time or differs, VOLUME for a
     3D texture, (CUBE, index) for a cube map. Raises Unsupported when a binding is sampled as a cube and as something else."""
@@ -276,7 +284,7 @@ def _slices(recipe):
             elif n.get('dimension') == rsurface.DIMENSION_TEXTURE3D:
                 index = VOLUME
             else:
-                index = 0 if z is None else (int(round(z['value'])) if z['op'] == 'const' else ALL_SLICES)
+                index = 0 if z is None else (_slice_index(z['value']) if z['op'] == 'const' else ALL_SLICES)
             merged = merge_layouts(slices.setdefault(n['binding'], index), index)
             if merged is None and VOLUME not in (slices[n['binding']], index):
                 raise rsurface.Unsupported('Texture %s is sampled as a cube map and differently' % n['binding'])
