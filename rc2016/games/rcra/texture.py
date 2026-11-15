@@ -112,7 +112,7 @@ def read_top_mip(source, texture_path, full):
     from rc2016.viewer.textures import SRGB_FORMATS
     full_size = (info['hd_width'], info['hd_height']) if info['hd_width'] else (info['sd_width'], info['sd_height'])
     return dict(path=texture_path, width=width, height=height, format=fmt, pixels=slices[0], slices=slices,
-                array_size=count, full_size=full_size, srgb=fmt in SRGB_FORMATS)
+                array_size=count, faces=info['faces'], full_size=full_size, srgb=fmt in SRGB_FORMATS)
 
 
 def load_texture(source, texture_path, hd=False):

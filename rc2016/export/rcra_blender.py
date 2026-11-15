@@ -16,6 +16,10 @@ Inputs the recipe reads, in Blender:
 - ``VIEW.xyz`` and ``CAMERA.xyz`` (forward recipes): the offset from the camera to the shaded point, -Incoming x View
   Distance, and the camera position, Position + Incoming x View Distance, both converted to game space.
 
+A cube map sample (``_Emitter.cube``) feeds the game direction, unconverted, to an Environment Texture on the equirectangular
+image that rc2016.games.rcra.blender_export writes; the image's pixels are the D3D cube lookup of the direction Blender maps
+to them, so the node returns the cube texel for the game direction.
+
 Vectors convert between game space (Y-up) and Blender (Z-up, the glTF importer's turn): game (x, y, z) = Blender (x, z, -y).
 
 BRDF group "RC RA Deferred BRDF", from the engine's class-0 deferred apply program (docs/rift-apart.md):
@@ -330,6 +334,9 @@ class _Emitter:
         image = self.images.get(n['binding'])
         if image is None:
             raise ValueError('No image for ' + n['binding'])
+        if isinstance(image, Cube):
+            self.samples[index] = self.cube(image, n)
+            return self.samples[index]
         u, v = self.value(n['args'][0]), self.value(n['args'][1])
         if isinstance(image, Volume):
             self.samples[index] = self.volume(image, u, v, self.value(n['args'][2]), n['binding'])
@@ -363,6 +370,25 @@ class _Emitter:
         self.samples[index] = channels
         return channels
 
+
+    def cube(self, cube, n):
+        """A cube map lookup along the game direction (the sample's first three address lanes) as the Vector of an Environment
+        Texture on the equirectangular image: u = 0.5 - atan2(y, x) / 2 pi, v = 0.5 + atan2(z, hypot(x, y)) / pi, the mapping
+        rc2016.games.rcra.blender_export.equirect_directions inverts. Alpha comes from the second image, or is 1."""
+        direction = self.node('ShaderNodeCombineXYZ')
+        for k in range(3):
+            self.feed(self.value(n['args'][k]), direction.inputs[k])
+
+        def look(image, label):
+            tex = self.node('ShaderNodeTexEnvironment', image=image, interpolation=self.interpolation)
+            tex.name = label
+            self.links.new(direction.outputs[0], tex.inputs['Vector'])
+            sep = self.node('ShaderNodeSeparateColor')
+            self.links.new(tex.outputs['Color'], sep.inputs[0])
+            return sep.outputs
+        rgb = look(cube.image, 'Unit %s cube' % n['binding'])
+        alpha = look(cube.alpha, 'Unit %s cube alpha' % n['binding'])[0] if cube.alpha is not None else 1.0
+        return [rgb[0], rgb[1], rgb[2], alpha]
 
     def volume(self, vol, u, v, z, binding):
         """Trilinear wrap lookup in a padded atlas: bilinear in the slices floor(s) and floor(s) + 1 (mod depth), s = z depth
@@ -492,7 +518,18 @@ class Volume:
         self.image, self.depth, self.columns, self.width, self.height = image, depth, columns, width, height
 
 
+class Cube:
+    """A cube map as an equirectangular image (rc2016.games.rcra.blender_export.write_cube_texture), and its alpha image."""
+
+    def __init__(self, image, alpha=None):
+        self.image, self.alpha = image, alpha
+
+
 def _load_row(row):
+    if 'cube' in row:
+        alpha = row['cube'].get('alpha')
+        return Cube(load_image(row['path'], row['colourspace'], row.get('kind', 'png'), row.get('width', 0), row.get('height', 0)),
+                    _load_row(alpha) if alpha else None)
     if 'slices' in row:   # a texture array sampled at a run-time slice: one image per slice
         return [_load_row(r) for r in row['slices']]
     if 'volume' in row:
@@ -625,7 +662,7 @@ def translated(material):
 def _images_missing(material, group):
     problems = []
     for node in group.nodes:
-        if node.type == 'TEX_IMAGE':
+        if node.type in ('TEX_IMAGE', 'TEX_ENVIRONMENT'):
             image = node.image
             if image is None or not (image.packed_file or image.has_data or image.size[0]):
                 problems.append('%s: %s has no image data' % (material.name, node.name))

@@ -978,12 +978,14 @@ class ModelViewport(_TkFrame):
                 linear_rgb = bool(texture.get('srgb')) and api != normal_api
                 cache_key = (path, 'native_srgb' if linear_rgb else 'native_linear')
                 if cache_key not in by_path:
-                    if not texture.get('pixels'):
+                    if not (texture.get('pixels') or texture.get('cube')):
                         self.shading_warning = 'Native texture pixels unavailable: ' + path
                         break
-                    name = self._upload_texture(texture, decode_srgb=linear_rgb,
-                                                mipmaps=False if texture.get('no_mipmaps') else None)   # atlases: tiles stay apart
-                    by_path[cache_key] = (name, linear_rgb) if name else None
+                    cube = bool(texture.get('cube'))   # Rift Apart cube map: six face dicts, a GL cube map at its top mip
+                    name = self._upload_cube(texture, decode_srgb=linear_rgb) if cube else \
+                        self._upload_texture(texture, decode_srgb=linear_rgb,
+                                             mipmaps=False if texture.get('no_mipmaps') else None)   # atlases: tiles stay apart
+                    by_path[cache_key] = (name, linear_rgb, cube) if name else None
                 if not by_path[cache_key]:
                     self.shading_warning = 'Native texture upload failed: ' + path
                     break
@@ -1056,12 +1058,7 @@ class ModelViewport(_TkFrame):
         gl = self._gl
         if mipmaps is None:
             mipmaps = self._mipmap_next
-        if self._compressed_upload is None:
-            gl.wglGetProcAddress.argtypes = [ctypes.c_char_p]; gl.wglGetProcAddress.restype = ctypes.c_void_p
-            address = gl.wglGetProcAddress(b"glCompressedTexImage2D")
-            prototype = ctypes.WINFUNCTYPE(None, ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_int,
-                                           ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
-            self._compressed_upload = prototype(address) if address else False
+        self._compressed_uploader()
         name = ctypes.c_uint(0)
         gl.glGetError()
         gl.glGenTextures(1, ctypes.byref(name))
@@ -1069,22 +1066,7 @@ class ModelViewport(_TkFrame):
         for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
                                  (self.GL_TEXTURE_WRAP_S, self.GL_REPEAT), (self.GL_TEXTURE_WRAP_T, self.GL_REPEAT)):
             gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
-        pixels = texture["pixels"]
-        compressed = False
-        if texture.get("gl_format") and self._compressed_upload:
-            srgb_formats = {72: 0x8C4D, 75: 0x8C4E, 78: 0x8C4F, 99: 0x8E8D}
-            internal = srgb_formats.get(texture.get('format'), texture['gl_format']) if decode_srgb else texture['gl_format']
-            self._compressed_upload(self.GL_TEXTURE_2D, 0, internal, texture["width"],
-                                    texture["height"], 0, len(pixels), pixels)
-            compressed = True
-        elif texture.get("gl_float"):   # float RGBA (Rift Apart data formats): GL_RGBA32F from GL_RGBA / GL_FLOAT
-            gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
-            gl.glTexImage2D(self.GL_TEXTURE_2D, 0, 0x8814, texture["width"], texture["height"], 0, 0x1908, 0x1406, pixels)
-        elif texture.get("gl_pixel_format"):
-            gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
-            internal = 0x8C43 if decode_srgb else texture['gl_pixel_format'] # SRGB8_ALPHA8: alpha remains linear
-            gl.glTexImage2D(self.GL_TEXTURE_2D, 0, internal, texture["width"], texture["height"],
-                            0, texture["gl_pixel_format"], self.GL_UNSIGNED_BYTE, pixels)
+        compressed = self._upload_image(self.GL_TEXTURE_2D, texture, decode_srgb)
         if gl.glGetError():
             # Driver rejected this format: show the material without it.
             gl.glDeleteTextures(1, ctypes.byref(name))
@@ -1095,6 +1077,65 @@ class ModelViewport(_TkFrame):
                 self.__dict__.setdefault("_mipmap_queue", deque()).append((name.value, compressed))
             else:
                 self._build_mipmaps(compressed)
+        return name.value
+
+    def _compressed_uploader(self):
+        """glCompressedTexImage2D (False when the driver lacks it), looked up once."""
+        if self._compressed_upload is None:
+            gl = self._gl
+            gl.wglGetProcAddress.argtypes = [ctypes.c_char_p]; gl.wglGetProcAddress.restype = ctypes.c_void_p
+            address = gl.wglGetProcAddress(b"glCompressedTexImage2D")
+            prototype = ctypes.WINFUNCTYPE(None, ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
+            self._compressed_upload = prototype(address) if address else False
+        return self._compressed_upload
+
+    def _upload_image(self, target, texture, decode_srgb=False):
+        """Level 0 of the bound texture's ``target`` (GL_TEXTURE_2D or a cube face) from a texture dict; True when it was a
+        block-compressed upload."""
+        gl = self._gl
+        pixels = texture["pixels"]
+        compressed = False
+        if texture.get("gl_format") and self._compressed_upload:
+            srgb_formats = {72: 0x8C4D, 75: 0x8C4E, 78: 0x8C4F, 99: 0x8E8D}
+            internal = srgb_formats.get(texture.get('format'), texture['gl_format']) if decode_srgb else texture['gl_format']
+            self._compressed_upload(target, 0, internal, texture["width"], texture["height"], 0, len(pixels), pixels)
+            compressed = True
+        elif texture.get("gl_float"):   # float RGBA (Rift Apart data formats): GL_RGBA32F from GL_RGBA / GL_FLOAT
+            gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
+            gl.glTexImage2D(target, 0, 0x8814, texture["width"], texture["height"], 0, 0x1908, 0x1406, pixels)
+        elif texture.get("gl_pixel_format"):
+            gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
+            internal = 0x8C43 if decode_srgb else texture['gl_pixel_format'] # SRGB8_ALPHA8: alpha remains linear
+            gl.glTexImage2D(target, 0, internal, texture["width"], texture["height"],
+                            0, texture["gl_pixel_format"], self.GL_UNSIGNED_BYTE, pixels)
+        return compressed
+
+    GL_TEXTURE_CUBE_MAP, GL_TEXTURE_CUBE_MAP_POSITIVE_X, GL_TEXTURE_CUBE_MAP_SEAMLESS = 0x8513, 0x8515, 0x884F
+
+    def _upload_cube(self, texture, decode_srgb=False):
+        """One GL cube map from ``texture['cube']``, six face dicts in +X, -X, +Y, -Y, +Z, -Z order with the top row first. D3D
+        and GL share the face table, so a lookup along the game's direction returns the D3D texel. The top mip, GL_LINEAR, clamped
+        (seamless across edges where the driver has it); 0 if the driver rejects a face."""
+        gl = self._gl
+        self._compressed_uploader()
+        name = ctypes.c_uint(0)
+        gl.glGetError()
+        gl.glGenTextures(1, ctypes.byref(name))
+        target = self.GL_TEXTURE_CUBE_MAP
+        gl.glBindTexture(target, name.value)
+        for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                 (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F), (0x8072, 0x812F)):
+            gl.glTexParameteri(target, parameter, value)
+        for k, face in enumerate(texture['cube']):
+            self._upload_image(self.GL_TEXTURE_CUBE_MAP_POSITIVE_X + k, face, decode_srgb)
+        if gl.glGetError():
+            gl.glDeleteTextures(1, ctypes.byref(name))
+            name.value = 0
+        else:
+            gl.glEnable(self.GL_TEXTURE_CUBE_MAP_SEAMLESS)   # GL 3.2 / ARB_seamless_cube_map; ignored where absent
+            gl.glGetError()
+        gl.glBindTexture(target, 0)
         return name.value
 
     def _build_mipmaps(self, compressed):
@@ -2003,7 +2044,8 @@ class ModelViewport(_TkFrame):
             for index, api in enumerate(sorted(textures)):
                 unit = TEXTURE_UNITS[index]
                 sh.glActiveTexture(self.GL_TEXTURE0 + unit)
-                gl.glBindTexture(self.GL_TEXTURE_2D, textures[api][0])
+                cube = len(textures[api]) > 2 and textures[api][2]   # a Rift Apart cube map (_upload_cube)
+                gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP if cube else self.GL_TEXTURE_2D, textures[api][0])
                 sh.glUniform1i(u[f'uNativeTex{api}'], unit)
             return
         for unit, role, has, srgb in ((PARALLAX_HEIGHT_TEXTURE_UNIT, "_parallax_height", "uHasParallaxHeight", None), (GLOW_PARALLAX_TEXTURE_UNIT, "_glow_parallax", "uHasGlowParallax", "uSrgbGlowParallax"), (TINT_DETAIL_TEXTURE_UNIT, "_tint_detail", "uHasTintDetail", "uSrgbTintDetail"), (0, "_c", "uHasC", "uSrgbC"), (1, "_g", "uHasG", "uSrgbG"), (2, "_n", "uHasN", None),

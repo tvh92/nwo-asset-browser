@@ -19,6 +19,7 @@ VOLUME = 'material/characters/hero/hero_mj_invisible_transition_01/dimension_swa
 PLACEHOLDER = 'characters/hero/hero_clank/materials/hero_clank_antennaglass.material'   # binds the float default_pink_shader_n
 SWARMER = 'characters/enemy/enm_neo_nefarious_swarmer/enm_neo_nefarious_swarmer.model'
 BUTTON = 'environment/clankpuzzles/cpz_gp_pressure_button_01.model'
+CUBE = 'material/character/enemy/enm_molonoth_robot/enm_dr_nefarious_laser_tube.material'   # forward program samples a cube map
 
 
 def _recipe(terms, extra=()):
@@ -177,6 +178,17 @@ class RealReceiptTests(unittest.TestCase):
         self.assertTrue(floats)
         self.assertEqual(len(floats[0]['pixels']), 16 * floats[0]['width'] * floats[0]['height'])
 
+    def test_cube_map_is_six_faces_in_a_samplercube(self):
+        receipt, textures = self.receipt(CUBE)
+        cubes = [b for b, layout in receipt['layouts'].items() if layout['kind'] == 'cube']
+        self.assertEqual(len(cubes), 1)
+        texture = textures[cubes[0]]
+        self.assertEqual(len(texture['cube']), 6)
+        self.assertTrue(all(len(face['pixels']) == len(texture['cube'][0]['pixels']) for face in texture['cube']))
+        self.assertEqual({(f['width'], f['height']) for f in texture['cube']}, {(texture['width'], texture['height'])})
+        self.assertIn('uniform samplerCube %s;' % rcra_glsl.uniform(cubes[0]), rcra_glsl.fragment_source(receipt)['source'])
+        self.assertTrue(any('Cube map' in line or 'cube map' in line for line in receipt['limitations']))
+
 
 @unittest.skipUnless(GAME and os.name == 'nt', 'RCRA_GAME is not set or not Windows')
 class ViewportDrawTests(unittest.TestCase):
@@ -208,6 +220,34 @@ class ViewportDrawTests(unittest.TestCase):
                 view._draw()
                 self.assertIsNone(view.shading_error)
                 self.assertIn('rcra', programs)
+            finally:
+                root.destroy()
+
+    def test_cube_material_links_and_uploads_its_cube_map(self):
+        with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
+            import tkinter as tk
+            from rc2016.games.rcra.material import _material_key
+            from rc2016.games.rcra.source import RcraSource
+            from rc2016.games.rcra.viewer_materials import material_receipt
+            from rc2016.viewer.viewport import ModelViewport
+            source = RcraSource(GAME, os.path.join(appdata, 'out'))
+            try:
+                receipt, textures = material_receipt(source, _material_key(source, CUBE))
+            finally:
+                source.close()
+            root = tk.Tk()
+            try:
+                root.geometry('64x64')
+                view = ModelViewport(root)
+                view.pack(fill='both', expand=True)
+                root.update()
+                if view._context_error or view._shading is None or not view._make_current():
+                    self.skipTest(view._context_error or 'no shading context')
+                program, _uniforms = view._shading.native_program(receipt, {})
+                self.assertTrue(program)
+                cube = next(t for t in textures.values() if t.get('cube'))
+                self.assertTrue(view._upload_cube(cube))
+                self.assertEqual(view._gl.glGetError(), 0)
             finally:
                 root.destroy()
 

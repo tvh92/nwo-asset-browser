@@ -8,7 +8,8 @@ material that passes the scene behind it through is not linear in it and keeps i
 
 Textures are viewer texture dicts (rc2016.viewer.textures shape). A binding sampled at one array slice uploads that slice as
 stored; a runtime-chosen slice or a 3D texture uploads a padded atlas of every slice (blender_export.volume_atlas), without
-mipmaps so tiles never mix. Float and 16-bit data formats, which the viewer's block uploads do not take, upload as float
+mipmaps so tiles never mix. A cube map is a texture dict whose ``cube`` holds its six face dicts (+X, -X, +Y, -Y, +Z, -Z, top
+row first, as stored); the viewport uploads them as a GL cube map at the top mip. Float and 16-bit data formats, which the viewer's block uploads do not take, upload as float
 RGBA (``gl_float``) with the stored values, missing channels following D3D (blender_export.texel_array).
 """
 from __future__ import annotations
@@ -19,6 +20,8 @@ from rc2016.games.rcra import blender_export as bexp, surface as rsurface
 from rc2016.viewer import rcra_glsl
 
 MAX_BINDINGS = 14   # rc2016.viewer.native_glsl.TEXTURE_UNITS
+CUBE_LIMITATION = ('Viewer: cube maps are the six stored faces in a GL cube map, looked up along the program\'s direction; '
+                   'exact apart from filtering across face edges (GL seamless cube maps where the driver has them).')
 RGBA8, RGBA8_SRGB, GL_RGBA = 28, 29, 0x1908
 
 
@@ -73,15 +76,31 @@ def translate(source, material_key):
 
 
 def _layouts(recipes):
-    """{binding: slice index | ALL_SLICES | VOLUME} over the recipes (blender_export._slices)."""
+    """{binding: slice index | ALL_SLICES | VOLUME | (CUBE, index)} over the recipes (blender_export._slices)."""
     slices = {}
     for recipe in recipes:
-        for binding, index in bexp._slices(recipe).items():
-            if slices.setdefault(binding, index) != index:
-                if bexp.VOLUME in (index, slices[binding]):
-                    raise NotTranslated('texture %s is sampled as a volume and as an array' % binding)
-                slices[binding] = bexp.ALL_SLICES
+        try:
+            layouts = bexp._slices(recipe)
+        except rsurface.Unsupported as error:
+            raise NotTranslated(str(error)) from error
+        for binding, index in layouts.items():
+            merged = bexp.merge_layouts(slices.setdefault(binding, index), index)
+            if merged is None:
+                raise NotTranslated('texture %s is sampled as a volume or a cube map and differently' % binding)
+            slices[binding] = merged
     return slices
+
+
+def _cube(texture, path, index):
+    """(cube texture dict, cube index): the six faces of cube ``index`` as face dicts, clamped to the cubes in the texture."""
+    slices = texture.get('slices', [texture['pixels']])
+    if texture.get('faces', 1) != 6:
+        raise NotTranslated('texture %s is sampled as a cube map but is not one' % path)
+    index = min(max(index, 0), len(slices) // 6 - 1)
+    faces = [_slice(texture, '%s#cube%d.%d' % (path, index, k), index * 6 + k) for k in range(6)]
+    cube = dict(path='%s#cube%d' % (path, index), width=texture['width'], height=texture['height'], format=texture['format'],
+                srgb=bool(texture.get('srgb')), cube=faces)
+    return cube, index
 
 
 def _float(data, path, **extra):
@@ -139,7 +158,12 @@ def material_receipt(source, material_key, hd=False):
         except (KeyError, OSError) as error:
             raise NotTranslated('texture %s: %s' % (path, error)) from error
         index = kinds.get(binding, 0)
-        if index in (bexp.ALL_SLICES, bexp.VOLUME):
+        if isinstance(index, tuple):
+            textures[binding], cube = _cube(texture, path, index[1])
+            layouts[binding] = dict(kind='cube', slice=cube)
+            if CUBE_LIMITATION not in limitations:
+                limitations.append(CUBE_LIMITATION)
+        elif index in (bexp.ALL_SLICES, bexp.VOLUME):
             textures[binding], grid = _atlas(texture, path)
             layouts[binding] = dict(grid, kind='volume' if index == bexp.VOLUME else 'array')
         else:

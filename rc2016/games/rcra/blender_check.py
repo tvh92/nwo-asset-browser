@@ -4,7 +4,9 @@
 
 For each material: the Blender entry (rc2016.games.rcra.blender_export) is built, rc2016/export/rcra_blender_check.py
 bakes every surface output of the emitted node tree on a UV-unit plane in Cycles, and the result is compared with the
-recipe evaluated by rc2016.shaders.sm5 for the same inputs and the same unit textures (bilinear repeat on both sides).
+recipe evaluated by rc2016.shaders.sm5 for the same inputs and the same unit textures (bilinear repeat on both sides). A cube
+map is compared with the exact D3D cube lookup of the stored faces (blender_export.cube_lookup), not with the equirectangular
+image Blender reads, so its difference includes the resampling.
 A blended material's forward colour and alpha are baked too, with the view inputs held at FORWARD_VIEW.
 Prints and returns the worst absolute difference per surface term.
 """
@@ -34,7 +36,26 @@ class Volume(list):
     """A 3D texture's slices (from its padded atlas)."""
 
 
-def load_unit(row):
+class CubeFaces:
+    """A cube map's six faces (6, n, n, 4), linear colour, as the program's sampler returns them."""
+
+    def __init__(self, faces):
+        self.faces = faces
+
+
+def load_cube(source, row):
+    from rc2016.games.rcra.texture import load_texture_full
+    texture = load_texture_full(source, row['source'])
+    index = row['cube']['slice']
+    faces = np.stack([blender_export.texel_array(texture, index * 6 + k) for k in range(6)])
+    if row['colourspace'] == 'sRGB':
+        faces[..., :3] = blender_export._srgb_to_linear(faces[..., :3])
+    return CubeFaces(faces)
+
+
+def load_unit(row, source=None):
+    if 'cube' in row:
+        return load_cube(source, row)
     if 'slices' in row:
         return [load_unit(r) for r in row['slices']]
     if 'volume' in row:
@@ -68,17 +89,21 @@ def bilinear(image, u, v):
 def window(entry, size):
     """(origin, span) of the baked UV window: each bake pixel covers at most a quarter of the largest texture's texel, so
     the bake's sub-pixel jitter (Cycles' minimum filter width) moves a lookup by a negligible fraction of a texel."""
-    widths = [r.get('volume', r).get('width', 1) for row in entry['images'].values() for r in row.get('slices', [row])]
+    widths = [r.get('volume', r).get('width', 1) for row in entry['images'].values() for r in row.get('slices', [row])
+              if 'cube' not in r]
     span = min(1.0, size / (4.0 * max(widths + [1])))
     return 0.3, span
 
 
-def expected(entry, size):
-    """{term: (size*size, 3)} from the recipe, pixel rows from Blender v = 0, plane normal +Z, tangent +X."""
-    units = {b: load_unit(row) for b, row in entry['images'].items()}
+def expected(entry, size, source=None):
+    """{term: (size*size, 3)} from the recipe, pixel rows from Blender v = 0, plane normal +Z, tangent +X. ``source`` reads a
+    cube map's faces."""
+    units = {b: load_unit(row, source) for b, row in entry['images'].items()}
 
     def sample(node, args):
         image = units[node['binding']]
+        if isinstance(image, CubeFaces):
+            return [float(c) for c in blender_export.cube_lookup(image.faces, args[:3])]
         if isinstance(image, Volume):   # trilinear, wrapping in depth
             s = args[2] * len(image) - 0.5
             k = math.floor(s)
@@ -132,7 +157,7 @@ def check(source, material_path, blender, folder, size=37):
     entry = blender_export.material_entry(source, material_path, Path(folder) / 'units')
     if 'error' in entry:
         raise rsurface.Unsupported(entry['error'])
-    want = expected(entry, size)
+    want = expected(entry, size, source)
     got = bake(entry, blender, size, folder)
     report = {}
     for name, values in want.items():

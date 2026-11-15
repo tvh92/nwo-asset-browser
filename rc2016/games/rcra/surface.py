@@ -48,7 +48,12 @@ SURFACE_TERMS = ('albedo.r', 'albedo.g', 'albedo.b', 'f0.r', 'f0.g', 'f0.b', 'gl
                  'occlusion', 'emission', 'clip')
 NORMAL_SCALE = 5791.205
 # SM5 resource dimensions of a sample instruction (its extended opcode token).
-DIMENSION_TEXTURE3D, CUBE_DIMENSIONS = 5, (6, 10)
+DIMENSION_TEXTURE3D, DIMENSION_CUBE, DIMENSION_CUBE_ARRAY = 5, 6, 10
+CUBE_DIMENSIONS = (DIMENSION_CUBE, DIMENSION_CUBE_ARRAY)
+# Lookups of a cube map that a renderer can answer from the direction alone (the mip level or bias argument is not applied).
+CUBE_OPCODES = ('sample', 'sample_l', 'sample_b', 'sample_d')
+CUBE_NOTE = 'Cube maps (%s) are read at their top mip along the direction the program computes.'
+CUBE_LOD_NOTE = " The explicit mip level, bias or gradients of its lookups (%s) are not applied."
 
 
 class Unsupported(ValueError):
@@ -407,19 +412,29 @@ def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, wh
     units = rshaders.material_units(graph_data, material_data)
     if bindings.sized:
         limitations = list(limitations) + [SIZE_NOTE % ', '.join(sorted(bindings.sized))]
+    cubes, cube_opcodes = set(), set()
     for i in reach:
         n = g.nodes[i]
         if n['op'] == 'sample':
             if n['binding'] not in units:
                 raise Unsupported('%s samples engine texture %s' % (what, n['binding']))
             if n.get('dimension') in CUBE_DIMENSIONS:
-                raise Unsupported('%s samples cube map %s, which an image lookup cannot address' % (what, n['binding']))
+                if n.get('opcode') not in CUBE_OPCODES:
+                    raise Unsupported('%s reads cube map %s with %s' % (what, n['binding'], n.get('opcode')))
+                if n['dimension'] == DIMENSION_CUBE_ARRAY and g.value(n['args'][3]) is None:
+                    raise Unsupported('%s samples cube array %s at a run-time index' % (what, n['binding']))
+                cubes.add(n['binding'])
+                if n['opcode'] != 'sample':
+                    cube_opcodes.add(n['opcode'])
             textures[n['binding']] = units[n['binding']]
         if n['op'] == 'load':
             raise Unsupported('%s loads from %s' % (what, n['binding']))
     inputs = sorted({g.nodes[i]['name'] for i in reach if g.nodes[i]['op'] == 'input'})
     engine = sorted(bindings.review)
     limitations = list(limitations)
+    if cubes:
+        limitations.append(CUBE_NOTE % ', '.join(sorted(cubes)) + (CUBE_LOD_NOTE % ', '.join(sorted(cube_opcodes))
+                                                                   if cube_opcodes else ''))
     if engine:
         limitations.append('Engine inputs at review values (translation-time, may not all reach the %s): ' % what.lower() +
                            ', '.join('%s = %g' % (name, bindings.review[name]) for name in engine))

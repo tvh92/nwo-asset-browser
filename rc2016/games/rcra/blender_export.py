@@ -18,8 +18,12 @@ writes every slice (up to MAX_SLICES), and the Blender material picks one by rou
 A 3D texture (flipbook volumes) is written as one atlas: its slices in a grid of ``columns``, each with a one-texel border
 copied from the opposite edge, so a bilinear lookup inside a tile wraps as the texture does; the Blender material samples
 the two slices around the depth coordinate and mixes them (trilinear, wrapping in depth).
+A cube map (``cube_equirect``) is written as one equirectangular image of 4 x face size by 2 x face size, which Blender's
+Environment Texture node reads with the game direction as its Vector: every pixel holds the D3D cube lookup of its direction
+(a cube array's constant slice picks the cube). A cube whose alpha is not 1 gets a second image of its alpha.
 """
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -46,6 +50,12 @@ BLEND_LIMITATIONS = {
 MAX_SLICES = 32
 ALL_SLICES = 'all'
 VOLUME = 'volume'
+CUBE = 'cube'   # a layout is (CUBE, index of the cube in the array)
+CUBE_LIMITATION = 'Cube map %s resampled to an equirectangular image (filtering differs at face seams and poles).'
+# D3D / GL cube lookup (the same table): per face +X, -X, +Y, -Y, +Z, -Z, the major axis and the (sc, tc) axes with signs.
+CUBE_FACE_AXES = (((0, 1.0), (2, -1.0), (1, -1.0)), ((0, -1.0), (2, 1.0), (1, -1.0)),
+                  ((1, 1.0), (0, 1.0), (2, 1.0)), ((1, -1.0), (0, 1.0), (2, -1.0)),
+                  ((2, 1.0), (0, 1.0), (1, -1.0)), ((2, -1.0), (0, -1.0), (1, -1.0)))
 
 
 def texel_array(texture, index=0):
@@ -119,9 +129,102 @@ def write_volume_texture(source, path, folder, cache=None):
     return row
 
 
-def _save(data, texture, stem, folder, path):
+def cube_lookup(faces, direction):
+    """D3D lookup of a cube map: ``faces`` (6, n, n, channels) in +X, -X, +Y, -Y, +Z, -Z order with the top row first,
+    ``direction`` (..., 3) in the cube's space. The major axis picks the face, s = (sc / |ma| + 1) / 2 and t = (tc / |ma| + 1) / 2
+    with t = 0 the top row (GL's table is the same), bilinear within the face (no filtering across edges)."""
+    d = np.asarray(direction, np.float64)
+    a = np.abs(d)
+    x_major = (a[..., 0] >= a[..., 1]) & (a[..., 0] >= a[..., 2])
+    y_major = ~x_major & (a[..., 1] >= a[..., 2])
+    face = np.where(x_major, np.where(d[..., 0] >= 0, 0, 1), np.where(y_major, np.where(d[..., 1] >= 0, 2, 3),
+                                                                      np.where(d[..., 2] >= 0, 4, 5)))
+    major = np.maximum(np.where(x_major, a[..., 0], np.where(y_major, a[..., 1], a[..., 2])), 1e-30)
+    axes = np.array([[[axis, sign] for axis, sign in face_axes] for face_axes in CUBE_FACE_AXES])   # (6, 3, 2)
+    n = faces.shape[1]
+    st = []
+    for k in (1, 2):   # sc, tc
+        axis = axes[face, k, 0].astype(int)
+        value = np.take_along_axis(d, axis[..., None], -1)[..., 0] * axes[face, k, 1]
+        st.append(np.clip(((value / major + 1.0) * 0.5) * n - 0.5, 0.0, n - 1.0))
+    (x, y) = st
+    x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)
+    x1, y1 = np.minimum(x0 + 1, n - 1), np.minimum(y0 + 1, n - 1)
+    fx, fy = (x - x0)[..., None], (y - y0)[..., None]
+    top = faces[face, y0, x0] * (1 - fx) + faces[face, y0, x1] * fx
+    bottom = faces[face, y1, x0] * (1 - fx) + faces[face, y1, x1] * fx
+    return top * (1 - fy) + bottom * fy
+
+
+def equirect_directions(width, height, rows=None):
+    """(rows, width, 3) directions of the equirectangular pixel centres, rows top first. Blender's Environment Texture reads
+    u = 0.5 - atan2(y, x) / 2 pi and v = 0.5 + atan2(z, hypot(x, y)) / pi (v = 1 at the top), so a pixel's direction is
+    (cos phi cos theta, sin phi cos theta, sin theta) with phi = (0.5 - u) 2 pi and theta = (v - 0.5) pi."""
+    rows = range(height) if rows is None else rows
+    u = (np.arange(width) + 0.5) / width
+    v = 1.0 - (np.asarray(list(rows)) + 0.5) / height
+    phi, theta = (0.5 - u)[None, :] * 2.0 * np.pi, (v - 0.5)[:, None] * np.pi
+    shape = (len(v), width)
+    return np.stack([np.broadcast_to(np.cos(phi) * np.cos(theta), shape), np.broadcast_to(np.sin(phi) * np.cos(theta), shape),
+                     np.broadcast_to(np.sin(theta), shape)], -1)
+
+
+def _srgb_to_linear(x):
+    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(x):
+    x = np.clip(x, 0.0, 1.0)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055)
+
+
+def cube_equirect(faces, srgb=False):
+    """(2n, 4n, 4) float32 equirectangular image of a cube map (``faces`` (6, n, n, 4), top row first): each pixel is the
+    cube lookup of its direction (``equirect_directions``). sRGB colour is filtered in linear light, as the hardware does."""
+    n = faces.shape[1]
+    width, height = 4 * n, 2 * n
+    data = faces.astype(np.float64)
+    if srgb:
+        data[..., :3] = _srgb_to_linear(data[..., :3])
+    out = np.empty((height, width, faces.shape[3]), np.float32)
+    for start in range(0, height, 64):
+        rows = range(start, min(height, start + 64))
+        out[rows.start:rows.stop] = cube_lookup(data, equirect_directions(width, height, rows))
+    if srgb:
+        out[..., :3] = _linear_to_srgb(out[..., :3])
+    return out
+
+
+def write_cube_texture(source, path, folder, index=0, cache=None):
+    """Write cube ``index`` of a cube texture as an equirectangular image; the row carries cube=dict(size, slice, alpha), alpha
+    the row of a second image (alpha in rgb, Non-Color) when the texture's alpha is not 1, else None."""
+    from rc2016.games.rcra.texture import load_texture_full
+    key = (path, CUBE, index)
+    if cache is not None and key in cache:
+        return cache[key]
+    texture = load_texture_full(source, path)
+    if texture.get('faces', 1) != 6:
+        raise rsurface.Unsupported('Texture %s is sampled as a cube map but is not one' % path)
+    cubes = len(texture['slices']) // 6
+    index = min(max(index, 0), cubes - 1)
+    faces = np.stack([texel_array(texture, index * 6 + k) for k in range(6)])
+    equirect = cube_equirect(faces, texture['format'] in SRGB_FORMATS)
+    stem = Path(path).stem + '_cube' + ('%d' % index if index else '')
+    row = _save(equirect, texture, stem, folder, path)
+    alpha = None
+    if np.any(faces[..., 3] != 1.0):
+        grey = np.repeat(equirect[..., 3:4], 4, -1)
+        grey[..., 3] = 1.0
+        alpha = _save(grey, texture, stem + '_alpha', folder, path, colourspace='Non-Color')
+    row['cube'] = dict(size=int(faces.shape[1]), slice=int(index), alpha=alpha)
+    if cache is not None:
+        cache[key] = row
+    return row
+
+
+def _save(data, texture, stem, folder, path, colourspace=None):
     folder.mkdir(parents=True, exist_ok=True)
-    colourspace = 'sRGB' if texture['format'] in SRGB_FORMATS else 'Non-Color'
+    colourspace = colourspace or ('sRGB' if texture['format'] in SRGB_FORMATS else 'Non-Color')
     if texture['format'] in FLOAT_FORMATS:
         target = folder / (stem + '.f32')
         target.write_bytes(np.ascontiguousarray(data, '<f4').tobytes())
@@ -135,23 +238,49 @@ def _save(data, texture, stem, folder, path):
                 source=path, format=int(texture['format']))
 
 
+def cube_index(recipe, node):
+    """Index of the cube a sample reads: 0 for a cube map, the rounded constant 4th address lane for a cube array."""
+    if node['dimension'] != rsurface.DIMENSION_CUBE_ARRAY:
+        return 0
+    z = recipe['nodes'][node['args'][3]]
+    if z['op'] != 'const':
+        raise rsurface.Unsupported('Cube array %s is sampled at a run-time index' % node['binding'])
+    return max(0, int(math.floor(z['value'] + 0.5)))
+
+
+def merge_layouts(a, b):
+    """The layout of a binding sampled as both ``a`` and ``b``: one array of every slice, or None when a volume or a cube is
+    sampled differently (they cannot share an image)."""
+    if a == b:
+        return a
+    if VOLUME in (a, b) or isinstance(a, tuple) or isinstance(b, tuple):
+        return None
+    return ALL_SLICES
+
+
 def _slices(recipe):
     """{binding: slice} of the recipe's samples, ALL_SLICES where the slice is chosen at run time or differs, VOLUME for a
-    3D texture."""
+    3D texture, (CUBE, index) for a cube map. Raises Unsupported when a binding is sampled as a cube and as something else."""
     slices = {}
     for n in recipe['nodes']:
         if n['op'] == 'sample':
             z = recipe['nodes'][n['args'][2]] if len(n['args']) > 2 else None
-            if n.get('dimension') == rsurface.DIMENSION_TEXTURE3D:
+            if n.get('dimension') in rsurface.CUBE_DIMENSIONS:
+                index = (CUBE, cube_index(recipe, n))
+            elif n.get('dimension') == rsurface.DIMENSION_TEXTURE3D:
                 index = VOLUME
             else:
                 index = 0 if z is None else (int(round(z['value'])) if z['op'] == 'const' else ALL_SLICES)
-            if slices.setdefault(n['binding'], index) != index:
-                slices[n['binding']] = ALL_SLICES
+            merged = merge_layouts(slices.setdefault(n['binding'], index), index)
+            if merged is None and VOLUME not in (slices[n['binding']], index):
+                raise rsurface.Unsupported('Texture %s is sampled as a cube map and differently' % n['binding'])
+            slices[n['binding']] = merged or ALL_SLICES
     return slices
 
 
 def _unit_images(source, path, folder, index, cache):
+    if isinstance(index, tuple):
+        return write_cube_texture(source, path, folder, index[1], cache)
     if index == VOLUME:
         return write_volume_texture(source, path, folder, cache)
     if index != ALL_SLICES:
@@ -168,10 +297,10 @@ def _images(source, results, folder, texture_cache):
     slices = {}
     for recipe, result in results:
         for binding, index in _slices(recipe).items():
-            if slices.setdefault(binding, index) != index:
-                if VOLUME in (index, slices[binding]):
-                    raise rsurface.Unsupported('Texture %s is sampled as a volume and as an array' % binding)
-                slices[binding] = ALL_SLICES
+            merged = merge_layouts(slices.setdefault(binding, index), index)
+            if merged is None:
+                raise rsurface.Unsupported('Texture %s is sampled as a volume or a cube map and differently' % binding)
+            slices[binding] = merged
     textures = {}
     for _recipe, result in results:
         textures.update(result['textures'])
@@ -240,6 +369,7 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
                                'Blender gets its opaque G-buffer surface.' % (blend, errors['forward']))
     if 'recipe' in results:
         limitations += results['recipe']['limitations']
+    limitations += [CUBE_LIMITATION % binding for binding, row in sorted(images.items()) if 'cube' in row]
     limitations += [
         'Tangent frame from Blender\'s UV0 tangent space (the stored vertex tangent is not decoded); bitangent along the '
         "game's -v, as in the viewer.",

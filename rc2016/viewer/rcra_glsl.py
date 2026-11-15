@@ -19,7 +19,10 @@ Inputs, in the viewer's varyings:
 
 Textures bind as uNativeTex<binding> (the native path's uniforms, so the viewport's binding code serves both games). A
 binding's layout is 'slice' (one 2D texture), 'array' (a padded atlas of every slice, picked by round(z), clamped) or
-'volume' (a padded atlas, trilinear in depth with wrap), as rc2016.games.rcra.blender_export writes them for Blender.
+'volume' (a padded atlas, trilinear in depth with wrap), as rc2016.games.rcra.blender_export writes them for Blender, or
+'cube' (a samplerCube of the six stored faces, looked up with the program's direction unchanged: D3D and GL share the face
+table and the top-row-first face images, so the lookup returns the D3D texel; the top mip, the program's explicit mip level
+is not applied).
 
 Lighting is the Rift Apart deferred BRDF on the viewer's review rig (docs/rift-apart.md): GGX with alpha = (0.9725 - 0.7514
 gloss)^2, the Smith joint visibility approximation, Schlick with F90 = 1, Lambert; occlusion on ambient light only.
@@ -31,7 +34,7 @@ import hashlib
 import json
 import math
 
-EMITTER_VERSION = 2
+EMITTER_VERSION = 3
 PASS_UNIFORM = 'uRcraPass'   # forward programs: 0 the multiply pass (background factor), 1 the colour pass
 COLOUR_VARYING = 'vRcraColour'
 GEOMETRY = {'TEXCOORD.x': 'vUV.x', 'TEXCOORD.y': 'vUV.y', 'TEXCOORD1.x': 'vUV1.x', 'TEXCOORD1.y': 'vUV1.y',
@@ -135,7 +138,9 @@ class _Emitter:
         u, v = self.value(n['args'][0]), self.value(n['args'][1])
         name = '%ss%d' % (self.prefix, i)
         sampler = uniform(binding)
-        if layout['kind'] == 'slice':
+        if layout['kind'] == 'cube':
+            expr = 'textureCube(%s, vec3(%s, %s, %s))' % (sampler, u, v, self.value(n['args'][2]))
+        elif layout['kind'] == 'slice':
             expr = 'texture2D(%s, vec2(%s, %s))' % (sampler, u, v)
         else:
             z = self.value(n['args'][2])
@@ -273,7 +278,8 @@ def fragment_source(receipt):
         colour = '(%s + rcraColour) * rcraAlpha' % lit if blend == 'blended' else 'rcraColour * rcraAlpha'
         body.append('    if (%s == 0) { sceneOutput(vec4(%s, 1.0)); return; }' % (PASS_UNIFORM, factor))
         body.append('    sceneOutput(vec4(display(%s), rcraAlpha));' % colour)
-    declarations = '\n'.join('uniform sampler2D %s;' % uniform(b) for b in sorted(layouts))
+    declarations = '\n'.join('uniform %s %s;' % ('samplerCube' if layouts[b]['kind'] == 'cube' else 'sampler2D', uniform(b))
+                             for b in sorted(layouts))
     declarations += '\nuniform int %s;\n' % PASS_UNIFORM
     from rc2016.viewer.native_glsl import FRAME_HELPERS, HELPERS as NATIVE_HELPERS
     source = (_prefix() + declarations + NATIVE_HELPERS + FRAME_HELPERS + HELPERS + '\nvoid main() {\n'

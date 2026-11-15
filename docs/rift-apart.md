@@ -546,13 +546,12 @@ Blended materials are drawn by their forward program (slot 1), which lights itse
 
 **The scene behind.** A program that samples the scene colour behind it (`g_FrameBuffer`: heat haze, shockwaves, water splats) binds the sample as symbolic `BACKGROUND.rgb`. `surface._affine_split` keeps it only when each colour channel is affine in its own background channel, colour = A + B × background (through add, negate, a multiply or divide by a free value, or a select on a free condition), and the alpha and discard do not read it. It then returns A as the colour and B as the `background` terms. Over the 45 materials it splits, A + B × background matches the unsplit program within 1.4 × 10⁻⁷ relative at random inputs. The sample's screen-space offset (the distortion) is dropped and labelled. A lit material that reads the scene stays unsupported: its background passes through the forward lighting, which the profile zeroes.
 
-**Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps are unsupported: an image lookup cannot address them.
+**Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps (`TextureCube`, and a `TextureCubeArray` read at a constant cube index) are sampled along the direction the program computes (the first three address lanes, in game space). The explicit mip level, bias or gradients of a cube lookup are not applied: the top mip is read, and the result says so. An array read at a run-time index, or a cube read by `gather` or `ld`, is unsupported. A cube texture's slices are its faces, six per cube in the order +X, -X, +Y, -Y, +Z, -Z, top row first.
 
-**Coverage:** 1,450 of 1,747 blended materials. Not translated:
+**Coverage:** 1,547 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated:
 - loops whose trip count depends on the pixel (45): parallax steps, ray marches, per-pixel volume flags
-- cube maps (77)
 - G-buffer reads (57), mostly screen effects and a few decals
-- lit materials that read the scene colour (27), and colour that is not affine in it (16)
+- lit materials that read the scene colour (46), and colour that is not affine in it (20)
 - integer arithmetic left in the colour (about 32)
 
 ### Per-object values
@@ -602,6 +601,7 @@ Each unit texture is written as stored. Missing channels follow D3D: green and b
 | 8-bit | RGBA PNG |
 | Float | Raw float32 RGBA (`.f32`), loaded into a packed float image |
 | Array, slice chosen at run time | Every slice; the material picks one by `round(slice)`, clamped |
+| Cube map | One equirectangular image, 4 × face size by 2 × face size, read by an Environment Texture node with the game direction as its Vector (Blender's `u = 0.5 − atan2(y, x) / 2π`, `v = 0.5 + atan2(z, hypot(x, y)) / π`). Each pixel holds the D3D cube lookup of its direction (major axis picks the face, `s = (sc / \|ma\| + 1) / 2`, bilinear within the face); sRGB colour is filtered in linear light. A cube whose alpha is not 1 gets a second image of its alpha. Filtering differs at face seams and poles (labelled) |
 | 3D (flipbook volumes) | One atlas of every slice, each tile with a one-texel border copied from its opposite edge; the material samples the two slices around `depth × z − 0.5` bilinearly and mixes them, wrapping in depth (trilinear, as D3D filters) |
 
 The colourspace follows the DXGI format: sRGB formats are `sRGB`, everything else `Non-Color`. Some material and graph strings double their path separators; they are normalised.
@@ -647,7 +647,7 @@ Export check: each export builds the `.blend` as a candidate, reopens it in a se
 `python -m rc2016.games.rcra.blender_check --game <install> --blender <blender.exe> --output-root <folder> <material> ...` bakes every surface output of the emitted node tree in Cycles. It compares the bake, texel by texel, with the recipe evaluated by the translator on the same textures:
 - **Window:** a UV window small enough that the bake's sub-pixel jitter stays below a texel.
 - **Results:** on one material from each of the ten most-used graphs, F0 and alpha are exact. Albedo and the normal agree within 2 × 10⁻³, and gloss, occlusion and emission within 8-bit rounding ties.
-- **Forward:** a blended material's forward colour, alpha and background tint are baked too, with the view held at fixed values (`FORWARD_VIEW`). On the trooper dome and the wine glass, colour agrees within 2 × 10⁻⁶ and alpha within 6 × 10⁻⁸; a 128-slice noise volume within 5 × 10⁻⁶.
+- **Forward:** a blended material's forward colour, alpha and background tint are baked too, with the view held at fixed values (`FORWARD_VIEW`). On the trooper dome and the wine glass, colour agrees within 2 × 10⁻⁶ and alpha within 6 × 10⁻⁸; a 128-slice noise volume within 5 × 10⁻⁶. A cube map is compared with the exact D3D lookup of its stored faces, so the difference includes the equirectangular resampling: on a laser-tube material the colour (values near 31) differs by at most 0.1, and on a synthetic cube with six different faces 93 % of the baked pixels agree within 0.02 and the rest sit on face seams.
 
 ### In the viewer
 
@@ -656,7 +656,7 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 | Part | Viewer |
 | --- | --- |
 | Inputs | UV0 and UV1, the world normal, the UV-derivative tangent frame (`native_glsl.FRAME_HELPERS`), the vertex colour, front face, and the view from `vTintViewOffset` |
-| Textures | A sampled array slice as stored. Arrays with a run-time slice and 3D textures as the padded atlas of the Blender export, without mipmaps. Float data formats as `RGBA32F`. |
+| Textures | A sampled array slice as stored. Arrays with a run-time slice and 3D textures as the padded atlas of the Blender export, without mipmaps. A cube map as a GL cube map of its six stored faces (face k to `GL_TEXTURE_CUBE_MAP_POSITIVE_X + k`, rows top first), top mip, linear, seamless where the driver has it: D3D and GL share the face table, so `textureCube` along the game direction returns the D3D texel. Float data formats as `RGBA32F`. |
 | Lighting | The review rig with the Rift Apart BRDF: GGX α = (0.9725 − 0.7514 gloss)², Smith joint approximation, Schlick F90 = 1, Lambert, occlusion on ambient light only |
 | Blending | Forward materials draw in the float scene target, tested but not writing depth. A multiply pass scales what is behind by the background factor (blended: mix(1, B, α); additive: 1 + αB; modulate: the tint). Then a colour pass adds the premultiplied colour, coverage blended over. |
 
@@ -690,4 +690,4 @@ python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --su
 - **Synthetic tests** build a small toc, dag and set of DSAR archives, a two-mesh model, texture and material assets, clips (plain and with a frame table) or skin batches (with a palette and a joint base).
 - **Real-install tests** read `RCRA_GAME` (the install folder) and skip when it is not set. They also compare bytes against ALERT's own TOC2 reader.
 
-`tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores). It skips without the DLL. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.
+`tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores). It skips without the DLL. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.
