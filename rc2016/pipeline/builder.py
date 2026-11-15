@@ -422,7 +422,7 @@ def make_rig(job):
     for row in rows:
         source.data.bones[row['name']]['source_joint_hash']=row['hash']
     rig=make_bake_rig(source,rows,'Source animation rig')
-    # The animated armature stays visible in saved Blender files, so its bones can be selected and inspected.
+    # In front of the geometry once a user unhides it (build() hides it before saving).
     rig.show_in_front=True
     helpers=rig.data.collections.new('Affine helpers')
     for bone in rig.data.bones:
@@ -518,7 +518,7 @@ def build(job):
     region_receipt['render_size']=fit_render_size(scene)
     embed('Render region.json',region_receipt)
     if job.get('veldin_look') and scene.get('lighting_source')!='veldin_capture':
-        toolkit=str(Path(job['veldin_look']['view_dir']).parent)
+        toolkit=str(Path(__file__).resolve().parent)
         if toolkit not in sys.path:sys.path.insert(0,toolkit)
         import game_look
         embed('Veldin game look.json',game_look.apply_veldin_look(scene,job['veldin_look']['view_dir']))
@@ -599,6 +599,11 @@ def build(job):
     # The game's bloom around self-lit materials (rc2016/pipeline/emitter_bloom.py): only with the game tonemap's compositor.
     from rc2016.pipeline import emitter_bloom
     emitter_bloom.add_emitter_bloom(scene)
+    # The two skeleton objects stay in the file for the animation, but are hidden in the viewport and the render.
+    for name in ('Original source skeleton','Source animation rig'):
+        skeleton=bpy.data.objects.get(name)
+        if skeleton is not None:
+            skeleton.select_set(False);skeleton.hide_set(True);skeleton.hide_render=True
     bpy.context.view_layer.update()
     # Columns in the shader editor (rc2016/pipeline/node_layout.py): built in, so no Blender add-on is needed.
     from rc2016.pipeline.node_layout import arrange_tree
