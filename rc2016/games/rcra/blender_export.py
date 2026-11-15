@@ -49,8 +49,9 @@ BLEND_LIMITATIONS = {
     'modulate': 'Modulate: the background multiplied by the colour (lerped to white by alpha), the standard factors for that '
                 'mode; the pipeline\'s blend state is not in the files.'}
 MAX_SLICES = 32
-# Recipes above this many operations are not built: a table lookup unrolled into selects (a 512-entry noise permutation
-# table, about 21,000 operations) takes Blender over 15 minutes to build and compile. The largest other recipe is 3,710.
+# Recipes above this many operations (after lookup_tables) are not built: Blender takes minutes to build and compile them.
+# Tables the compiler unrolled into select chains (512-entry noise permutations, about 21,000 operations each recipe) are
+# one lookup each; the largest recipe is then 3,710 operations.
 MAX_RECIPE_NODES = 10000
 ALL_SLICES = 'all'
 VOLUME = 'volume'
@@ -351,7 +352,7 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
             errors[name] = '%s: %s' % (type(error).__name__, error)
     if 'recipe' not in results and 'forward' not in results:
         return dict(error=errors.get('recipe') or errors.get('forward'), graph=graph_path, blend=blend)
-    recipes = {name: rsurface.export_recipe(result) for name, result in results.items()}
+    recipes = {name: rsurface.blender_recipe(rsurface.export_recipe(result)) for name, result in results.items()}
     for name in [n for n, r in recipes.items() if len(r['nodes']) > MAX_RECIPE_NODES]:
         errors[name] = 'Unsupported: %d operations, over the Blender limit of %d' % (len(recipes[name]['nodes']),
                                                                                      MAX_RECIPE_NODES)

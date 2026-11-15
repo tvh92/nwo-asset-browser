@@ -123,6 +123,46 @@ class CaseTests(unittest.TestCase):
             self.assertEqual(sm5.evaluate(g, [out['colour']], {'TEXCOORD.x': u})[out['colour']],
                              sm5.evaluate(g, [colour], {'TEXCOORD.x': u})[colour], u)
 
+    def test_select_chain_of_constants_becomes_a_lookup(self):
+        """A table the compiler unrolled (select(eq(X, k), table[k], ...)) is one lookup node with the same values: the
+        outer test of a repeated key wins, keys missing from the span fall through, and so do non-integer and outside X."""
+        g = sm5.Graph()
+        x = g.op('mul', g.input('TEXCOORD.x'), g.const('f', 1.0))
+        rest = g.op('mul', x, g.const('f', 0.5))
+        chain = rest
+        keys = [k for k in range(3, 30) if k != 17] + [5]   # the inner 5 is shadowed by the outer one
+        for k in reversed(keys):
+            chain = g.select(g.op('eq', x, g.const('f', float(k))), g.const('f', float(k * k % 23)), chain)
+        terms = {'colour': g.op('add', chain, g.input('TEXCOORD.y'))}
+        recipe = rsurface.export_recipe(dict(graph=g, terms=terms, textures={}, inputs=[], limitations=[]))
+        out = rsurface.lookup_tables(recipe)
+        lookups = [n for n in out['nodes'] if n['op'] == 'lookup']
+        self.assertEqual(len(lookups), 1)
+        self.assertEqual((lookups[0]['low'], len(lookups[0]['table']), lookups[0]['present'][17 - 3]), (3, 27, False))
+        self.assertLess(len(out['nodes']), 12)
+        for u in [float(k) for k in range(-2, 34)] + [4.5, 17.25]:
+            inputs = {'TEXCOORD.x': u, 'TEXCOORD.y': 0.25}
+            self.assertEqual(rsurface.evaluate_recipe(out, inputs, None), rsurface.evaluate_recipe(recipe, inputs, None), u)
+
+    def test_constant_nan_folds_by_d3d_rules(self):
+        """A NaN profile constant (a normalised zero vector) times the normal, saturated, then a clip test: the folded
+        recipe has no NaN left and evaluates the same."""
+        g = sm5.Graph()
+        nan = g.const('f', float('nan'))
+        n = g.op('add', g.op('mul', g.input('TEXCOORD2.x'), nan), g.op('mul', g.input('TEXCOORD2.y'), nan))
+        clip = g.op('lt', g.op('add', g.op('sat', n), g.const('f', -0.001)), g.const('f', 0.0))
+        low = g.op('max', g.op('mul', nan, g.input('TEXCOORD.x')), g.input('TEXCOORD.y'))
+        terms = {'clip': clip, 'low': low, 'never': g.op('eq', n, g.const('f', 0.0))}
+        recipe = rsurface.export_recipe(dict(graph=g, terms=terms, textures={}, inputs=[], limitations=[]))
+        out = rsurface.blender_recipe(recipe)
+        reach = sm5.Graph()
+        reach.nodes = out['nodes']
+        live = reach.reachable(list(out['terms'].values()))
+        self.assertFalse([i for i in live if out['nodes'][i]['op'] == 'const' and out['nodes'][i]['value'] != out['nodes'][i]['value']])
+        inputs = {'TEXCOORD2.x': 0.0, 'TEXCOORD2.y': 1.0, 'TEXCOORD.x': 0.5, 'TEXCOORD.y': 0.25}
+        self.assertEqual(rsurface.evaluate_recipe(out, inputs, None), rsurface.evaluate_recipe(recipe, inputs, None))
+        self.assertEqual(rsurface.evaluate_recipe(out, inputs, None), {'clip': True, 'low': 0.25, 'never': False})
+
     def test_fields_packed_and_read_back_are_their_values(self):
         """A word packed from quantised floats (shifted fields, a bfi flag) and read back by and, ubfe and ushr."""
         g = sm5.Graph()

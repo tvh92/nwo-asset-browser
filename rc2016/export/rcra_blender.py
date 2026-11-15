@@ -42,6 +42,7 @@ adds the G-buffer surface lit by Blender (its emission left to the forward colou
 """
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import bpy
@@ -150,7 +151,7 @@ class _Emitter:
         self.recipe, self.images = recipe, images
         self.uv_maps, self.colour_attribute = uv_maps, colour_attribute
         self.interpolation = interpolation
-        self.memo, self.inputs, self.samples = {}, {}, {}
+        self.memo, self.inputs, self.samples, self.tables, self.specials = {}, {}, {}, {}, {}
         self.count = 0
 
     def node(self, kind, **props):
@@ -168,10 +169,22 @@ class _Emitter:
         return n.outputs[0]
 
     def feed(self, value, socket):
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float)) and math.isfinite(value):
             socket.default_value = float(value)
+        elif isinstance(value, (int, float)):   # a socket default does not keep inf or NaN; D3D arithmetic does
+            self.links.new(self.non_finite(value), socket)
         else:
             self.links.new(value, socket)
+
+    def non_finite(self, value):
+        """An output holding inf, -inf or NaN: Exponent(10000) overflows float32 to +inf in Cycles and EEVEE, and NaN is
+        inf - inf (Cycles folds x * 0 to 0, so inf * 0 would not stay NaN)."""
+        key = 'nan' if value != value else ('+inf' if value > 0 else '-inf')
+        if key not in self.specials:
+            inf = self.math('EXPONENT', 10000.0)
+            self.specials[key] = (inf if key == '+inf' else self.math('SUBTRACT', inf, inf) if key == 'nan' else
+                                  self.math('MULTIPLY', inf, -1.0))
+        return self.specials[key]
 
     # A value is a float or an output socket. Constants stay floats so they become socket defaults.
     def value(self, index):
@@ -179,12 +192,13 @@ class _Emitter:
             return self.memo[index]
         nodes = self.recipe['nodes']
         # Operation arguments first, in post-order without recursion: folded case chains run thousands of selects deep.
-        stack, order = [(index, False)], []
+        stack, order, seen = [(index, False)], [], set()
         while stack:
             i, done = stack.pop()
             if done:
                 order.append(i)
-            elif i not in self.memo and nodes[i]['op'] not in LEAF_OPS:
+            elif i not in seen and i not in self.memo and nodes[i]['op'] not in LEAF_OPS:
+                seen.add(i)   # shared subexpressions are walked once
                 stack.append((i, True))
                 stack.extend((x, False) for x in nodes[i]['args'])
         for i in order:
@@ -207,7 +221,7 @@ class _Emitter:
             v = 0.0   # derivatives of a constant-rate surface; the game's screen-space derivative is not available
         else:
             a = [self._value(x) for x in n['args']]
-            v = self.operation(op, a)
+            v = self.lookup(n, *a) if op == 'lookup' else self.operation(op, a)
         self.memo[index] = v
         return v
 
@@ -220,8 +234,8 @@ class _Emitter:
             return self.math(MATH[op], *a)
         if op == 'neg':
             return self.math('MULTIPLY', a[0], -1.0)
-        if op == 'sat':
-            return self.math('ADD', a[0], 0.0, clamp=True)
+        if op == 'sat':   # D3D saturate takes NaN to 0; a clamped Add passes it on, Maximum (fmaxf) does not
+            return self.math('MINIMUM', self.math('MAXIMUM', a[0], 0.0), 1.0)
         if op == 'rcp':
             return self.math('DIVIDE', 1.0, a[0])
         if op == 'log2':
@@ -350,6 +364,44 @@ class _Emitter:
         raise ValueError('Recipe input not available in Blender: ' + name)
 
     # -- textures
+    def lookup(self, n, x, rest):
+        """A table lookup (surface.lookup_tables): table[X - low] where X is an integer in the table and the entry is present,
+        else rest. The table is a one-row float32 image (R value, G present), read at the texel centre with Closest."""
+        width = len(n['table'])
+        key = (n['low'], tuple(n['table']), tuple(n['present']))
+        if key not in self.tables:
+            image = bpy.data.images.new('RC RA lookup %d' % len(self.tables), width=width, height=1, float_buffer=True,
+                                        alpha=True)
+            image.colorspace_settings.name = 'Non-Color'
+            image.use_half_precision = False
+            pixels = []
+            for value, present in zip(n['table'], n['present']):
+                pixels += [value, 1.0 if present else 0.0, 0.0, 1.0]
+            image.pixels.foreach_set(pixels)
+            image.file_format = 'OPEN_EXR'   # packed as float32 EXR: the values survive saving exactly
+            image.pack()
+            self.tables[key] = image
+        if isinstance(x, float):   # a constant index: the chain's own answer
+            k = x - n['low']
+            inside = x == int(x) and 0 <= k < width and n['present'][int(k)]
+            return float(n['table'][int(k)]) if inside else rest
+        index = self.math('SUBTRACT', x, float(n['low']))
+        combine = self.node('ShaderNodeCombineXYZ')
+        self.feed(self.math('DIVIDE', self.math('ADD', index, 0.5), float(width)), combine.inputs[0])
+        combine.inputs[1].default_value = 0.5
+        tex = self.node('ShaderNodeTexImage', image=self.tables[key], interpolation='Closest', extension='EXTEND')
+        tex.name = 'Lookup %d' % n['low']
+        self.links.new(combine.outputs[0], tex.inputs['Vector'])
+        sep = self.node('ShaderNodeSeparateColor')
+        self.links.new(tex.outputs['Color'], sep.inputs[0])
+        whole = self.node('ShaderNodeMath', operation='COMPARE')   # X is an integer: eq(X, key) can hold
+        self.links.new(x, whole.inputs[0])
+        self.feed(self.math('ROUND', x), whole.inputs[1])
+        whole.inputs[2].default_value = 0.0
+        inside = self.math('MULTIPLY', self.math('GREATER_THAN', index, -0.5), self.math('LESS_THAN', index, width - 0.5))
+        hit = self.math('MULTIPLY', self.math('MULTIPLY', whole.outputs[0], inside), sep.outputs[1])
+        return self.operation('select', [hit, sep.outputs[0], rest])
+
     def sample(self, index):
         if index in self.samples:
             return self.samples[index]

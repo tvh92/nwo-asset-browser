@@ -573,7 +573,7 @@ A Blender export (`.blend`, FBX or USD, through `rc2016/export/blender_convert.p
 | --- | --- |
 | `rc2016/games/rcra/surface.py` | Translates the G-buffer writer (slot 4) and unpacks the engine's packing into surface terms: a recipe. For blended materials it also translates the forward program (slot 1) into colour and alpha. |
 | `rc2016/games/rcra/blender_export.py` | The `Game.blender_materials` hook: recipes and unit textures, written as `rcra_materials.json` beside the export |
-| `rc2016/export/rcra_blender.py` | Runs in Blender: the "RC RA Deferred BRDF" group, and one Math node per recipe operation. A division by a constant 0 (a neutral profile value) is x × Exponent(10000), which is x × inf as in D3D; Blender's Divide alone returns 0 |
+| `rc2016/export/rcra_blender.py` | Runs in Blender: the "RC RA Deferred BRDF" group, and one Math node per recipe operation. A division by a constant 0 (a neutral profile value) is x × Exponent(10000), which is x × inf as in D3D; Blender's Divide alone returns 0. A `lookup` (below) is a one-row float32 image read with Closest. Saturate is Maximum then Minimum, which drop NaN as D3D does |
 
 ### Surface terms
 
@@ -594,6 +594,10 @@ Values a material does not own are bound and listed in its limitations:
 **Coverage:** 5,689 of 5,721 materials; 29 have no material graph. The other three are reported with a reason (`rc2016.games.rcra.surface.Unsupported`): a normal word with no packed normal, a byte pair that is not the engine packing, and float bits reinterpreted from integers (`bits2f`).
 
 The emission alpha is decoded from the engine encoding `0.2 log2(min(E, 31) + 1)`, and also from the form the compiler folds it into (`0.2 log2 Y`, with the clamp dropped or the 1 merged into other constants). That form decodes as `E = clamp(Y, 1, 32) − 1`, which is what the deferred apply reads back from the target's [0, 1] alpha.
+
+**Lookup tables.** Some programs index a table the compiler unrolled into select chains: `select(eq(X, k), table[k], …)` over every key. The noise in the god rays, search lights and wind quads reads a 512-entry permutation table (151, 160, 137, …) and its 12 gradients, 24 to 28 chains of about 511 links. That is about 21,000 recipe operations. Blender's node creation slows as a tree grows (about 3 minutes for 5,000 nodes), so a tree that size is out of reach. For the Blender export, `surface.lookup_tables` turns each chain of at least 16 integer keys over one X into a `lookup` node (`low`, `table`, `present`, args X and the rest of the chain), so those recipes have 366 to 2,858 operations. `rcra_blender` emits it as a one-row float32 image (R the value, G whether the key is present), packed as EXR, read at the texel centre with Closest. A key that is outside the table, not an integer or absent falls through to the rest of the chain, as the selects do. `evaluate_recipe` expands lookups back into the chain.
+
+**NaN constants.** A neutral profile value can leave a NaN constant in a recipe (a normalised zero vector in `cpz_spotlight_godray`'s clip). D3D carries it: arithmetic on NaN is NaN, saturate of NaN is 0, min and max return the other operand, and comparisons are false. Cycles runs with fast math and does not keep NaN, so `surface.fold_nan` resolves constant NaN by those rules before the Blender export builds the recipe (`surface.blender_recipe` is both rewrites). The folded recipe evaluates the same as the original. Recipes still over 10,000 operations (`blender_export.MAX_RECIPE_NODES`) are exported as untranslated, with the count as the reason; none are left.
 
 ### Textures
 
@@ -677,7 +681,6 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 ### Not translated
 
 - **Blended materials whose forward program does not translate** (66 of 1,747): Blender gets their G-buffer surface, opaque.
-- **Recipes over 10,000 operations** (`blender_export.MAX_RECIPE_NODES`): 12 forward programs and one G-buffer writer. Most read a 512-entry table (a noise permutation) that the translation unrolls into about 21,000 selects, which Blender takes over 15 minutes to build. They are exported as if they did not translate, with the operation count as the reason.
 - **Forward lighting:** the forward program's own light loop is not used. Blender's lights shade the G-buffer surface instead, which assumes that the forward program lights the same terms as the deferred apply.
 - **Lighting classes 1 to 5:** skin, hair and the other special classes need their own apply programs. They are lit with class 0.
 

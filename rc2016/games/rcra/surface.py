@@ -23,6 +23,7 @@ alpha. It reads the view through the inputs VIEW.xyz (camera-to-point offset) an
 program that samples the scene behind it (g_FrameBuffer) is kept when each colour channel is affine in that channel of the
 background: colour = A + B x background, split into the terms colour (A) and background (B).
 """
+import math
 from collections import defaultdict
 
 from rc2016.games.rcra import shaders as rshaders
@@ -928,9 +929,132 @@ def export_recipe(result):
                 inputs=result['inputs'], limitations=result['limitations'])
 
 
+LOOKUP_MIN = 16      # shorter select chains stay selects
+LOOKUP_SIZE = 4096   # at most this many table entries (key span)
+
+
+def _lookup_link(nodes, i):
+    """(X, key, value, rest) of select(eq(X, constant key), constant value, rest), else None."""
+    n = nodes[i]
+    if n['op'] != 'select' or n.get('type') == 'b':
+        return None
+    c = nodes[n['args'][0]]
+    if c['op'] != 'eq':
+        return None
+    x, k = c['args']
+    if nodes[k]['op'] != 'const':
+        x, k = k, x
+    value = nodes[n['args'][1]]
+    if nodes[k]['op'] != 'const' or nodes[x]['op'] == 'const' or value['op'] != 'const':
+        return None
+    key = float(nodes[k]['value'])
+    if not math.isfinite(key) or key != int(key):
+        return None
+    return x, int(key), float(value['value']), n['args'][2]
+
+
+def _lookup(nodes, i):
+    """A lookup node for the select chain at ``i`` (each link tests the same X against an integer constant), else None."""
+    first = _lookup_link(nodes, i)
+    if first is None:
+        return None
+    x, entries, rest = first[0], {}, i
+    while True:
+        link = _lookup_link(nodes, rest)
+        if link is None or link[0] != x:
+            break
+        entries.setdefault(link[1], link[2])   # the outermost test of a key wins, as in the chain
+        rest = link[3]
+    if len(entries) < LOOKUP_MIN or max(entries) - min(entries) >= LOOKUP_SIZE:
+        return None
+    low = min(entries)
+    table = [entries.get(low + k) for k in range(max(entries) - low + 1)]
+    return dict(op='lookup', type='f', args=[x, rest], low=low, table=[0.0 if v is None else v for v in table],
+                present=[v is not None for v in table])
+
+
+def lookup_tables(recipe):
+    """``recipe`` with each select chain that tests one value against integer constants (a table the compiler unrolled,
+    such as a noise permutation) as one ``lookup`` node: args [X, rest], ``table[k]`` the value for X = low + k where
+    ``present[k]``, else rest. Unreachable nodes are dropped. The terms are unchanged (evaluate_recipe expands lookups)."""
+    nodes = recipe['nodes']
+    out, seen, stack = {}, set(), list(recipe['terms'].values())
+    while stack:
+        i = stack.pop()
+        if i in seen:
+            continue
+        seen.add(i)
+        out[i] = _lookup(nodes, i) or dict(nodes[i])
+        stack.extend(out[i]['args'])
+    if all(n['op'] != 'lookup' for n in out.values()):
+        return recipe
+    order = sorted(out)
+    index = {old: new for new, old in enumerate(order)}
+    new = []
+    for old in order:
+        n = out[old]
+        n['args'] = [index[a] for a in n['args']]
+        new.append(n)
+    return dict(recipe, nodes=new, terms={k: index[v] for k, v in recipe['terms'].items()})
+
+
+NAN_PROPAGATES = {'add', 'mul', 'div', 'neg', 'abs', 'exp2', 'log2', 'rsq', 'sqrt', 'rcp', 'frc', 'round_ne', 'round_ni',
+                  'round_pi', 'round_z', 'mad', 'dp2', 'dp3', 'dp4', 'sin', 'cos'}
+
+
+def fold_nan(recipe):
+    """``recipe`` with constant NaN resolved by D3D rules (a neutral profile value can leave one, such as a normalised
+    zero vector): arithmetic on NaN is NaN, saturate of NaN is 0, min and max return the other operand, comparisons are
+    false (ne true). Renderers whose arithmetic does not keep NaN (Cycles runs with fast math) then get the same values."""
+    nodes = [dict(n) for n in recipe['nodes']]
+    nan = [n['op'] == 'const' and isinstance(n.get('value'), float) and n['value'] != n['value'] for n in nodes]
+    if not any(nan):
+        return recipe
+    changed = False
+    for i, n in enumerate(nodes):   # arguments come before their users
+        args, op = n['args'], n['op']
+        hit = [nan[a] for a in args]
+        if not any(hit) or op == 'select':
+            continue
+        if op in NAN_PROPAGATES:
+            nodes[i] = dict(op='const', type='f', value=float('nan'), args=[])
+        elif op == 'sat':
+            nodes[i] = dict(op='const', type='f', value=0.0, args=[])
+        elif op in ('min', 'max'):
+            nodes[i] = dict(nodes[args[hit.index(False)]]) if not all(hit) else dict(nodes[args[0]])
+        elif op in ('eq', 'lt', 'ge', 'ne'):
+            nodes[i] = dict(op='const', type='b', value=op == 'ne', args=[])
+        else:
+            continue
+        nan[i] = nodes[i]['op'] == 'const' and nodes[i]['type'] == 'f' and nodes[i]['value'] != nodes[i]['value']
+        changed = True
+    return dict(recipe, nodes=nodes) if changed else recipe
+
+
+def blender_recipe(recipe):
+    """The recipe as the Blender export builds it: constant NaN folded (fold_nan), unrolled tables as lookups."""
+    return lookup_tables(fold_nan(recipe))
+
+
+def _expand_lookups(nodes):
+    """Lookup nodes back as the select chains they stand for (appended nodes; each lookup becomes its head select)."""
+    for i in [i for i, n in enumerate(nodes) if n['op'] == 'lookup']:
+        n = nodes[i]
+        x, cur = n['args']
+        links = [(n['low'] + k, v) for k, (v, p) in enumerate(zip(n['table'], n['present'])) if p]
+        for key, value in reversed(links):
+            nodes.append(dict(op='const', type='f', value=float(key), args=[]))
+            nodes.append(dict(op='eq', type='b', args=[x, len(nodes) - 1]))
+            nodes.append(dict(op='const', type='f', value=float(value), args=[]))
+            nodes.append(dict(op='select', type='f', args=[len(nodes) - 2, len(nodes) - 1, cur]))
+            cur = len(nodes) - 1
+        nodes[i] = dict(nodes[cur])
+
+
 def evaluate_recipe(recipe, inputs, sample):
     """Evaluate a recipe's terms numerically (reference for emitter checks). ``sample(node, args) -> 4 floats``."""
     graph = sm5.Graph()
     graph.nodes = [dict(n) for n in recipe['nodes']]
+    _expand_lookups(graph.nodes)
     values = sm5.evaluate(graph, list(recipe['terms'].values()), defaultdict(float, inputs), sample)
     return {name: values[i] for name, i in recipe['terms'].items()}
