@@ -17,8 +17,12 @@ rest SQT within quantization; docs/rift-apart.md). Four things differ from 2016:
   0x3A7B4855 samples    with flag 0x10000: round(seconds * fps) + 1 u16 stored-sample indices (one per
                         frame, plus a closing one when the frame count leaves out the end pose),
                         zero-padded to 16 bytes, then the stored samples (a clip that repeats poses
-                        stores each once); without it, frame i is stored sample i
+                        stores each once); without it, frame i is stored sample i, and one clip
+                        stores an uncounted closing pose after them
   0xA3B26640 joints     joint hashes (game CRC-32 of the joint names) with an 0xFFFFFFFF terminator
+
+An additive clip may give a joint the packed scale 0x8000 on every axis: a joint the layer does not scale,
+read as one by ``animation_transforms.packed_scales``.
 
 Clips without joint tracks (only custom float tracks, sections 0x14014CB6/0x116EB684) are not skeletal and
 raise ``UnsupportedClipError``. Root motion (0x3976E44C, 0xE08AA35F), triggers, morph and face sections
@@ -176,9 +180,12 @@ def decode_clip(data, names=None, first_frames=None, label=''):
         order = order[:frames]   # a closing entry repeats a pose (the first, on a loop); the header counts frames
         samples = payload[table_bytes:]
     else:
-        # A clip without a frame table stores one sample per frame, sometimes one more (the closing pose).
+        # A clip without a frame table stores one sample per frame, sometimes one more (the closing pose). One
+        # clip (rivet_phonemes) stores that closing pose without counting it: frames == span, stored == frames,
+        # one sample more in the payload, equal to the first (a loop). It is not played, as with a frame table.
         require(stored in (frames, frames + 1) or (not n and not payload), 'stored sample count does not match frames')
-        require(len(payload) == stored * stride, 'sample payload size mismatch')
+        uncounted_close = bool(stride) and frames == span == stored and len(payload) == (stored + 1) * stride
+        require(len(payload) == stored * stride or uncounted_close, 'sample payload size mismatch')
         order = np.arange(frames, dtype=np.intp)
         samples = payload
     if first_frames is not None:

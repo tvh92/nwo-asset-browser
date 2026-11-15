@@ -7,9 +7,12 @@ by joint coverage alone:
 
 * **Animsets** the model's actors use: an actor or config that depends on the model, and the configs it
   depends on, name the animsets; each animset depends on its clips.
-* **Same-folder animsets**: the animsets in the model's own folder whose first clip drives the model's
-  skeleton (most of its joints, by joint hash). Outfit models such as ``hero_ratchet_pirate.model`` are
-  assembled at runtime and no actor names them; their character folder holds the animset.
+* **Same-folder animsets**: the animsets in the model's own folder, or whose first clip is in it or in its
+  ``animations``/``animation`` subfolder, whose first clip drives the model's skeleton (most of its joints,
+  by joint hash). Outfit models such as ``hero_ratchet_pirate.model`` are assembled at runtime and no actor
+  names them; their character folder holds the animset. Zone-placed crowd sets (the thug's cheering) and
+  gallery sets keep their clips beside the model. A set that only repeats clip assets already offered is
+  left out.
 * **Cutscene shots** (``with_cinematic``): clips under ``cinematics/`` whose name ends in
   ``_shot<N>_<performer>`` where the performer is the model's file stem or one of its folder names holding
   an underscore (optionally followed by ``_master<N>`` or a copy number), as for R&C 2016. The clip's
@@ -36,6 +39,8 @@ PERFORMER = re.compile(r'_shot\d+[a-z]?_(.+)$')
 COPY_SUFFIX = re.compile(r'(_master\d*|\d+)$')
 # A same-folder animset is kept when its first clip names at least this share of the model's joints.
 FOLDER_FIT = 0.5
+# Where an animset's clips may live for it to count as the model folder's own ('' is the folder itself).
+CLIP_FOLDERS = ('', 'animations/', 'animation/')
 FOLLOW = ('actor', 'config')
 
 
@@ -118,16 +123,28 @@ def animset_clips(source, animset):
     return [index.paths[d] for d in index.deps(node) if index.paths[d].endswith('.animclip')]
 
 
+def _folder(path):
+    return path.rsplit('/', 1)[0] + '/'
+
+
 def folder_animsets(source, model_path, joint_hashes, exclude=()):
-    """Animsets in the model's folder whose first clip names at least FOLDER_FIT of the model's joints."""
+    """Animsets of the model's folder whose first clip names at least FOLDER_FIT of the model's joints.
+
+    An animset belongs to the folder when it is in it, or when its first clip is in the folder or in the
+    folder's ``animations``/``animation`` subfolder (zone-placed crowd sets such as the thug's cheering, and
+    sets kept in a folder of their own such as ``enm_pool_shark_underwater``)."""
     index = dag_index(source)
-    folder = model_path.replace('\\', '/').lower().rsplit('/', 1)[0] + '/'
+    folder = _folder(model_path.replace('\\', '/').lower())
+    homes = {folder + sub for sub in CLIP_FOLDERS}
     found = []
     for node in index.animsets:
         path = index.paths[node]
-        if not path.startswith(folder) or '/' in path[len(folder):] or path in exclude:
+        if path in exclude:
             continue
-        for clip in animset_clips(source, path):
+        clips = animset_clips(source, path)
+        if _folder(path) != folder and not (clips and _folder(clips[0]) in homes):
+            continue
+        for clip in clips:
             key = _key(source, clip)
             if key is None:
                 continue
@@ -177,7 +194,12 @@ class RcraAnimationLibrary(AnimationLibrary):
         if not clips or not self.rows or len(self.inverse) != len(self.rows):
             return
         animsets = model_animsets(source, model_path)
-        animsets += folder_animsets(source, model_path, set(self.names), exclude=animsets)
+        offered = {clip for animset in animsets for clip in animset_clips(source, animset)}
+        for animset in folder_animsets(source, model_path, set(self.names), exclude=animsets):
+            clips = set(animset_clips(source, animset))
+            if clips - offered:   # a same-folder set that only repeats clip assets already offered is left out
+                animsets.append(animset)
+                offered |= clips
         for animset in animsets:
             for clip in animset_clips(source, animset):
                 self._add(animset, clip, 'animset')

@@ -215,19 +215,20 @@ Four things differ from 2016:
 | --- | --- |
 | `0x9DF23F77` built | +0 u32 is the name's string offset, not a format version. +4 name hash; +8 flags (`0x40` additive, `0x10000` frame table); +12 f32 fps; +16 f32 seconds; +32 u16 joints, frames, elements, 0; +40 u32 bytes per stored sample; +44 u16 scale-tail blocks, u16 count of 4-byte records after the tail; +48 u16 stored samples |
 | `0xD070D358` elements | u32 destination per element (not u16), then u8 bit width minus one each, zero-padded to 4 bytes |
-| `0x3A7B4855` samples | With flag `0x10000`: `round(seconds * fps) + 1` u16 stored-sample indices, padded to 16 bytes, then the stored samples. A clip that repeats a pose stores it once. Without the flag, frame i is stored sample i |
+| `0x3A7B4855` samples | With flag `0x10000`: `round(seconds * fps) + 1` u16 stored-sample indices, padded to 16 bytes, then the stored samples. A clip that repeats a pose stores it once. Without the flag, frame i is stored sample i. One clip (`rivet_phonemes`) also stores the closing pose, equal to the first, without counting it in the header; it is not played |
 | `0x2BB5BC8F` base | Joint records and scale tail as in 2016; one additive clip adds the 4-byte (u16 joint, u16 value) records the built header counts, which are not read |
 
 A clip with only custom float tracks (`0x14014CB6`/`0x116EB684`: camera and property curves) is not skeletal and is
 refused. Root motion (`0x3976E44C`, `0xE08AA35F`), triggers, morph and face sections are not read.
 
-**Coverage.** Of the 23,317 installed clips, 21,377 are skeletal and 21,003 decode. The rest:
+**Scale sentinel.** In 10 additive clips (bladeball turns, horned-toad aim and look layers, the emergency-raft
+wobble) a joint's packed scale is `0x8000` on all three axes, which would be −8. `packed_scales` reads it as one,
+the identity of the additive preview's scale product. This is inferred, not traced in the runtime: every such joint
+has an identity base rotation, no scale channel and a translation under 0.01. The same value in a clip without the
+additive flag, and any other high-bit scale, is still refused (as in 2016, whose clips carry no additive flag).
 
-- 10 have a negative packed scale (a mirrored joint), which the 2016 sampler refuses as well.
-- 1 has a payload 12 bytes longer than its header implies.
-- 1,940 are not skeletal: custom-track clips and one camera-shake clip.
-
-No decoded clip uses the collapsed-rotation sentinel.
+**Coverage.** Of the 23,317 installed clips, 21,377 are skeletal and all of them decode. The other 1,940 are not
+skeletal: custom-track clips and one camera-shake clip. No decoded clip uses the collapsed-rotation sentinel.
 
 **Check.** On `amb_fish_01`, frame 0 of `Swimming_Idle` matches the model's rest S/Q/T with a median translation
 difference of 1.1e-4.
@@ -249,8 +250,13 @@ Clips are found through the dag, never by joint coverage alone:
 
 1. **Referenced animsets.** An actor or config that depends on the model, and the configs it depends on, name the
    animsets. Each animset depends on its clips.
-2. **Same-folder animsets.** These are the animsets in the model's own folder whose first clip names at least half of
-   the model's joints. The runtime assembles some models, such as the Ratchet outfits, and no actor names them.
+2. **Same-folder animsets.** These are the animsets in the model's own folder, or whose first clip is in that folder
+   or in its `animations` or `animation` subfolder, whose first clip names at least half of the model's joints. The
+   runtime assembles some models, such as the Ratchet outfits, and no actor names them. Zones place others, such as
+   the thug's sitting crowd set in `enm_thug_brawler/animations/`. The subfolder rule also gives about 50 models
+   their gallery (topiary showcase) sets and sets shared between rigs, such as the bladeball's with the swarmer's. A
+   set whose clip assets are all already offered is left out: 29 such sets only repeat clips, among them the
+   standing crowd sets (twins of the sitting ones) and the shark's `enm_pool_shark_underwater`.
 3. **Cutscene shots** (3D view, or export with Include cutscenes). These are clips under `cinematics/` whose name
    ends in `_shot<N>_<performer>`. The performer must be the model's file stem or one of its folder names holding an
    underscore, as written or without a `_master<N>` or copy-number suffix. The clip's `.cinematic2` is its source.
@@ -266,10 +272,9 @@ The clip notes take about 8 s to compute, off the Tk thread.
 
 ### Not decoded
 
-- Negative packed scales.
 - Root-motion paths.
 - Clip blending and additive partners. Additive clips are previewed on the rest pose, as in 2016.
-- Face performance clips (`.performanceclip`).
+- Face performance clips (`.performanceclip`) and the phoneme and viseme pose clips their performance sets use.
 - Vertex-animation textures.
 
 ## Textures

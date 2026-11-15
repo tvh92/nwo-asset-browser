@@ -25,13 +25,15 @@ def _pack(values, widths):
     return word.to_bytes((bit + 31) // 32 * 4, 'little')
 
 
-def build_clip(samples, table=None, frames=None, name='Walk_test', fps=30.0, extra=None, flags=0):
+def build_clip(samples, table=None, frames=None, name='Walk_test', fps=30.0, extra=None, flags=0, tail=b'',
+               seconds=None, stored=None):
     """A two-joint clip: root translation x (4 bits, 1/1024 units) and child quaternion z (8 bits) are sampled.
 
     ``samples``: stored (root tx, child qz) integer pairs. ``table``: the frame table (stored-sample index per entry,
-    round(seconds * fps) + 1 entries) or None for one stored sample per frame."""
+    round(seconds * fps) + 1 entries) or None for one stored sample per frame. ``tail``: the base scale tail (32-byte
+    blocks). ``seconds``/``stored`` override the timing and the declared stored-sample count."""
     frames = frames or (len(table) if table else len(samples))
-    seconds = (frames - 1) / fps
+    seconds = (frames - 1) / fps if seconds is None else seconds
     widths = (4, 8)
     elements = struct.pack('<2I', 32, 48 + 24) + bytes(w - 1 for w in widths)
     elements += bytes(-len(elements) % 4)
@@ -42,12 +44,12 @@ def build_clip(samples, table=None, frames=None, name='Walk_test', fps=30.0, ext
         head = struct.pack(f'<{len(table)}H', *table)
         payload = head + bytes(-len(head) % 16) + payload
     base = (struct.pack('<7h', 0, 0, 0, 1024, 0, 0, 0) + bytes((10, 10))
-            + struct.pack('<7h', 0, 0, 0, 1024, 1024, 0, 0) + bytes((10, 10)))
+            + struct.pack('<7h', 0, 0, 0, 1024, 1024, 0, 0) + bytes((10, 10)) + tail)
     hashes = struct.pack('<3I', ROOT, CHILD, 0xFFFFFFFF)
     built = bytearray(96)
     struct.pack_into('<IIIff', built, 0, 0, game_crc32(name), flags, fps, seconds)
     struct.pack_into('<4H', built, 32, 2, frames, 2, 0)
-    struct.pack_into('<IHHH', built, 40, stride, 0, 0, len(samples))
+    struct.pack_into('<IHHH', built, 40, stride, len(tail) // 32, 0, len(samples) if stored is None else stored)
     sections = {ra.BASE: base, ra.ELEMENTS: elements, ra.SAMPLES: payload, ra.JOINT_HASHES: hashes, ra.BUILT: bytes(built)}
     sections.update(extra or {})
     strings = b'animclip built\0' + name.encode() + b'\0'
@@ -88,6 +90,29 @@ class SyntheticClipTests(unittest.TestCase):
         # frames == seconds * fps + 1: the table has exactly one entry per frame.
         data = build_clip([(1, 10), (2, 20)], table=[0, 1, 1], frames=3)
         self.assertEqual(ra.decode_clip(data)['channels'][0]['unsigned_deltas'], [1, 2, 2])
+
+    def test_uncounted_closing_pose_without_a_frame_table(self):
+        # frames == seconds * fps == stored, and the payload holds one more sample (the first pose again).
+        data = build_clip([(1, 10), (2, 20), (1, 10)], frames=2, seconds=2 / 30, stored=2)
+        clip = ra.decode_clip(data)
+        self.assertEqual(clip['channels'][0]['unsigned_deltas'], [1, 2])
+        with self.assertRaisesRegex(ValueError, 'payload size'):   # with the end pose counted it is not allowed
+            ra.decode_clip(build_clip([(1, 10), (2, 20), (1, 10)], frames=2, stored=2))
+
+    def test_additive_scale_sentinel_is_the_identity(self):
+        # Root: 0x8000 on every axis (the sentinel); child: 512 (0.5 at exponent 10). The block repeats its record.
+        record = struct.pack('<8H', 0x8000, 512, 0x8000, 512, 0x8000, 512, 0, 48)
+        tail = record * 2
+        clip = ra.decode_clip(build_clip([(0, 0), (1, 1)], tail=tail, flags=ra.FLAG_ADDITIVE))
+        frames = sample_transforms(clip)
+        self.assertEqual([j['scale'] for j in frames[1]], [[1.0, 1.0, 1.0], [0.5, 0.5, 0.5]])
+        with self.assertRaisesRegex(ValueError, 'high-bit'):   # an absolute clip keeps refusing it
+            sample_transforms(ra.decode_clip(build_clip([(0, 0)], tail=tail)))
+        animated = bytearray(build_clip([(0, 0)], tail=tail, flags=ra.FLAG_ADDITIVE))
+        _dat1, table = ra.clip_dat1(bytes(animated))
+        struct.pack_into('<I', animated, 36 + table[ra.ELEMENTS][0], 0)   # the root channel becomes scale x
+        with self.assertRaisesRegex(ValueError, 'animated scale'):
+            sample_transforms(ra.decode_clip(bytes(animated)))
 
     def test_rejections(self):
         with self.assertRaises(ra.UnsupportedClipError):
@@ -187,6 +212,17 @@ class RealAnimationTests(unittest.TestCase):
         self.assertEqual(len(shots.clips), 35)
         self.assertTrue(all(c['animset'].endswith('.cinematic2') for c in shots.clips[5:]))
         self.assertEqual(shots.clip_notes(), [None] * 35)
+
+    def test_animsets_whose_clips_live_in_the_model_folder(self):
+        # A zone-placed crowd set no actor names; its standing twin repeats the same clip assets and is left out.
+        thug = self.library('characters/enemy/enm_thug_brawler/enm_thug_brawler.model')
+        folder = 'characters/enemy/enm_thug_brawler/animations/'
+        self.assertIn(folder + 'enm_thug_cheering_siting.animset', thug.animset_data)
+        self.assertNotIn(folder + 'enm_thug_cheering.animset', thug.animset_data)
+        self.assertIn(folder + 'cheer_idle_enm_thug_brawler_master.animclip', [c['path'] for c in thug.clips])
+        # The shark's underwater set (a folder of its own) plays only clips its main set already offers.
+        shark = self.library('characters/enemy/enm_pool_shark_ps4/enm_pool_shark_ps4.model')
+        self.assertNotIn('characters/enemy/enm_pool_shark_underwater/enm_pool_shark_underwater.animset', shark.animset_data)
 
     def test_fish_batches_match_the_fixed_weight_records(self):
         data = self.data(self.FISH)

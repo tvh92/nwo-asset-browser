@@ -54,25 +54,38 @@ def embedded_clips(path: Path, bones, prefixes=()):
     return clips
 
 
+SCALE_SENTINEL = 0x8000   # u16 packed scale of -32768 (see packed_scales)
+
+
 def packed_scales(clip):
     """Each 16-byte pair: sx0,sx1,sy0,sy1,sz0,sz1,destination0,destination1.
 
 Four joints per 32-byte block, with exact duplicate last records for padding.
-Unlisted scales default to one. Negative packed scales are not yet validated.
+Unlisted scales default to one. Other negative packed scales are not yet validated.
+
+SCALE_SENTINEL on all three axes of a Rift Apart additive clip (built flag 0x40, ``additive_flag``) marks a
+joint whose scale the layer leaves alone, read as the multiplicative identity (one). The reading is inferred,
+not traced in the runtime: all 10 installed cases sit on joints with an identity base rotation, no scale
+channel and a translation under 0.01.
 """
     tail = bytes.fromhex(clip['base_tail_hex'])
     require(len(tail) == clip['metadata']['unknown_u32_28'] * 32, 'base scale block count mismatch')
     rows = clip['joints']
     scales = [[2**r['packed_base_control_bytes'][0]] * 3 for r in rows]
+    additive = bool(clip['metadata'].get('additive_flag'))
+    scaled = {c['joint_index'] for c in clip['channels'] if c['component_byte_offset'] < 12}
     seen = {}
     for pos in range(0, len(tail), 16):
         pair = struct.unpack_from('<8H', tail, pos)
-        require(all(v < 32768 for v in pair[:6]), 'signed/high-bit packed scales not validated')
         for side in range(2):
             destination = pair[6 + side]
             require(destination % 48 == 0 and destination // 48 < len(rows), 'invalid scale destination')
             joint = destination // 48
             value = [pair[side + 2*axis] for axis in range(3)]
+            if value == [SCALE_SENTINEL] * 3 and additive:
+                require(joint not in scaled, 'animated scale on a scale-sentinel joint')
+                value = [2**rows[joint]['packed_base_control_bytes'][0]] * 3
+            require(all(v < 32768 for v in value), 'signed/high-bit packed scales not validated')
             require(joint not in seen or seen[joint] == value, 'conflicting duplicate scale records')
             seen[joint] = value
             scales[joint] = value
