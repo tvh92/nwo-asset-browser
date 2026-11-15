@@ -18,6 +18,7 @@ The one decoded graph is architecture glass (gbl_arch_glass, 44 materials, e.g. 
 domes). Its forward pixel shader reads named reflection data, so the rule is traced to that program, not to a capture:
 see ARCH_GLASS_PARAMS and the uKind 26 comment in rc2016/viewer/shading.py.
 """
+import re
 import struct
 
 from rc2016.games.rcra.toc import sections
@@ -51,7 +52,9 @@ def material_slots(data):
     dat1 = data[36:]
     table = sections(dat1)
     if SERIALIZED not in table:
-        return []
+        from rc2016.games.rcra.fur import fur_record
+        record = fur_record(data)   # a fur material: base colour, normal and gloss of its fur record
+        return [] if record is None else list(zip((SLOT_BASE_COLOUR, SLOT_NORMAL, SLOT_G), record[2]))
     offset, size = table[SERIALIZED]
     section = dat1[offset:offset + size]
     if len(section) < 40:
@@ -66,7 +69,7 @@ def material_slots(data):
         stop = section.find(b'\0', at)
         if at >= len(section) or stop < 0:
             raise ValueError('Material texture string outside its section')
-        slots.append((key, section[at:stop].decode('latin-1').replace('\\', '/').lower()))
+        slots.append((key, re.sub('/+', '/', section[at:stop].decode('latin-1').replace('\\', '/').lower())))
     return slots
 
 
@@ -179,7 +182,51 @@ def _material_key(source, path):
 
 
 def _graphs(source, key):
-    return [r['path'] for r in source.asset_references(key) if r['path'].endswith('.materialgraph')]
+    """The material's graph paths: its dag references, else the one graph named in its string table (some materials name
+    their graph by file name only, which the dag does not resolve), else none."""
+    found = [r['path'] for r in source.asset_references(key) if r['path'].endswith('.materialgraph')]
+    if found:
+        return found
+    named = _named_graph(source, source.asset_data(key))
+    return [named] if named else []
+
+
+def no_graph_reason(data):
+    """Why a material without a resolvable graph has none: the graph it names by file name is not in the install, or it
+    names none."""
+    named = [s for s in header_strings(data) if s.lower().endswith('.materialgraph')]
+    if named:
+        return 'material names graph %s, which is not in the install' % named[0].replace('\\', '/')
+    return 'material references no graph'
+
+
+def header_strings(data):
+    """The strings of an asset's DAT1 string table (between the section table and the first section)."""
+    dat1 = bytes(data[36:])
+    try:
+        table = sections(dat1)
+    except ValueError:
+        return []
+    start = 16 + 12 * len(table)
+    stop = min((offset for offset, _size in table.values()), default=len(dat1))
+    return [s.decode('latin-1') for s in dat1[start:stop].split(b'\0') if s]
+
+
+def _named_graph(source, data):
+    """The graph path of a material that names its graph by file name only: the one materialgraph asset of that name
+    (case-insensitive), else None."""
+    names = [s.replace('\\', '/').rsplit('/', 1)[-1].lower() for s in header_strings(data) if s.lower().endswith('.materialgraph')]
+    if len(set(names)) != 1:
+        return None
+    index = getattr(source, '_rcra_graph_names', None)
+    if index is None:
+        index = {}
+        for graph_key in source.ids_of_type('materialgraph'):
+            path = source.entries[graph_key]['path']
+            index.setdefault(path.rsplit('/', 1)[-1].lower(), set()).add(path)
+        source._rcra_graph_names = index
+    paths = index.get(names[0], set())
+    return next(iter(paths)) if len(paths) == 1 else None
 
 
 def _load(source, path, cache, hd):

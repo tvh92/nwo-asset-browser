@@ -328,15 +328,24 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
     if key is None:
         return dict(error='material asset not found')
     graphs = list(_graphs(source, key))
-    if not graphs:
-        return dict(error='material references no graph')
+    program = None
+    if not graphs:   # a fur material: the engine's fur writer (rc2016.games.rcra.fur)
+        from rc2016.games.rcra.fur import EXECUTABLE, fur_program, fur_record
+        from rc2016.games.rcra.material import no_graph_reason
+        if fur_record(source.asset_data(key)) is None:
+            return dict(error=no_graph_reason(source.asset_data(key)))
+        try:
+            program = fur_program(source, source.asset_data(key))
+        except (ValueError, OSError) as error:
+            return dict(error='%s: %s' % (type(error).__name__, error))
+        graphs = ['%s fur writer' % EXECUTABLE]
     graph_path = graphs[0]
     graph_cache = graph_cache if graph_cache is not None else {}
-    if graph_path not in graph_cache:
+    if program is None and graph_path not in graph_cache:
         gkey = next((k for k in source.resolve(graph_path) if source.entries[k]['type'] == 'materialgraph'), None)
         graph_cache[graph_path] = source.asset_data(gkey) if gkey is not None else None
-    graph = graph_cache[graph_path]
-    if graph is None:
+    graph = graph_cache[graph_path] if program is None else None
+    if graph is None and program is None:
         return dict(error='graph not found: ' + graph_path)
     data = source.asset_data(key)
     try:
@@ -346,6 +355,9 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
     errors, results, limitations = {}, {}, []
     passes = (('forward', rsurface.forward), ('recipe', rsurface.surface)) if blend != 'opaque' else \
         (('recipe', rsurface.surface),)
+    if program is not None:   # an engine program replaces the graph: its G-buffer writer only
+        passes = (('recipe', lambda g, d, **k: rsurface.surface(g, d, program=program, **k)),)
+        errors['forward'] = 'Unsupported: an engine program without a forward pass'
     for name, translate in passes:
         try:
             results[name] = translate(graph, data, texture_sizes=lambda path: texture_size(source, path))

@@ -92,6 +92,7 @@ class _Bindings(rshaders.NeutralEngine):
                 self.records[buffer] = {at: members[name] for name, at, _m in layout.variables[0].members if name in members}
         self.record_read = False
         self.engine_read = set()
+        self.named = {}   # constants an engine program's caller binds by name (surface ``program``)
 
     def texture_size(self, binding):
         """The bound material texture's size (``texture_sizes(path)``), for the programs that query it (resinfo)."""
@@ -149,6 +150,8 @@ class _Bindings(rshaders.NeutralEngine):
         return self._review(name)
 
     def constant(self, name):
+        if name in self.named:
+            return self.graph.const('f', self.named[name])
         bound = super().constant(name)
         return bound if bound is not None else self._review(name)
 
@@ -223,6 +226,15 @@ class _EngineFreeBindings(_ForwardBindings):
         return super()._review(name)
 
 
+def constant_normal(word_x, word_y):
+    """The normal of constant NormalSpec x and y words: the inverse of the packing p = n.xy rsq(8 |n.z| + 8), stored as
+    ftou(p 5791.205 + 2048) in bits 0 to 11, which for a unit normal gives |n.z| = 1 - 8 |p|^2; the z sign is y bit 15."""
+    px, py = (((w & 0xFFF) - 2048.0) / NORMAL_SCALE for w in (word_x, word_y))
+    z = min(max(1.0 - 8.0 * (px * px + py * py), 0.0), 1.0)
+    weight = math.sqrt(8.0 * z + 8.0)
+    return px * weight, py * weight, -z if word_y & 0x8000 else z
+
+
 class _Unpack:
     def __init__(self, graph):
         self.g = graph
@@ -246,7 +258,8 @@ class _Unpack:
         return out
 
     def quantised(self, i):
-        """x of ftoi(add(mul(x, 255), 0.5)) (or ftou), else None."""
+        """x of ftoi(add(mul(x, 255), 0.5)) (or ftou), else None. A writer whose factor the compiler folded into the scale,
+        ftoi(add(mul(x, k), 0.5)), stores the byte of x k / 255."""
         n = self.node(i)
         if n['op'] not in ('ftoi', 'ftou'):
             return None
@@ -257,8 +270,11 @@ class _Unpack:
         if m['op'] != 'mul':
             return None
         for x, k in ((0, 1), (1, 0)):
-            if self.value(m['args'][k]) == 255.0:
+            scale = self.value(m['args'][k])
+            if scale == 255.0:
                 return m['args'][x]
+            if isinstance(scale, float) and 0.0 < scale < 255.0:
+                return self.g.op('mul', m['args'][x], self.g.const('f', scale / 255.0))
         return None
 
     def byte_pair(self, i):
@@ -446,20 +462,24 @@ def _reads_nan(result):
                for i in g.reachable(list(result['terms'].values())))
 
 
-def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes=None):
+def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes=None, program=None):
     """The material's surface terms as one expression DAG. ``texture_sizes(path)`` gives a texture's (width, height, depth or
     array size, mip count) for programs that query sizes (rc2016.games.rcra.texture.texture_size); without it they fail.
 
     A writer whose terms depend on NaN under the review screen position (it reads the view direction) is translated again
     with the forward profile's view (_ViewBindings, VIEW_NOTE), and that translation is used when it has no NaN.
 
+    ``program`` replaces the graph's writer with an engine program: dict(shader, cb2 [floats], units {binding: path},
+    named {constant: value}, limitations [text], discard: False to drop the program's own discard)
+    (rc2016.games.rcra.fur.fur_program); ``graph_data`` is then unused.
+
     Returns dict(graph, terms {name: node}, textures {binding: path}, inputs [names], limitations [text]).
     Raises Unsupported when the writer is not the engine packing or keeps non-portable operations."""
-    result = _surface(graph_data, material_data, slot, texture_sizes, _Bindings)
+    result = _surface(graph_data, material_data, slot, texture_sizes, _Bindings, program)
     if not _reads_nan(result):
         return result
     try:
-        viewed = _surface(graph_data, material_data, slot, texture_sizes, _ViewBindings)
+        viewed = _surface(graph_data, material_data, slot, texture_sizes, _ViewBindings, program)
     except Unsupported:
         viewed = None
     if viewed is not None and not _reads_nan(viewed):
@@ -469,14 +489,20 @@ def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes
     return result
 
 
-def _surface(graph_data, material_data, slot, texture_sizes, binding_class):
-    shader = rshaders.pass_shader(graph_data, slot)
-    cb2 = rshaders.material_constants(graph_data, material_data)
-    bindings = binding_class(cb2, shader.reflection, rshaders.material_units(graph_data, material_data), texture_sizes)
+def _surface(graph_data, material_data, slot, texture_sizes, binding_class, program=None):
+    if program is None:
+        shader = rshaders.pass_shader(graph_data, slot)
+        cb2, units = rshaders.material_constants(graph_data, material_data), rshaders.material_units(graph_data, material_data)
+    else:
+        shader, cb2, units = program['shader'], program['cb2'], program['units']
+    bindings = binding_class(cb2, shader.reflection, units, texture_sizes)
+    bindings.named.update(program['named'] if program else {})
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
     g = tr.graph
+    if program and not program.get('discard', True):   # the program's own discard is not the material's (fur shells)
+        tr.discard = g.const('b', False)
     out = lambda r, c: tr.outputs.get(('o', r, c))   # noqa: E731
     if any(out(r, c) is None for r, c in ((0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2), (1, 3))):
         raise Unsupported('Writer does not write the NormalSpec and DiffuseEmis targets')
@@ -486,10 +512,15 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class):
     u = _Unpack(g)
     for key in [k for k in tr.outputs if k[0] == 'o' and k[1] == 1]:
         tr.outputs[key] = g.cast(tr.outputs[key], 'f')   # an 8-bit UNORM target: integer-typed words hold float bits
-    nx, nz, _x13 = u.normal_word(out(0, 0))
-    ny, nz_y, occlusion_mode = u.normal_word(out(0, 1))
-    if nz != nz_y:
-        raise Unsupported('Normal words disagree on z')
+    words = g.value(out(0, 0)), g.value(out(0, 1))
+    if None not in words:   # a writer that stores a fixed normal: decoded exactly from the words
+        nx, ny, nz = (g.const('f', v) for v in constant_normal(*words))
+        occlusion_mode = g.const('b', bool(words[1] & 0x2000))
+    else:
+        nx, nz, _x13 = u.normal_word(out(0, 0))
+        ny, nz_y, occlusion_mode = u.normal_word(out(0, 1))
+        if nz != nz_y:
+            raise Unsupported('Normal words disagree on z')
     f0r, f0g = u.byte_pair(out(0, 2))
     f0b, gloss = u.byte_pair(out(0, 3))
     one, zero = g.const('f', 1.0), g.const('f', 0.0)
@@ -521,6 +552,7 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class):
                    'no flag volumes, shader time 0.' + OBJECT_NOTE * bindings.object_read + RECORD_NOTE * bindings.record_read
                    + (ENGINE_NOTE % ', '.join(sorted(bindings.engine_read)) if bindings.engine_read else ''), 'The 12-bit normal and the 8-bit albedo, occlusion and emission are used before the '
                    "G-buffer's rounding; F0 and gloss keep it."]
+    limitations += program['limitations'] if program else []
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Surface')
 
 
@@ -836,7 +868,7 @@ def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, wh
     if g.unknowns(roots):
         raise Unsupported('%s depends on unknown values' % what)
     textures = {}
-    units = rshaders.material_units(graph_data, material_data)
+    units = bindings.units
     if bindings.sized:
         limitations = list(limitations) + [SIZE_NOTE % ', '.join(sorted(bindings.sized))]
     cubes, cube_opcodes = set(), set()

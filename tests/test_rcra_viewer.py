@@ -313,6 +313,12 @@ class ViewportDrawTests(unittest.TestCase):
             finally:
                 root.destroy()
 
+    def test_fur_material_links(self):
+        def check(_view, receipt, _textures):
+            self.assertEqual(receipt['blend'], 'opaque')
+            self.assertIn('g_BaseMap', receipt['layouts'])
+        self._link('material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material', check)
+
     def test_lit_background_material_links(self):
         def check(_view, receipt, _textures):
             self.assertIn('lit_background.r', receipt['forward']['terms'])

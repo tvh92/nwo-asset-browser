@@ -34,10 +34,14 @@ class NotTranslated(ValueError):
 
 
 def _graph(source, material_key):
-    from rc2016.games.rcra.material import _graphs
+    """The material's graph bytes, or None for a fur material (no graph: rc2016.games.rcra.fur)."""
+    from rc2016.games.rcra.fur import fur_record
+    from rc2016.games.rcra.material import _graphs, no_graph_reason
     graphs = list(_graphs(source, material_key))
     if not graphs:
-        raise NotTranslated('material references no graph')
+        if fur_record(source.asset_data(material_key)) is not None:
+            return None
+        raise NotTranslated(no_graph_reason(source.asset_data(material_key)))
     graph_key = next((k for k in source.resolve(graphs[0]) if source.entries[k]['type'] == 'materialgraph'), None)
     if graph_key is None:
         raise NotTranslated('graph not found: ' + graphs[0])
@@ -64,15 +68,23 @@ def translate(source, material_key):
     """(surface recipe or None, forward recipe or None, blend, limitations, textures {binding: path}), kept across sessions in
     the source's translation disk cache (keyed by the material and graph bytes and CODE_SHA256) when it has one."""
     graph, data = _graph(source, material_key), source.asset_data(material_key)
+    program = None
+    if graph is None:
+        from rc2016.games.rcra.fur import fur_program
+        try:
+            program = fur_program(source, data)
+        except (ValueError, OSError) as error:
+            raise NotTranslated(str(error)) from error
     disk = getattr(source, 'translation_disk_cache', None)
-    key = disk.key(bytes(data), [bytes(graph)], 'rcra-viewer:%s' % CODE_SHA256) if disk is not None and CODE_SHA256 else None
+    program_bytes = bytes(graph) if program is None else program['key']
+    key = disk.key(bytes(data), [program_bytes], 'rcra-viewer:%s' % CODE_SHA256) if disk is not None and CODE_SHA256 else None
     stored = _floats(disk.get(key), decode=True) if key else None
     if stored is not None:
         if 'error' in stored:
             raise NotTranslated(stored['error'])
         return stored['surface'], stored['forward'], stored['blend'], stored['limitations'], stored['textures']
     try:
-        out = _translate(graph, data, source)
+        out = _translate(graph, data, source, program)
     except NotTranslated as error:
         if key:
             disk.put(key, dict(error=str(error)))
@@ -101,13 +113,17 @@ def _floats(value, decode=False):
     return value
 
 
-def _translate(graph, data, source):
+def _translate(graph, data, source, program=None):
     from rc2016.games.rcra.material import material_blend
     from rc2016.games.rcra.texture import texture_size
     blend = material_blend(data)
     results, errors = {}, {}
-    for name, fn in (('forward', rsurface.forward), ('surface', rsurface.surface)) if blend != 'opaque' else \
-            (('surface', rsurface.surface),):
+    passes = (('forward', rsurface.forward), ('surface', rsurface.surface)) if blend != 'opaque' else \
+        (('surface', rsurface.surface),)
+    if program is not None:   # an engine program (fur) replaces the graph: its G-buffer writer only
+        passes = (('surface', lambda g, d, **k: rsurface.surface(g, d, program=program, **k)),)
+        errors['forward'] = 'an engine program without a forward pass'
+    for name, fn in passes:
         try:
             # Programs that query a texture's size (resinfo) need it, as in the Blender export.
             results[name] = fn(graph, data, texture_sizes=lambda path: texture_size(source, path))

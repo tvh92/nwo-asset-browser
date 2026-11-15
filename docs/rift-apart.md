@@ -573,6 +573,16 @@ Programs read the engine's per-object record, `g_SceneObjectView` (element `$Ele
 
 The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain object: identity transform, alpha 1, white colour, and every custom value, time and bias 0. Both the G-buffer and the forward translations bind it, and a material that reads it says so in its limitations. Effects driven by the custom values, such as the particle quads `exp_quad` and `smk_quad`, come out at their zero state (often transparent).
 
+### Fur materials
+
+A fur material (19: Ratchet's and Rivet's head, ears and limbs, Daxter, the sheep, a carpet, a towel, a cotton canopy and a cloud) has no graph. In place of the serialized parameters it carries a fur record, DAT1 section 0xD9B12454: 13 u32, an integer (32 on Ratchet's head), eight floats, and four offsets into the material's DAT1 of its texture paths, in the order base colour, normal, gloss and fur control (`fur.fur_record`; the viewer's preview takes the first three as its slots).
+
+The executable holds the fur programs, found by their reflection names (`fur.fur_writer`): the fur G-buffer writer, a ps_5_0 with constant buffer `MatrialFurCBuffer` (`m_Density`, `m_Length`, `m_GlossScale`, `m_SpecularScale`, `m_TransmittanceScale`, `m_Wetness`) and textures `g_BaseMap` (t5), `g_FurLayerMap` (t7, 3D), `g_FurGlossMap` (t8) and `g_FurControlMap` (t9), writing the four engine targets; a five-target variant; and the shell vertex programs (`ModelFurCBuffer`). `surface.surface` takes the writer as its `program` (`fur.fur_program`), so the material gets the same terms and packing as a graph's writer: albedo from the base map, F0 and gloss from the gloss map, occlusion from the control map, and the vertex normal (the writer binds no normal map).
+
+What is not decoded, and labelled (`fur.FUR_NOTE`):
+- How the engine fills the fur constants from the record. The surface terms read `m_GlossScale`, `m_SpecularScale` and `m_Wetness`, bound to review values 1, 1 and 0 (`FUR_REVIEW`).
+- The shells: layers extruded along the normal and cut by the layer map, which the engine builds at run time (no texture of it ships). The writer's discard, sat(layer term + TEXCOORD3.w) < 0.5, is that cut and is not applied: the material is its base surface.
+
 ## Blender materials
 
 A Blender export (`.blend`, FBX or USD, through `rc2016/export/blender_convert.py`) replaces each imported glTF material with the game's own material. The work splits into three modules:
@@ -596,12 +606,14 @@ F0 and gloss keep the game's 8-bit rounding. A material passes only when every t
 Values a material does not own are bound and listed in its limitations:
 - **Neutral draw:** no dissolve, opaque, no render flags (lighting class 0), shader time 0.
 - **Volume flags:** the per-tile bitset of engine flag volumes (`g_VolumeFlagBitsetView`, whose bits index the boxes in `GlobalVolumeFlagBuffer`) is empty in every pass, so no flag volume covers the material. Rain on glass and the rain, snow and puddle writers read it to find shelters.
-- **Material LOD distance:** the per-material and per-subset records (`g_MaterialView.m_LodDist`, `g_ModelSubsetView.m_MaterialLodDist`, `shaders.NEUTRAL_RECORDS`) hold no distance, like the neutral object's override. Writers then take no LOD fade, so they draw at full detail. Other members of these records are not bound.
+- **Material LOD distance:** the per-material and per-subset records (`g_MaterialView.m_LodDist`, `g_ModelSubsetView.m_MaterialLodDist`, `shaders.NEUTRAL_RECORDS`) hold no distance, like the neutral object's override. Writers then take no LOD fade, so they draw at full detail. Other members of these records are not bound. The material record's alpha (`g_MaterialView.m_Alpha`) is 1, opaque, as the neutral object's.
 - **Review values:** screen position for dither, LOD fade and adapted luminance 1.
 - **View direction:** under the review screen position the camera sits at the shaded point, so a writer that normalises the direction to the camera (tangent-space parallax in the holo and dimensional glass, fresnel, the emissive sequence, the two-layer snow) gets a normalised zero vector, NaN. When a term depends on NaN, `surface` translates the writer again with the forward profile's view (`_ViewBindings`: `VIEW`, `CAMERA`, see [Forward profile](#forward-profile)) and uses that when no NaN is left, with a limitation saying so (449 materials). The snow writers then read the deformable-snow map, `g_DeformablesView`, bound empty (0) as its constants are.
 - **Undefined terms:** 77 writers still divide by a per-object value the neutral object holds at 0: the stadium crowd's vertex-animation frame (0/0) and a butterfly wing's random seed. Their limitations say which terms are undefined (`NAN_NOTE`); renderers resolve the NaN by D3D rules.
 
-**Coverage:** 5,689 of 5,721 materials; 29 have no material graph. The other three are reported with a reason (`rc2016.games.rcra.surface.Unsupported`): a normal word with no packed normal, a byte pair that is not the engine packing, and float bits reinterpreted from integers (`bits2f`).
+**Coverage:** 5,711 of 5,721 materials, the 19 fur materials among them ([Fur materials](#fur-materials)). Not translated: eight materials name a graph by file name that the install does not contain (`material.no_graph_reason`), one has no graph at all (`flowmap_water_custom`), and `jn_glass_01_opaque` views a loop flag's boolean mask as a float (`bits2f`, NaN when set) in arms that only correlated loop conditions rule out.
+
+Some materials name their graph by file name only, which the dag does not resolve; `material._graphs` then takes the one materialgraph asset of that name. Writer forms the unpacking also reads: two constant normal words (`surface.constant_normal`, the exact inverse of the packing: |n.z| = 1 − 8|p|², z sign in y bit 15), and a byte whose factor the compiler folded into the 255 scale, ftoi(x k + 0.5), read as x k / 255.
 
 The emission alpha is decoded from the engine encoding `0.2 log2(min(E, 31) + 1)`, and also from the form the compiler folds it into (`0.2 log2 Y`, with the clamp dropped or the 1 merged into other constants). That form decodes as `E = clamp(Y, 1, 32) − 1`, which is what the deferred apply reads back from the target's [0, 1] alpha.
 

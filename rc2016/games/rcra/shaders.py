@@ -46,9 +46,9 @@ NEUTRAL_FLOATS = {'GlobalWorldCBuffer.m_KeyLightTapScale': 1.0}    # sun shadow 
 VOLUME_FLAGS = 'g_VolumeFlagBitsetView'
 # Material LOD distances in the engine's per-material and per-subset records (structured buffers, member names from the
 # reflection). Writers take the first positive of the object override (NEUTRAL_OBJECT: 0), the subset's and the
-# material's distance; with none set the LOD fade term is 0: full detail. A viewer choice, not game data. Other members
-# of these records stay unbound.
-NEUTRAL_RECORDS = {'g_MaterialView': {'m_LodDist': 0.0}, 'g_ModelSubsetView': {'m_MaterialLodDist': 0.0}}
+# material's distance; with none set the LOD fade term is 0: full detail. The material's alpha is 1, opaque, as the
+# neutral object's. Viewer choices, not game data. Other members of these records stay unbound.
+NEUTRAL_RECORDS = {'g_MaterialView': {'m_LodDist': 0.0, 'm_Alpha': 1.0}, 'g_ModelSubsetView': {'m_MaterialLodDist': 0.0}}
 
 # Forward profile (pass slot 1), for exporting blended materials. The forward programs light themselves (key light, light
 # grid, probes, GI, SSR); an export lights the material's G-buffer surface with the renderer's own lights instead. So every

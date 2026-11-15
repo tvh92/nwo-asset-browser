@@ -18,6 +18,7 @@ from rc2016.games.rcra import surface as rsurface
 from rc2016.shaders import sm5
 
 GAME = os.environ.get('RCRA_GAME')
+FUR = 'material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material'   # no graph: the engine fur writer
 BLENDER = os.environ.get('RC2016_BLENDER') or r'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe'
 GRAPHS = ('required/materials/basic_normal_gloss.materialgraph',
           'materialgraph/global/gbl_rgb_blend/gbl_rgb_blend.materialgraph',
@@ -208,6 +209,16 @@ class CaseTests(unittest.TestCase):
             got = sm5.evaluate(g, list(out.values()), inputs)
             want = sm5.evaluate(g, list(terms.values()), inputs)
             self.assertEqual({k: got[out[k]] for k in out}, {k: want[terms[k]] for k in terms}, (u, v, w))
+
+
+class ConstantNormalTests(unittest.TestCase):
+    def test_constant_words_invert_the_packing(self):
+        for n in ((0.6, 0.0, 0.8), (-0.2, 0.7, -0.68556546), (0.70710677, 0.70710677, 0.0), (0.0, 0.0, 1.0)):
+            weight = 1.0 / math.sqrt(8.0 * abs(n[2]) + 8.0)
+            x, y = (int(c * weight * rsurface.NORMAL_SCALE + 2048.0) for c in n[:2])   # ftou truncates
+            got = rsurface.constant_normal(x | 0x1000, y | (0x8000 if n[2] < 0 else 0) | 0x2000)   # flag bits ignored
+            for a, b in zip(got, n):
+                self.assertAlmostEqual(a, b, delta=2e-3)   # 12-bit quantisation
 
 
 class VolumeTests(unittest.TestCase):
@@ -441,6 +452,57 @@ class RealSurfaceTests(unittest.TestCase):
         for c in 'rgb':
             self.assertEqual(lit['background.' + c], 0.0)   # nothing passes unlit
             self.assertEqual(unit['background.' + c], lit['background.' + c] + lit['lit_background.' + c])
+
+    def surface_of(self, path):
+        from rc2016.games.rcra.texture import texture_size
+        key = self.source.resolve(path)[0]
+        graph = next(r['path'] for r in self.source.asset_references(key) if r['path'].endswith('.materialgraph'))
+        gkey = next(k for k in self.source.resolve(graph) if self.source.entries[k]['type'] == 'materialgraph')
+        return rsurface.surface(self.source.asset_data(gkey), self.source.asset_data(key),
+                                texture_sizes=lambda texture: texture_size(self.source, texture))
+
+    def test_fur_material_draws_the_engine_fur_writer(self):
+        from rc2016.games.rcra import fur, material
+        from rc2016.games.rcra.texture import texture_size
+        key = self.source.resolve(FUR)[0]
+        data = self.source.asset_data(key)
+        self.assertEqual(material._graphs(self.source, key), [])
+        record = fur.fur_record(data)
+        self.assertEqual([p.rsplit('/', 1)[-1] for p in record[2]],
+                         ['hero_ratchet_head_c.texture', 'hero_ratchet_head_n.texture', 'hero_ratchet_head_g.texture',
+                          'hero_ratchet_head_fur_control.texture'])
+        self.assertEqual(dict(material.material_slots(data))[material.SLOT_BASE_COLOUR], record[2][0])
+        program = fur.fur_program(self.source, data)
+        result = rsurface.surface(None, data, program=program,
+                                  texture_sizes=lambda texture: texture_size(self.source, texture))
+        g, terms = result['graph'], result['terms']
+        self.assertEqual(set(result['textures']), {'g_BaseMap', 'g_FurGlossMap', 'g_FurControlMap'})
+        self.assertIs(g.value(terms['clip']), False)   # the shell cut is not applied
+        self.assertIn(fur.FUR_NOTE, result['limitations'])
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = blender_export.material_entry(self.source, FUR, Path(tmp))
+        self.assertIn('recipe', entry)
+
+    def test_graph_named_by_file_name(self):
+        from rc2016.games.rcra import material
+        key = self.source.resolve('material/environment/kalebo/ground/kal_gnd_floor_bare_01/'
+                                  'meg_kalebo_float44_gnd_floor_bare_01.material')[0]
+        self.assertEqual([p.rsplit('/', 1)[-1] for p in material._graphs(self.source, key)], ['basic_normal_gloss.materialgraph'])
+        missing = self.source.resolve('material/environment/northern_forest/ground/nor_gnd_snow_01/nor_gnd_snow_01.material')[0]
+        self.assertIn('not in the install', material.no_graph_reason(self.source.asset_data(missing)))
+
+    def test_writer_with_a_fixed_normal(self):
+        result = self.surface_of('material/environment/global/prop/gbl_prop_smash_button_glow_01/'
+                                 'gbl_prop_smash_button_glow_02.material')
+        g, terms = result['graph'], result['terms']
+        normal = [g.value(terms['normal.' + c]) for c in 'xyz']
+        self.assertAlmostEqual(math.sqrt(sum(c * c for c in normal)), 1.0, places=3)
+        self.assertEqual(g.value(terms['occlusion']), 1.0)   # y bit 13: occlusion mode, alpha 1
+
+    def test_byte_scale_with_a_folded_factor(self):
+        result = self.surface_of('source/material/environment/zurkon/prop/zur_gp_arena_energy_barrier_outer/'
+                                 'zur_gp_arena_energy_barrier_outer.material')
+        self.assertIn('gloss', result['terms'])
 
     def test_scene_read_other_than_as_a_tint_stays_an_input(self):
         result = self.forward_of('material/characters/npc/npc_zur_pub_hologram_01/npc_zur_pub_hologram_01.material')
