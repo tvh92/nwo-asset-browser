@@ -165,7 +165,7 @@ class LoaderTests(unittest.TestCase):
 class ArchiveTests(unittest.TestCase):
     def test_crate_zone_has_structural_primary_bindings(self):
         from rc2016.levels.scene import open_archive, zone_scene
-        root=Path(os.environ['RC2016_RESEARCH']).parents[1]/'Ratchet & Clank (EUR)'/'Image0'
+        root=Path(os.environ['RC2016_RESEARCH'])
         archive=open_archive(root)
         try:
             path='levels/novalis/openarea/openworld/default_region/gp_crates.zone'

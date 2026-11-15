@@ -61,7 +61,7 @@ class SkinSlotTests(unittest.TestCase):
         evidence = ARCHIVE / 'levels/Actors/out/corpus_validation.json'
         if not evidence.is_file():
             self.skipTest('actor source-root receipt unavailable')
-        root = json.loads(evidence.read_text())['root']
+        root = os.environ['RC2016_RESEARCH']   # the live archive; the receipt's recorded root may have moved
         material = 'material/character/enemy/enm_sandshark/enm_puffer_fish.material'
         with Corpus(root, ARCHIVE / 'levels/Actors/out', extensions=('.zone',)).opened() as c:
             got = tp.material_texture_paths(c.archive, material)

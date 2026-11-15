@@ -91,7 +91,7 @@ class ArchiveFactoryTests(unittest.TestCase):
     def test_novalis_exact_factory_links_preview_84_peckbots_and_20_birdbots(self):
         from rc2016.levels.actors import ActorCatalog
         from rc2016.levels.scene import open_archive
-        root = Path(os.environ['RC2016_RESEARCH']).parents[1]/'Ratchet & Clank (EUR)'/'Image0'
+        root = Path(os.environ['RC2016_RESEARCH'])
         archive = open_archive(root)
         try:
             c = ActorCatalog(archive)

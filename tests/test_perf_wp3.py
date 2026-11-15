@@ -327,6 +327,7 @@ class LoaderTests(unittest.TestCase):
         archive = SimpleNamespace(entries={'m': dict(type='material')}, resolve=lambda p: ['m'])
         refs = [dict(path='materialgraph/x.materialgraph')]
         with patch.object(ld, 'asset_references', return_value=refs), \
+                patch('rc2016.viewer.textures.material_texture_paths', return_value={}), \
                 patch('rc2016.viewer.native_glsl.selected_translation', side_effect=AssertionError('selected twice')):
             rules = ld.material_rules(archive, [dict(path='a.material')], {'a.material': None})
         self.assertEqual(rules['a.material']['graphs'], ['materialgraph/x.materialgraph'])

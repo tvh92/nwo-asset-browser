@@ -189,7 +189,7 @@ class ActorCorpusTests(unittest.TestCase):
         r = json.loads(report.read_text(encoding='utf-8'))
         self.assertEqual(r['invariant_failures'], [])
         self.assertEqual(r['archive_errors'], {})
-        with Corpus(r['root'], ARCHIVE / 'levels/Actors/out', extensions=('.zone',)).opened() as corpus:
+        with Corpus(os.environ['RC2016_RESEARCH'], ARCHIVE / 'levels/Actors/out', extensions=('.zone',)).opened() as corpus:
             zone_path = 'levels/nebula/openarea/openworld/default_region/gp_base.zone'
             data = asset_bytes(corpus.archive, zone_path)
             actors = af.decode_zone_actors(data)['actors']

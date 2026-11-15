@@ -79,7 +79,7 @@ def decal_state(material_path, blend, graph):
 
 def decal_models(archive, zone_paths):
     """[{'path', 'zone', 'geometry', 'groups'}] one synthetic model per (zone, material) for the non-scorch decals whose
-    material resolves a `_c` texture, plus {material path: decals} that were not drawn. The geometry is the level viewer's model
+    material resolves a colour texture (`_c`, or `_window_c` for the forward decal programs), plus {material path: decals} that were not drawn. The geometry is the level viewer's model
     geometry (world-space positions, one batch, one material); ``groups`` is the one identity instance in zone_scene's format."""
     import re
     from array import array
@@ -98,7 +98,8 @@ def decal_models(archive, zone_paths):
                 flags = render_state.material_flags(data=data)
                 graph = (re.findall(rb'[ -~]+\.materialgraph', data) or [b''])[0].decode('ascii')
                 blend = render_state.decode_flags(flags)['surface'] if flags is not None else None
-                has_c = bool(textures.material_texture_paths(archive, material).get('_c'))
+                paths = textures.material_texture_paths(archive, material)
+                has_c = bool(paths.get('_c') or paths.get('_window_c'))
                 usable[key] = decal_state(material, blend, graph) if has_c else None
             except (ValueError, KeyError, OSError):
                 usable[key] = None
