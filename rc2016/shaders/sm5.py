@@ -16,8 +16,9 @@ act on active lanes, so they are folded under the facts the lane's active predic
 written as select(active, i + 1, i) is exactly the iteration count there, and a loop with an early break still ends at
 its count. Facts carry over iterations (a lane active now passed the previous iteration's exit test), and a test that
 one select condition decides splits on it, so a parallax counter that jumps past its step count on a hit ends at the
-count's bound; extra predicated iterations are allowed only up to that bound. A counter that differs between a continue
-path and the fall-through path does not fold this way.
+count's bound; extra predicated iterations are allowed only up to that bound (taken from the unspecialised exit test
+while the specialised one has decided the counter test). A counter that differs between a continue path and the
+fall-through path does not fold this way.
 
 Constant buffer reads become 'input' nodes named '<cbuffer>.<variable>+<byte offset>' from the RDEF reflection;
 interpolants become 'input' nodes named '<semantic>.<component>'; texture samples and buffer loads become 'sample'/'load'
@@ -34,7 +35,7 @@ import numpy as np
 from rc2016.shaders import dxbc
 
 U32 = 0xFFFFFFFF
-MAX_LOOP_ITERATIONS = 64           # unrolled iterations while the loop's continuation folds to a constant
+MAX_LOOP_ITERATIONS = 65           # unrolled iterations while the loop's continuation folds (64 steps + exit test)
 MAX_PREDICATED_ITERATIONS = 8      # further iterations allowed while it does not (data-dependent trip count)
 TRUE_BITS = U32
 
@@ -962,6 +963,8 @@ class Translator:
                 state['facts'][result] = False
             state['version'] = state.get('version', 0) + 1
             need = self._steps_to_bound(result)
+            if need is None and result is not cond:
+                need = self._steps_to_bound(cond, shallow=True)
             if need is not None:   # an integer counter against a bounded value: allow just the steps that reach it
                 state['until'] = max(state.get('until', 0), min(MAX_LOOP_ITERATIONS, state['iteration'] + need))
         return result
@@ -1080,20 +1083,42 @@ class Translator:
                 return g.select(c, yes, no)
         return root
 
-    def _steps_to_bound(self, node):
-        """Iterations until an exit test 'k >= y' or 'k < y' (k the constant counter, y of known range) is decided for
-        every y: high(y) - k + 2 (a budget for unrolling, not a correctness bound), or None without such a comparison."""
+    def _steps_to_bound(self, node, shallow=False):
+        """Iterations until an exit test 'k >= y' or 'k < y' (k the counter, y of known range) is decided for every y:
+        high(y) - k + 2 (a budget for unrolling, not a correctness bound), or None without such a comparison. A counter
+        that is not constant counts from its low bound: in the unspecialised test a parallax counter reads
+        select(hit, n + 1, k) + 1, and its test is decided (false) in the specialised one while k stays below n's low
+        bound, so only the unspecialised test still shows the budget. ``shallow`` looks only through the boolean
+        combinators at the top of the test (the unspecialised one reaches the whole unrolled history)."""
         g = self.g
         need = None
-        for i in g.reachable([node]):
+        if shallow:
+            found, stack = [], [(node, 0)]
+            while stack:
+                i, d = stack.pop()
+                found.append(i)
+                if d < 4 and g.nodes[i]['op'] in ('b_or', 'b_and', 'b_not'):
+                    stack.extend((a, d + 1) for a in g.nodes[i]['args'])
+        else:
+            found = g.reachable([node])
+        for i in found:
             n = g.nodes[i]
             if n['op'] in ('ilt', 'ige', 'lt', 'ge'):   # float tests too: ftoi counters fold to x < k + 1
                 for x, y in (n['args'], n['args'][::-1]):
-                    r = g.bounds(y) if g.is_const(x) else None
-                    if r is not None:
+                    r = g.bounds(y)
+                    if r is None:
+                        continue
+                    if g.is_const(x):
                         k = _signed(g.value(x)) if n['type'] != 'f' and g.type(x) == 'i' else g.value(x)
-                        step = int(math.ceil(r[1] - k)) + 2
-                        need = step if need is None else max(need, step)
+                    else:
+                        rx = g.bounds(x)
+                        if rx is None or not math.isfinite(rx[0]):
+                            continue
+                        k = rx[0]
+                    if not math.isfinite(r[1]):
+                        continue
+                    step = int(math.ceil(r[1] - k)) + 2
+                    need = step if need is None else max(need, step)
         return need if need is not None and need > 0 else None
 
     def _entered(self, entry):

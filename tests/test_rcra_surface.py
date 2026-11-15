@@ -107,6 +107,23 @@ class VolumeTests(unittest.TestCase):
         self.assertGreater(float(np.ptp(want['albedo'])), 0.3)
         self.assertLess(float(np.abs(got['albedo'][:, :3] - want['albedo']).max()), 3e-3)   # 8-bit atlas, float bake
 
+    @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
+    def test_blender_division_by_a_constant_zero_is_infinite(self):
+        """D3D x / 0 is sign(x) inf, so sat(x / 0) is a step; Blender's Divide alone would return 0."""
+        nodes = [dict(op='input', type='f', name='TEXCOORD.x', args=[]), dict(op='const', type='f', value=-0.5, args=[]),
+                 dict(op='const', type='f', value=0.0, args=[]), dict(op='const', type='f', value=1.0, args=[])]
+        nodes.append(dict(op='add', type='f', args=[0, 1]))   # 4: u - 0.5
+        nodes.append(dict(op='div', type='f', args=[4, 2]))   # 5: (u - 0.5) / 0
+        nodes.append(dict(op='sat', type='f', args=[5]))      # 6
+        terms = {'albedo.r': 6, 'albedo.g': 6, 'albedo.b': 6, 'f0.r': 2, 'f0.g': 2, 'f0.b': 2, 'gloss': 2, 'normal.x': 2,
+                 'normal.y': 3, 'normal.z': 2, 'occlusion': 3, 'emission': 2, 'clip': 2}
+        entry = dict(recipe=dict(version=1, nodes=nodes, terms=terms, textures={}, inputs=[], limitations=[]), images={})
+        with tempfile.TemporaryDirectory() as tmp:
+            want = blender_check.expected(entry, 9)
+            got = blender_check.bake(entry, BLENDER, 9, tmp)
+        self.assertEqual(sorted(set(want['albedo'][:, 0])), [0.0, 1.0])
+        np.testing.assert_array_equal(got['albedo'][:, :3], want['albedo'])
+
     def test_non_finite_sample_coordinates_are_undefined(self):
         """A coordinate divided by a neutral 0 (here u * inf) samples nowhere: the pixel is left out, not a crash."""
         nodes = [dict(op='input', type='f', name='TEXCOORD.x', args=[]), dict(op='input', type='f', name='TEXCOORD.y', args=[]),

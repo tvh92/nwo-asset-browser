@@ -481,7 +481,7 @@ The engine vertex program that feeds slots 1, 4 and 5 is in the exe (vertex pull
 
 - **Types:** every node is a float, an integer bit pattern or a comparison result. Bitcasts fold for constants; folding uses float32 arithmetic.
 - **Branches:** each `if`, `else` and `switch` case runs as its own region and joins with one `select` per register.
-- **Loops:** a loop is unrolled while its exit condition folds. A data-dependent loop (a light list, for example) poisons only the registers it writes, with an `unknown` node, so outputs that do not depend on it still translate. Branch, break, return and discard conditions act only on active lanes, so they are folded under what a lane's active predicate implies. A counter is then exactly the iteration count, and a loop with an early break still ends at its count. Facts carry over iterations: a lane active now passed the previous iteration's exit test, so its decided parts were false. An exit test that one select condition decides is split on it. A parallax counter that jumps past its step count on a hit (n = trunc(32 − 24 sat(x)), so 8 to 32 steps) then reads "hit, or step ≥ n", and the loop ends at n's bound. Value ranges (`Graph.bounds`) decide comparisons, and an integer test of `ftoi(x)` becomes the exact float test of x. Extra predicated iterations are allowed only up to the bound. The outputs are bit-identical to the unfolded translation wherever both translate. Still open: a counter that differs between a `continue` path and the fall-through path, and loops with no bounded counter (ray marches, per-pixel volume flags).
+- **Loops:** a loop is unrolled while its exit condition folds. A data-dependent loop (a light list, for example) poisons only the registers it writes, with an `unknown` node, so outputs that do not depend on it still translate. Branch, break, return and discard conditions act only on active lanes, so they are folded under what a lane's active predicate implies. A counter is then exactly the iteration count, and a loop with an early break still ends at its count. Facts carry over iterations: a lane active now passed the previous iteration's exit test, so its decided parts were false. An exit test that one select condition decides is split on it. A parallax counter that jumps past its step count on a hit (n = trunc(32 − 24 sat(x)), so 8 to 32 steps) then reads "hit, or step ≥ n", and the loop ends at n's bound. Value ranges (`Graph.bounds`) decide comparisons, and an integer test of `ftoi(x)` becomes the exact float test of x. Extra predicated iterations are allowed only up to the bound, at most 64 steps plus the exit test. When the folded exit test no longer shows the counter (16 to 64 portal steps: the test is decided false while the step stays below 16), the budget comes from the unfolded test, from the counter's low bound. Ray marches and parallax decals end this way. The outputs are bit-identical to the unfolded translation wherever both translate.
 - **Discard and return:** both become predicates. A discarded pixel's registers are don't-care, so a discard does not predicate later register writes. This keeps a register one type when a program reuses it, a mask before the discard and a float after it, as the holo graphs do. UAV stores stay gated by the discard. On the materials both versions translate, the outputs are bit-identical on every kept pixel.
 - **Texture sizes:** `resinfo` on a texture whose size the bindings know (`Bindings.texture_size`) folds to SM5's values for its dimension, mip level and return type. `surface` and `forward` take `texture_sizes`, which is `texture.texture_size`: the full texture with every streamed mip resident (labelled). Array sizes and depths do not depend on streaming.
 - **Names:** constant-buffer reads become inputs named from the reflection, such as `GlobalWorldCBuffer.m_KeyLightVec+4` or `MultiCustomMaterialCB.g_CustomMaterial_Buffer+12`. Interpolants become inputs named by semantic, such as `TEXCOORD2.x`. Texture reads become `sample` and `load` nodes carrying the binding name.
@@ -539,6 +539,7 @@ Blended materials are drawn by their forward program (slot 1), which lights itse
 - **Draw flags:** only the material's lit bit (`material.draw_flags`).
 - **Object:** the neutral object of [Per-object values](#per-object-values).
 - **Depth:** the stored scene depth sits at the far clip, so there is no soft depth fade.
+- **Volume flags:** the per-tile bitset of engine flag volumes (`g_VolumeFlagBitsetView`, whose bits index the boxes in `GlobalVolumeFlagBuffer`) is empty, so no flag volume covers the material. Rain on glass, for example, reads it to find shelters.
 - **Clip plane:** the custom clip plane clips nothing.
 - **View:** the programs rebuild the view position from `SV_POSITION` and `m_ViewToWorldMat`. With `FORWARD_VIEW_FLOATS`, `SV_POSITION.xyw` is the camera-to-point offset in world axes, so a renderer supplies it as `VIEW.xyz` and the matrix translation as the camera position `CAMERA.xyz`.
 
@@ -548,8 +549,7 @@ Blended materials are drawn by their forward program (slot 1), which lights itse
 
 **Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps (`TextureCube`, and a `TextureCubeArray` read at a constant cube index) are sampled along the direction the program computes (the first three address lanes, in game space). The explicit mip level, bias or gradients of a cube lookup are not applied: the top mip is read, and the result says so. An array read at a run-time index, or a cube read by `gather` or `ld`, is unsupported. A cube texture's slices are its faces, six per cube in the order +X, -X, +Y, -Y, +Z, -Z, top row first.
 
-**Coverage:** 1,555 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated:
-- loops whose trip count depends on the pixel (37): ray marches, per-pixel volume flags, counters that a `continue` path skips
+**Coverage:** 1,592 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated:
 - G-buffer reads (57), mostly screen effects and a few decals
 - lit materials that read the scene colour (46), and colour that is not affine in it (20)
 - integer arithmetic left in the colour (about 32)
@@ -571,7 +571,7 @@ A Blender export (`.blend`, FBX or USD, through `rc2016/export/blender_convert.p
 | --- | --- |
 | `rc2016/games/rcra/surface.py` | Translates the G-buffer writer (slot 4) and unpacks the engine's packing into surface terms: a recipe. For blended materials it also translates the forward program (slot 1) into colour and alpha. |
 | `rc2016/games/rcra/blender_export.py` | The `Game.blender_materials` hook: recipes and unit textures, written as `rcra_materials.json` beside the export |
-| `rc2016/export/rcra_blender.py` | Runs in Blender: the "RC RA Deferred BRDF" group, and one Math node per recipe operation |
+| `rc2016/export/rcra_blender.py` | Runs in Blender: the "RC RA Deferred BRDF" group, and one Math node per recipe operation. A division by a constant 0 (a neutral profile value) is x × Exponent(10000), which is x × inf as in D3D; Blender's Divide alone returns 0 |
 
 ### Surface terms
 
@@ -587,7 +587,7 @@ Values a material does not own are bound and listed in its limitations:
 - **Neutral draw:** no dissolve, opaque, no render flags (lighting class 0), shader time 0.
 - **Review values:** screen position for dither, LOD fade and adapted luminance 1.
 
-**Coverage:** 5,267 of 5,721 materials. The rest are reported with a reason (`rc2016.games.rcra.surface.Unsupported`):
+**Coverage:** 5,286 of 5,721 materials. The rest are reported with a reason (`rc2016.games.rcra.surface.Unsupported`):
 - integer operations left in the writer
 - writers without the engine packing
 - unbounded loops
@@ -648,7 +648,7 @@ Export check: each export builds the `.blend` as a candidate, reopens it in a se
 - **Window:** a UV window small enough that the bake's sub-pixel jitter stays below a texel.
 - **Undefined pixels:** a pixel whose recipe samples a texture at a non-finite coordinate is left out and counted as `undefined`. This happens when a neutral profile value ends up as a divisor, such as a custom object value of 0 dividing a distortion offset in the waterspray material. Neither renderer defines that lookup.
 - **Results:** on one material from each of the ten most-used graphs, F0 and alpha are exact. Albedo and the normal agree within 2 × 10⁻³, and gloss, occlusion and emission within 8-bit rounding ties.
-- **Forward:** a blended material's forward colour, alpha and background tint are baked too, with the view held at fixed values (`FORWARD_VIEW`). On the trooper dome and the wine glass, colour agrees within 2 × 10⁻⁶ and alpha within 6 × 10⁻⁸; a 128-slice noise volume within 5 × 10⁻⁶. A cube map is compared with the exact D3D lookup of its stored faces, so the difference includes the equirectangular resampling: on a laser-tube material the colour (values near 31) differs by at most 0.1, and on a synthetic cube with six different faces 93 % of the baked pixels agree within 0.02 and the rest sit on face seams.
+- **Forward:** a blended material's forward colour, alpha and background tint are baked too, with the view held at fixed values (`FORWARD_VIEW`). On the trooper dome and the wine glass, colour agrees within 2 × 10⁻⁶ and alpha within 6 × 10⁻⁸; a 128-slice noise volume within 5 × 10⁻⁶. A cube map is compared with the exact D3D lookup of its stored faces, so the difference includes the equirectangular resampling: on a laser-tube material the colour (values near 31) differs by at most 0.1, and on a synthetic cube with six different faces 93 % of the baked pixels agree within 0.02 and the rest sit on face seams. The 64-step convergence-tear portal march and the rain torso glass bake exactly.
 
 ### In the viewer
 
@@ -672,7 +672,7 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 
 ### Not translated
 
-- **Blended materials whose forward program does not translate** (632 of 1,747): Blender gets their G-buffer surface, opaque.
+- **Blended materials whose forward program does not translate** (155 of 1,747): Blender gets their G-buffer surface, opaque.
 - **Forward lighting:** the forward program's own light loop is not used. Blender's lights shade the G-buffer surface instead, which assumes that the forward program lights the same terms as the deferred apply.
 - **Lighting classes 1 to 5:** skin, hair and the other special classes need their own apply programs. They are lit with class 0.
 

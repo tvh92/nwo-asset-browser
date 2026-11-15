@@ -558,8 +558,8 @@ def forward(graph_data, material_data, texture_sizes=None):
         'Forward colour with every engine light source zero (key light, light grid, probes, GI, reflections): the '
         "material's own emission and effects. The renderer's lights shade its G-buffer surface instead of the forward "
         "program's lighting.",
-        "Draw: render flags hold only the material's lit bit (%s), no dissolve, no particle values, shader time 0; "
-        'stored scene depth at the far clip (no soft depth fade); view space with the world axes.'
+        "Draw: render flags hold only the material's lit bit (%s), no dissolve, no particle values, no flag volumes, "
+        'shader time 0; stored scene depth at the far clip (no soft depth fade); view space with the world axes.'
         % ('lit' if flags else 'unlit: lighting term 1') + OBJECT_NOTE * bindings.object_read]
     if bindings.background_read:
         limitations.append('The program samples the scene behind it (%s); the colour is affine in it, so it is split into '

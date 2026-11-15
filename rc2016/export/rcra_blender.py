@@ -193,6 +193,10 @@ class _Emitter:
         return v
 
     def operation(self, op, a):
+        if op == 'div' and isinstance(a[1], float) and a[1] == 0.0:
+            # Blender's Divide returns 0 for a zero divisor; D3D gives x * inf (sign(x) inf, NaN for 0). A neutral profile
+            # value of 0 leaves such divisors. Exponent(10000) overflows float32 to +inf in Cycles and EEVEE.
+            return self.math('MULTIPLY', a[0], self.math('EXPONENT', 10000.0))
         if op in MATH:
             return self.math(MATH[op], *a)
         if op == 'neg':

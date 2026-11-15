@@ -175,25 +175,29 @@ class TranslatorTests(unittest.TestCase):
                 self.assertEqual(values[:len(want)], want, (source[:40], x, y, z, w))
 
     def test_parallax_steps_end_at_the_bound_of_their_count(self):
-        # n = trunc(32 - 24 sat(z)) steps in [8, 32]; a hit jumps the counter past n. Unrolled to the bound, exactly.
-        source = '''Texture2D t : register(t0); SamplerState s : register(s0);
-            float4 main(float4 a : TEXCOORD0) : SV_TARGET { int n = (int)(32 - 24 * saturate(a.z)); float r = -1;
-                [loop] for (int i = 0; i < n; i++) { if (t.SampleLevel(s, float2(i, a.x), 0).r > a.y) { r = i; i = n + 1; } }
-                return float4(r, n, 0, 1); }'''
-        tr = sm5.translate(dxbc.shader(compile_hlsl(source)))
-        self.assertEqual(tr.status(), 'ready')
-        self.assertIn(33, [n for _p, n in tr.loops])
+        # n = trunc(high - span sat(z)) steps; a hit jumps the counter past n. Unrolled to the bound, exactly. With 16 to
+        # 64 steps (the portal march) the exit test is decided false for the first 15 iterations, so the unroll budget
+        # comes from the unspecialised test, and a 64-step loop needs its 65th exit test.
+        for high, span in ((32, 24), (64, 48)):
+            source = '''Texture2D t : register(t0); SamplerState s : register(s0);
+                float4 main(float4 a : TEXCOORD0) : SV_TARGET { int n = (int)(%d - %d * saturate(a.z)); float r = -1;
+                    [loop] for (int i = 0; i < n; i++) { if (t.SampleLevel(s, float2(i, a.x), 0).r > a.y) { r = i; i = n + 1; } }
+                    return float4(r, n, 0, 1); }''' % (high, span)
+            tr = sm5.translate(dxbc.shader(compile_hlsl(source)))
+            self.assertEqual(tr.status(), 'ready', high)
+            self.assertIn(high + 1, [n for _p, n in tr.loops])
 
-        def height(i, x):
-            return ((int(i) * 37 + int(x * 1000)) % 101) / 100.0
-        rnd = __import__('random').Random(3)
-        for _ in range(300):
-            x, y, z = rnd.uniform(0, 1), rnd.uniform(0.5, 1.02), rnd.uniform(-0.2, 1.2)
-            got = sm5.evaluate(tr.graph, [tr.output(0, 0), tr.output(0, 1)], {'TEXCOORD.x': x, 'TEXCOORD.y': y, 'TEXCOORD.z': z},
-                               lambda node, args: [height(args[0], args[1]), 0.0, 0.0, 0.0])
-            n = int(sm5.f32(32 - sm5.f32(24 * min(max(sm5.f32(z), 0.0), 1.0))))
-            want = next((float(i) for i in range(n) if height(i, sm5.f32(x)) > sm5.f32(y)), -1.0)
-            self.assertEqual((got[tr.output(0, 0)], got[tr.output(0, 1)]), (want, float(n)), (x, y, z))
+            def height(i, x):
+                return ((int(i) * 37 + int(x * 1000)) % 101) / 100.0
+            rnd = __import__('random').Random(3)
+            for _ in range(300):
+                x, y, z = rnd.uniform(0, 1), rnd.uniform(0.5, 1.02), rnd.uniform(-0.2, 1.2)
+                got = sm5.evaluate(tr.graph, [tr.output(0, 0), tr.output(0, 1)],
+                                   {'TEXCOORD.x': x, 'TEXCOORD.y': y, 'TEXCOORD.z': z},
+                                   lambda node, args: [height(args[0], args[1]), 0.0, 0.0, 0.0])
+                n = int(sm5.f32(high - sm5.f32(span * min(max(sm5.f32(z), 0.0), 1.0))))
+                want = next((float(i) for i in range(n) if height(i, sm5.f32(x)) > sm5.f32(y)), -1.0)
+                self.assertEqual((got[tr.output(0, 0)], got[tr.output(0, 1)]), (want, float(n)), (high, x, y, z))
 
     @staticmethod
     def _early_break(x, y, z):
