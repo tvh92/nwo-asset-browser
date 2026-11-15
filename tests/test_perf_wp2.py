@@ -61,6 +61,14 @@ def ref_srgb(x):
     return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
 
 
+def at_matrix(q):
+    """Rotation matrix of a unit quaternion (x, y, z, w)."""
+    x, y, z, w = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
 def rand_quat(rng, n):
     q = rng.normal(size=(n, 4))
     return q / np.linalg.norm(q, axis=1, keepdims=True)
@@ -138,13 +146,44 @@ class LocalTrs(unittest.TestCase):
             for a, b in zip(got, ref):
                 np.testing.assert_allclose(a, b, atol=1e-9)
 
-    def test_singular_parent_raises(self):
-        rows = make_rig(np.random.default_rng(5), 3)
+    def test_zero_scale_joint_hides_its_subtree(self):
+        # A clip hides a joint by scaling it to zero (Rift Apart's weapons vendor arm, the emperor's eyes): the
+        # subtree's worlds collapse for that frame, and the export keeps the clip instead of failing on the inverse.
+        rng = np.random.default_rng(5)
+        rows = make_rig(rng, 4)
+        rows[1]['parent'], rows[2]['parent'], rows[3]['parent'] = 0, 1, 2
+        frames = make_frames(rng, rows, 3)
+        w = worlds_batch(rows, frames, 'full')
+        hidden = w.copy()
+        hidden[1, 1:, :3, :3] = 0   # joint 1 at frame 1 has scale 0, so its children collapse with it
+        hidden[1, 2:, :3, 3] = hidden[1, 1, :3, 3]
+        t, r, s = models.local_trs_batch(rows, hidden)
+        for f in (0, 2):   # defined frames are unchanged
+            for j, (rt, rr, rs) in enumerate(ref_local_trs(rows, w[f])):
+                np.testing.assert_allclose(t[f, j], rt, atol=1e-6)
+                np.testing.assert_allclose(r[f, j], rr, atol=1e-6)
+                np.testing.assert_allclose(s[f, j], rs, atol=1e-6)
+        np.testing.assert_allclose(s[1, 1], 0, atol=1e-12)   # the hidden joint keeps its zero scale
+        np.testing.assert_allclose(r[1, 1], r[0, 1])          # and holds the previous frame's rotation
+        for j in (2, 3):                                     # joints under it hold their previous local TRS
+            np.testing.assert_allclose(t[1, j], t[0, j]); np.testing.assert_allclose(s[1, j], s[0, j])
+        # The rebuilt hierarchy reproduces every frame, the hidden subtree included.
+        for f in range(3):
+            world = []
+            for j, row in enumerate(rows):
+                m = np.eye(4)
+                m[:3, :3] = at_matrix(r[f, j]) * s[f, j]
+                m[:3, 3] = t[f, j]
+                world.append(world[row['parent']] @ m if row['parent'] >= 0 else m)
+            np.testing.assert_allclose(np.array(world), hidden[f], atol=1e-6)
+
+    def test_first_frame_hidden_holds_the_next(self):
+        rows = make_rig(np.random.default_rng(7), 2)
         rows[1]['parent'] = 0
-        w = worlds_batch(rows, [()], 'full')
-        w[0, 0, :3, :3] = 0
-        with self.assertRaises(np.linalg.LinAlgError):
-            models.local_trs_batch(rows, w)
+        w = worlds_batch(rows, make_frames(np.random.default_rng(8), rows, 2), 'full')
+        w[0, :, :3, :3] = 0
+        t, r, s = models.local_trs_batch(rows, w)
+        np.testing.assert_allclose(r[0], r[1]); np.testing.assert_allclose(t[0, 1], t[1, 1])
 
 
 class HemisphereWriter(unittest.TestCase):

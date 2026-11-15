@@ -473,17 +473,43 @@ def decompose(matrix):
     return decompose_batch(matrix)
 
 
+def _hold_nearest(values, bad):
+    """``values`` (F, J, k) with each ``bad`` (F, J) entry replaced by the same joint's previous good frame (the next
+    one before the first good frame); a joint with no good frame keeps its values."""
+    frames = np.arange(len(bad))[:, None]
+    previous = np.maximum.accumulate(np.where(bad, -1, frames), axis=0)
+    following = np.minimum.accumulate(np.where(bad, len(bad), frames)[::-1], axis=0)[::-1]
+    source = np.where(previous >= 0, previous, np.where(following < len(bad), following, frames))
+    return np.take_along_axis(values, source[..., None], axis=0)
+
+
 def local_trs_batch(rows, worlds):
-    """Local TRS arrays (T, R, S) of shape (F, J, 3/4/3) so the hierarchy reproduces ``worlds`` (F, J, 4, 4)."""
+    """Local TRS arrays (T, R, S) of shape (F, J, 3/4/3) so the hierarchy reproduces ``worlds`` (F, J, 4, 4).
+
+    A clip can scale a joint to zero to hide it (and everything under it) for some frames. The zero scale is kept,
+    so the hierarchy still hides that subtree; the rotation of a zero-scale joint and the local TRS of a joint
+    under a zero-scale parent are not defined by ``worlds``, and hold the joint's nearest defined frame instead."""
     worlds = np.asarray(worlds, float)
     parent = np.array([r['parent'] for r in rows], np.intp)
     local = worlds.copy()
     child = np.nonzero(parent >= 0)[0]
+    orphan = np.zeros(worlds.shape[:2], bool)   # (F, J): the parent's world has no inverse
     if len(child):
         unique, inverse = np.unique(parent[child], return_inverse=True)
-        inv = np.linalg.inv(worlds[:, unique])
+        parents = worlds[:, unique]
+        singular = np.abs(np.linalg.det(parents[..., :3, :3])) < 1e-12
+        if singular.any():
+            parents = np.where(singular[..., None, None], np.eye(4), parents)
+            orphan[:, child] = singular[:, inverse]
+        inv = np.linalg.inv(parents)
         local[:, child] = inv[:, inverse] @ worlds[:, child]
-    return decompose_batch(local)
+    t, r, s = decompose_batch(local)
+    unoriented = orphan | np.all(np.abs(s) <= 1e-12, axis=-1)
+    if unoriented.any():
+        r = _hold_nearest(r, unoriented)
+        if orphan.any():
+            t, s = _hold_nearest(t, orphan), _hold_nearest(s, orphan)
+    return t, r, s
 
 
 def local_trs(rows, world):
@@ -651,7 +677,8 @@ class ModelExporter:
 
     def __init__(self, source_root, output_root, index_root=None, log=lambda message: None, cancelled=lambda: False):
         from rc2016.viewer.loader import SourcePreviewLoader
-        self.source_root, self.output_root = Path(source_root), Path(output_root)
+        # Absolute: Blender runs in its own process and resolves relative texture and target paths elsewhere.
+        self.source_root, self.output_root = Path(source_root), Path(output_root).resolve()
         # Animation sets are found through a scan's reference index (output_root/reports by default).
         self.index_root = Path(index_root) if index_root else self.output_root
         self.loader = SourcePreviewLoader()
