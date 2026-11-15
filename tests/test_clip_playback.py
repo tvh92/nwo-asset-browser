@@ -1,7 +1,7 @@
 """Clip playback shared by the browser's viewport and the picker's: speed, loop or play once, frame steps and keys."""
 import unittest
 
-from rc2016.app.clip_playback import DEFAULT_SPEED, SPEEDS, ClipPlayback, playback_options
+from rc2016.app.clip_playback import DEFAULT_SPEED, SPEEDS, ClipPlayback, playback_options, sequence_lengths
 
 
 class Recorder:
@@ -92,6 +92,95 @@ class PlaybackTests(unittest.TestCase):
         self.playback.step(1)
         self.playback.toggle()
         self.assertFalse(self.playback.playing)
+
+
+class PlayAllTests(unittest.TestCase):
+    """Play all: every clip of the list's order back to back, decoded on request, on one seconds timeline."""
+
+    def setUp(self):
+        self.clock, self.readout, self.position, self.slider = Clock(), Recorder(), Recorder(), Recorder()
+        self.requests, self.named = [], []
+        self.playback = ClipPlayback(Recorder(), self.clock, Recorder(), self.slider, self.position, self.readout,
+                                     request=self.requests.append, on_clip=self.named.append)
+        # Clips 7, 3 and 5 in the list's order; 3 has no header length and takes the median (2 s).
+        self.playback.offer_all([7, 3, 5], [1.0, None, 2.0], ['a', 'b', 'c'])
+        self.poses = {7: clip(3), 3: clip(5), 5: clip(2)}
+
+    def deliver(self):
+        """The worker answers the last request (LatestWork keeps only the newest)."""
+        index = self.requests[-1]
+        self.playback.receive(index, self.poses[index])
+
+    def test_lengths_fall_back_to_the_median_header_length(self):
+        self.assertEqual(sequence_lengths([1.0, None, 2.0, 0, 3.0]), [1.0, 2.0, 2.0, 2.0, 3.0])
+        self.assertEqual(sequence_lengths([None]), [1.0])
+        self.assertEqual(self.slider.config['to'], 5.0)
+
+    def test_play_runs_every_clip_in_order_and_names_each(self):
+        self.playback.toggle()
+        self.assertEqual((self.requests, self.named), ([7], [7]))
+        self.assertIsNone(self.clock.pending)   # the clock waits for the decode
+        self.deliver()
+        self.assertEqual(self.requests, [7, 3])   # the next clip decodes ahead
+        self.assertEqual(self.readout.value, 'Clip 1/3  ·  1/3 @ 30 fps')
+        self.deliver()   # arrives early: kept until it is reached
+        self.clock.fire()
+        self.clock.fire()
+        self.assertEqual(self.position.value, 1.0)   # the last frame of clip 1 ends its second
+        self.clock.fire()   # on to clip 2, already decoded: no wait
+        self.assertEqual((self.named[-1], self.playback.frame, self.requests[-1]), (3, 0, 5))
+        self.assertEqual(self.readout.value, 'Clip 2/3  ·  1/5 @ 30 fps')
+        self.assertIsNotNone(self.clock.pending)
+
+    def test_loop_wraps_the_whole_list_and_play_once_stops_at_its_end(self):
+        self.playback.toggle()
+        for _ in range(3):
+            self.deliver()
+            while self.playback.frame < len(self.playback.animation['frames']) - 1:
+                self.clock.fire()
+            if self.playback.sequence.position < 2:
+                self.clock.fire()
+        self.clock.fire()   # past the last clip: loop on, back to the first (still cached)
+        self.assertEqual((self.playback.sequence.position, self.playback.frame, self.named[-1]), (0, 0, 7))
+        self.playback.set_loop(False)
+        self.playback.jump_clip(-1)   # to the last clip
+        self.clock.fire()
+        self.clock.fire()
+        self.assertEqual((self.playback.playing, self.clock.pending), (False, None))
+        self.playback.toggle()   # Play after the end starts at the first clip again
+        self.assertEqual((self.playback.sequence.position, self.playback.playing), (0, True))
+
+    def test_scrubbing_finds_the_clip_and_frame_and_pauses(self):
+        self.position.value = 2.0   # 1 s into clip 2 (3 s long... 2 s by median): its middle frame
+        self.playback.scrub()
+        self.assertEqual((self.requests, self.named, self.playback.playing), ([3], [3], False))
+        self.deliver()
+        self.assertEqual((self.playback.sequence.position, self.playback.frame), (1, 2))
+        self.position.value = 2.5
+        self.playback.scrub()   # the same clip: shown at once, nothing decoded
+        self.assertEqual((self.playback.frame, self.requests[-1]), (3, 5))
+
+    def test_a_clip_that_does_not_decode_is_skipped(self):
+        self.playback.toggle()
+        self.playback.fail(7, 'broken')
+        self.assertEqual(self.requests, [7, 3])
+        self.deliver()
+        self.assertEqual((self.playback.sequence.position, self.named), (1, [7, 3]))
+
+    def test_choosing_one_clip_leaves_play_all(self):
+        self.playback.toggle()
+        self.deliver()
+        self.playback.leave_all()
+        self.assertFalse(self.playback.receive(3, self.poses[3]))   # the caller plays it as the chosen clip
+        self.playback.start(self.poses[3])
+        self.assertEqual(self.readout.value, '1/5 @ 30 fps')
+
+    def test_a_new_order_keeps_the_clip_shown(self):
+        self.playback.toggle()
+        self.deliver()
+        self.assertTrue(self.playback.reorder([5, 7], [2.0, 1.0], ['c', 'a']))
+        self.assertEqual((self.playback.sequence.position, self.slider.config['to']), (1, 3.0))
+        self.assertFalse(self.playback.reorder([5], [2.0], ['c']))
 
 
 class PlaybackWidgets(unittest.TestCase):

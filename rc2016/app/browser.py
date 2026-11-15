@@ -437,7 +437,7 @@ class AssetBrowser:
         self.clip_labels=[];self.clip_notes=[];self.clip_cutscene=[];self.clip_index=-1;self.clip_popup=None
         self.clip_open_folders=set();self.clip_search=''   # what the Animation list shows again when reopened
         self.clip_seconds=[]
-        self.play_button=ttk.Button(anim,text='Pause',width=7,state='disabled')
+        self.play_button=ttk.Button(anim,text='Pause',width=8,state='disabled')
         self.play_button.grid(row=1,column=0,sticky='ew',padx=(0,6),pady=(4,0))
         self.frame_pos=tk.DoubleVar(value=0)
         self.frame_slider=ttk.Scale(anim,from_=0,to=1,variable=self.frame_pos,state='disabled')
@@ -457,12 +457,14 @@ class AssetBrowser:
         self.anim_box.grid_remove()   # shown only for a model with clips (_show_animation)
         self.frame_text=tk.StringVar(value='')
         ttk.Label(anim,textvariable=self.frame_text,anchor='e').grid(row=2,column=0,columnspan=5,sticky='e',pady=(2,0))
-        tip('Play or pause the clip.',self.play_button)
-        tip('Drag to scrub through the clip frame by frame.',self.frame_slider)
+        tip('Play or pause the clip. At the rest pose, Play all plays every clip in the list\'s order, naming the one '
+            'playing on the Animation button; Loop then wraps round the whole list.',self.play_button)
+        tip('Drag to scrub through the clip frame by frame; in Play all, through every clip in the list.',self.frame_slider)
         tip('Pick a clip to play on the rest pose. Skinned models only.\nOver the viewport: Space plays or pauses, '
             'Left and Right step a frame, [ and ] change clip.',self.clip_button)
         self.anim_work=LatestWork()
-        self.playback=ClipPlayback(self.viewport,self.app.root,self.play_button,self.frame_slider,self.frame_pos,self.frame_text)
+        self.playback=ClipPlayback(self.viewport,self.app.root,self.play_button,self.frame_slider,self.frame_pos,self.frame_text,
+                                   request=self._request_clip,on_clip=self._show_sequence_clip)
         self.play_button.configure(command=self.playback.toggle);self.frame_slider.configure(command=self.playback.scrub)
         self.clip_speed_var=remember_var(tk.StringVar(value=DEFAULT_SPEED),'model.clip_speed',tuple(SPEEDS))
         self.clip_loop_var=remember_var(tk.BooleanVar(value=True),'model.clip_loop')
@@ -735,6 +737,7 @@ class AssetBrowser:
         self._show_animation(bool(clips))
         usable=bool(clips) and self.viewport.can_animate
         self._enable_clip_controls(usable)
+        if usable:self._offer_all()
         if not clips:
             self.frame_text.set(payload.get('animation_note') or ('Static model' if payload.get('kind')=='static' else ''))
         elif not self.viewport.can_animate:
@@ -752,10 +755,46 @@ class AssetBrowser:
         self.frame_text.set(f'{shown} clips' if shown==len(self.clip_labels) else f'{shown} of {len(self.clip_labels)} clips')
 
     def _clip_filter_changed(self):
-        """Hide copies and layers changed: the open list and the clip count follow; the clip playing keeps playing."""
+        """Hide copies and layers changed: the open list and the clip count follow; the clip playing keeps playing,
+        and Play all keeps its clip when the new list still has it, else goes back to the rest pose."""
         self._close_clip_picker()
+        if self.playback.sequence is not None and not self.playback.reorder(*self._sequence_lists()):
+            self.clip_choice.set(REST_POSE);self.clip_index=-1
+            self._offer_all()
         if self.clip_labels and self.clip_index<0 and self.viewport.can_animate:
             self._show_clip_count()
+
+    def _sequence_lists(self):
+        """Play all's clips in the list's order, with their header lengths and names."""
+        order=self._clip_order()
+        seconds=[self.clip_seconds[i] if i<len(self.clip_seconds) else None for i in order]
+        return order,seconds,[self.clip_labels[i] for i in order]
+
+    def _offer_all(self):
+        """The rest pose of a model with clips: Play plays them all in order (ClipPlayback.offer_all)."""
+        self.playback.offer_all(*self._sequence_lists())
+
+    def _request_clip(self,index):
+        self.anim_work.submit(self._decode_clip,index)
+
+    def _decode_clip(self,index):
+        """Worker side: the clip's pose, or the reason it does not decode, tagged with the clip."""
+        try:
+            return dict(clip=index,pose=self.source_loader.pose(index))
+        except Exception as error:
+            return dict(clip=index,error=str(error))
+
+    def _show_sequence_clip(self,index):
+        """Play all moved to clip ``index``: the Animation button and the list's play mark follow it."""
+        self.clip_index=index
+        self.clip_choice.set(self.clip_labels[index] if 0<=index<len(self.clip_labels) else REST_POSE)
+
+    def _clip_decoded(self,payload):
+        if 'error' in payload:
+            if not self.playback.fail(payload['clip'],payload['error']):
+                self.frame_text.set('Cannot play');self.model_info.set(payload['error'])
+        elif not self.playback.receive(payload['clip'],payload['pose']):
+            self.playback.start(payload['pose'])
 
     def _show_clip_choice(self):
         """The chosen clip's name on the Animation button, cut with an ellipsis when the button is narrower than it."""
@@ -812,8 +851,10 @@ class AssetBrowser:
         return [shown[n] for n in clip_leaves(nodes)]
 
     def _step_clip(self,offset):
-        """Play the clip before (-1) or after (1) the one playing, in the Animation list's order."""
+        """Play the clip before (-1) or after (1) the one playing, in the Animation list's order; in Play all, move
+        through the sequence without leaving it."""
         if self.clip_button.instate(['disabled']) or self.clip_popup is not None:return 'break'
+        if self.playback.jump_clip(offset):return 'break'
         index=step_clip(self._clip_order(),self.clip_index,offset)
         if index is not None:self._choose_clip(index,self.clip_labels[index])
         return 'break'
@@ -878,7 +919,8 @@ class AssetBrowser:
         def choose(item):
             if item.startswith('clip:'):
                 index=int(item[5:]);before=f'clip:{self.clip_index}'
-                if index!=self.clip_index:self._choose_clip(index,REST_POSE if index<0 else self.clip_labels[index])
+                if index!=self.clip_index or self.playback.sequence is not None:   # a clip picked in Play all leaves it
+                    self._choose_clip(index,REST_POSE if index<0 else self.clip_labels[index])
                 for row in {before,item}:   # move the playing mark; the list stays open and scrolled where it was
                     if tree.exists(row):tree.item(row,text=mark(row))
                 tree.focus(item);tree.selection_set(item)
@@ -998,10 +1040,11 @@ class AssetBrowser:
         self.clip_choice.set(label)
         self.clip_index=index
         if index<0:
-            self.playback.clear()
+            self._offer_all()   # the rest pose again, with Play all
             self.frame_text.set('Rest pose');return
+        self.playback.leave_all()
         self.frame_text.set('Decoding…')
-        self.anim_work.submit(self.source_loader.pose,index)
+        self._request_clip(index)
 
     def _stop_animation(self,reset):
         self.playback.pause()
@@ -1222,7 +1265,7 @@ class AssetBrowser:
                         self._request_placements(payload['source_path'])
                         self._render_details()
                         self.model_info.set('\n'.join(t for t in (self.viewport.shading_error,getattr(self.viewport,'shading_warning','')) if t))
-                    elif kind=='animation':self.playback.start(payload)
+                    elif kind=='animation':self._clip_decoded(payload)
                     elif kind=='clip_list':self._apply_clip_list(payload)
                     elif kind=='artifact':self._open(payload)
             except queue.Empty:pass

@@ -7,6 +7,15 @@ from rc2016.app.browser import PREVIEW_DELAY_MS, REST_POSE, AssetBrowser, clip_l
 MARK = "▶  "
 
 
+class NotPlayingAll:
+    """The browser's ClipPlayback outside Play all: the list's choices and steps are the browser's own."""
+
+    sequence = None
+
+    def jump_clip(self, _offset):
+        return False
+
+
 class ClipMenuHost:
     """The parts of AssetBrowser the Animation list uses, without the rest of the window."""
 
@@ -27,6 +36,7 @@ class ClipMenuHost:
         self.clip_index = -1
         self.chosen = []
         self.clip_steps = []
+        self.playback = NotPlayingAll()
         self._fill_clip_menu(labels, (), (), seconds)
 
     def _choose_clip(self, index, label):
