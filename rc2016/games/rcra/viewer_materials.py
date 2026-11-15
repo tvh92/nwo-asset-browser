@@ -72,7 +72,7 @@ def translate(source, material_key):
             raise NotTranslated(stored['error'])
         return stored['surface'], stored['forward'], stored['blend'], stored['limitations'], stored['textures']
     try:
-        out = _translate(graph, data)
+        out = _translate(graph, data, source)
     except NotTranslated as error:
         if key:
             disk.put(key, dict(error=str(error)))
@@ -101,14 +101,16 @@ def _floats(value, decode=False):
     return value
 
 
-def _translate(graph, data):
+def _translate(graph, data, source):
     from rc2016.games.rcra.material import material_blend
+    from rc2016.games.rcra.texture import texture_size
     blend = material_blend(data)
     results, errors = {}, {}
     for name, fn in (('forward', rsurface.forward), ('surface', rsurface.surface)) if blend != 'opaque' else \
             (('surface', rsurface.surface),):
         try:
-            results[name] = fn(graph, data)
+            # Programs that query a texture's size (resinfo) need it, as in the Blender export.
+            results[name] = fn(graph, data, texture_sizes=lambda path: texture_size(source, path))
         except (rsurface.Unsupported, ValueError, KeyError) as error:
             errors[name] = str(error)
     recipes = {name: rsurface.export_recipe(r) for name, r in results.items()}
