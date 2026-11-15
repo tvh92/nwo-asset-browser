@@ -13,8 +13,9 @@ material bound (rc2016.games.rcra.shaders) and unpacks that code, using the deco
 
 F0 and gloss keep the game's 8-bit rounding (round(255 x) / 255, F0 squared after it); the 12-bit normal and the 8-bit
 albedo, occlusion and emission are taken before their rounding. Everything the result still reads is a float expression
-of interpolants, textures and named engine inputs (``PORTABLE_OPS``); integer operations that survive make the material
-unsupported, never approximated.
+of interpolants, textures and named engine inputs (``PORTABLE_OPS``). Integer operations on constants and at most
+MAX_CASE_CONDITIONS boolean conditions (a triplanar writer's dominant-axis index) are evaluated per case into a select of
+constants, exactly; other integer operations that survive make the material unsupported, never approximated.
 
 ``forward`` translates the forward program of a blended material (rc2016.games.rcra.material.material_blend) under the
 forward profile of rc2016.games.rcra.shaders: every light source zero, so its target is the material's own colour and
@@ -79,6 +80,12 @@ class _Bindings(rshaders.NeutralEngine):
         self.object_read = False
         self.units, self.texture_sizes = units or {}, texture_sizes
         self.sized = set()
+        self.records = {}
+        for buffer, members in rshaders.NEUTRAL_RECORDS.items():
+            layout = reflection.constant_buffer(buffer) if reflection is not None else None
+            if layout is not None and layout.variables and layout.variables[0].members:
+                self.records[buffer] = {at: members[name] for name, at, _m in layout.variables[0].members if name in members}
+        self.record_read = False
 
     def texture_size(self, binding):
         """The bound material texture's size (``texture_sizes(path)``), for the programs that query it (resinfo)."""
@@ -93,6 +100,16 @@ class _Bindings(rshaders.NeutralEngine):
         return size
 
     def resource(self, graph, op, binding, args):
+        if binding == rshaders.VOLUME_FLAGS and op == 'ld':
+            return [graph.const('i', 0)] * 4
+        if binding in self.records and op == 'ld_structured':
+            offset = graph.value(args[4]) if len(args) > 4 else None
+            if offset is None or offset not in self.records[binding]:
+                return None
+            self.record_read = True
+            words = self.records[binding]
+            return [graph.const('i', sm5.float_bits(words[offset + 4 * c])) if offset + 4 * c in words
+                    else graph.unknown('%s+%d' % (binding, offset + 4 * c), 'i') for c in range(4)]
         if binding == rshaders.OBJECT_BUFFER and op == 'ld_structured' and self.object is not None:
             offset = graph.value(args[4]) if len(args) > 4 else None
             if offset is None:
@@ -129,6 +146,7 @@ SIZE_NOTE = ('Texture sizes the program queries (%s) are those of the full-resol
              'array sizes and depths do not depend on streaming.')
 OBJECT_NOTE = (' Per-object values are a plain object: identity transform, alpha 1, white object colour, custom values, '
                'creation time and bias 0.')
+RECORD_NOTE = ' No material LOD distance is set (material and subset records): full detail.'
 FORWARD_FLAGS_NAME = 'MatDrawCB.m_RenderFlags'
 
 
@@ -268,15 +286,21 @@ class _Unpack:
         raise Unsupported('G-buffer normal weight')
 
     def normal_word(self, i):
-        """(component, z, constant bits, other bit-field parts) of a NormalSpec x or y word."""
+        """(component, z, bit 13 condition) of a NormalSpec x or y word. A word chosen by a select whose cases are each a
+        packed word (snow layers write another lighting class) is unpacked per case and joined by the same select."""
         fields = self.strip_or(i, dict(bits=0, parts=[]))
         packed, other = [], []
         for part in fields['parts']:
             (packed if self.node(part)['op'] in ('ftou', 'select') and self._is_normal(part) else other).append(part)
+        if not packed and fields['bits'] == 0 and len(other) == 1 and self.node(other[0])['op'] == 'select':
+            c, a, b = self.node(other[0])['args']
+            (ca, za, ba), (cb, zb, bb) = self.normal_word(a), self.normal_word(b)
+            g = self.g
+            return g.select(c, ca, cb), g.select(c, za, zb), g.select(g.boolean(c), ba, bb)
         if len(packed) != 1:
             raise Unsupported('G-buffer normal word has %d packed normals' % len(packed))
         component, z = self.normal_component(packed[0])
-        return component, z, fields['bits'], other
+        return component, z, self.bit13(other, fields['bits'])
 
     def _is_normal(self, i):
         try:
@@ -369,13 +393,12 @@ def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes
     u = _Unpack(g)
     for key in [k for k in tr.outputs if k[0] == 'o' and k[1] == 1]:
         tr.outputs[key] = g.cast(tr.outputs[key], 'f')   # an 8-bit UNORM target: integer-typed words hold float bits
-    nx, nz, _xbits, _xparts = u.normal_word(out(0, 0))
-    ny, nz_y, ybits, yparts = u.normal_word(out(0, 1))
+    nx, nz, _x13 = u.normal_word(out(0, 0))
+    ny, nz_y, occlusion_mode = u.normal_word(out(0, 1))
     if nz != nz_y:
         raise Unsupported('Normal words disagree on z')
     f0r, f0g = u.byte_pair(out(0, 2))
     f0b, gloss = u.byte_pair(out(0, 3))
-    occlusion_mode = u.bit13(yparts, ybits)
     one, zero = g.const('f', 1.0), g.const('f', 0.0)
     occlusion_branch, emission_branch = _split_select(g, out(1, 3), occlusion_mode)
     emission = u.emission(emission_branch)
@@ -402,9 +425,116 @@ def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes
         terms[name] = g.op('mul', stored, stored)
     terms['gloss'] = _rounded(g, g.op('sat', gloss))
     limitations = ['Per-draw values are the neutral draw: no dissolve, opaque, no render flags (lighting class 0), '
-                   'shader time 0.' + OBJECT_NOTE * bindings.object_read, 'The 12-bit normal and the 8-bit albedo, occlusion and emission are used before the '
+                   'no flag volumes, shader time 0.' + OBJECT_NOTE * bindings.object_read + RECORD_NOTE * bindings.record_read, 'The 12-bit normal and the 8-bit albedo, occlusion and emission are used before the '
                    "G-buffer's rounding; F0 and gloss keep it."]
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Surface')
+
+
+MAX_CASE_CONDITIONS = 4
+_NOT_CASE_OPS = {'input', 'unknown', 'load', 'sample', 'channel', 'ddx', 'ddy'}
+
+
+def _case_conditions(g, root):
+    """The boolean conditions an integer expression depends on, when it reads only constants and those conditions
+    through non-portable operations and selects; None when it reads anything else or more than MAX_CASE_CONDITIONS."""
+    conditions, seen, stack = [], set(), [root]
+    while stack:
+        i = stack.pop()
+        if i in seen:
+            continue
+        seen.add(i)
+        n = g.nodes[i]
+        if n['op'] == 'const':
+            continue
+        if i != root and n['type'] == 'b' and n['op'] in PORTABLE_OPS:
+            conditions.append(i)
+            if len(conditions) > MAX_CASE_CONDITIONS:
+                return None
+        elif n['op'] == 'select' or (n['op'] not in PORTABLE_OPS and n['op'] not in _NOT_CASE_OPS):
+            stack.extend(n['args'])
+        else:
+            return None
+    return conditions
+
+
+def _case_value(g, root, fixed):
+    """The value of ``root`` with each condition fixed (as sm5.evaluate computes it)."""
+    values = dict(fixed)
+
+    def visit(i):
+        if i in values:
+            return values[i]
+        n = g.nodes[i]
+        if n['op'] == 'const':
+            v = n['value']
+        elif n['op'] == 'select':
+            v = visit(n['args'][1]) if visit(n['args'][0]) else visit(n['args'][2])
+        else:
+            result, _types, fold = sm5.OPS[n['op']]
+            v = fold([visit(a) for a in n['args']])
+            if result == 'f':
+                v = sm5.f32(v)
+        values[i] = v
+        return v
+    return visit(root)
+
+
+def _enumerate_cases(g, terms):
+    """``terms`` with each topmost non-portable integer expression of a few conditions replaced by a select of its value
+    in every case (exact); unchanged when there is none."""
+    roots = list(terms.values())
+    reach = g.reachable(roots)
+    users = defaultdict(list)
+    for i in reach:
+        for a in g.nodes[i]['args']:
+            users[a].append(i)
+    replace = {}
+    for i in sorted(reach):
+        n = g.nodes[i]
+        if n['op'] in PORTABLE_OPS or n['op'] in _NOT_CASE_OPS:
+            continue
+        if users[i] and all(g.nodes[u]['op'] not in PORTABLE_OPS for u in users[i]):
+            continue   # inside a larger non-portable expression: the topmost one is replaced
+        conditions = _case_conditions(g, i)
+        if conditions is None:
+            continue
+
+        def build(k, fixed):
+            if k == len(conditions):
+                return g.const(n['type'], _case_value(g, i, fixed))
+            c = conditions[k]
+            return g.select(c, build(k + 1, {**fixed, c: True}), build(k + 1, {**fixed, c: False}))
+        try:
+            replace[i] = build(0, {})
+        except (ValueError, OverflowError, ZeroDivisionError):
+            continue
+    if not replace:
+        return terms
+    order, seen = [], set()
+    for r in roots:   # post-order without recursion: unrolled loops leave deep chains
+        stack = [(r, False)]
+        while stack:
+            i, ready = stack.pop()
+            if ready:
+                order.append(i)
+            elif i not in seen:
+                seen.add(i)
+                stack.append((i, True))
+                if i not in replace:
+                    stack.extend((a, False) for a in g.nodes[i]['args'] if a not in seen)
+    new = {}
+    for i in order:
+        if i in replace:
+            new[i] = replace[i]
+            continue
+        n = g.nodes[i]
+        args = [new.get(a, a) for a in n['args']]
+        if args == n['args']:
+            new[i] = i
+        else:
+            meta = {k: v for k, v in n.items() if k not in ('op', 'type', 'args')}
+            new[i] = g._add(n['op'], n['type'], args, **meta)
+    return {name: new[i] for name, i in terms.items()}
 
 
 def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, what):
@@ -412,6 +542,11 @@ def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, wh
     roots = list(terms.values())
     reach = g.reachable(roots)
     bad = sorted({g.nodes[i]['op'] for i in reach} - PORTABLE_OPS)
+    if bad:
+        terms = _enumerate_cases(g, terms)
+        roots = list(terms.values())
+        reach = g.reachable(roots)
+        bad = sorted({g.nodes[i]['op'] for i in reach} - PORTABLE_OPS)
     if bad:
         raise Unsupported('Non-portable operations remain: ' + ', '.join(bad))
     if g.unknowns(roots):
@@ -560,7 +695,8 @@ def forward(graph_data, material_data, texture_sizes=None):
         "program's lighting.",
         "Draw: render flags hold only the material's lit bit (%s), no dissolve, no particle values, no flag volumes, "
         'shader time 0; stored scene depth at the far clip (no soft depth fade); view space with the world axes.'
-        % ('lit' if flags else 'unlit: lighting term 1') + OBJECT_NOTE * bindings.object_read]
+        % ('lit' if flags else 'unlit: lighting term 1') + OBJECT_NOTE * bindings.object_read
+        + RECORD_NOTE * bindings.record_read]
     if bindings.background_read:
         limitations.append('The program samples the scene behind it (%s); the colour is affine in it, so it is split into '
                            'an emission and a background tint, and the sample\'s screen-space offset (distortion, '

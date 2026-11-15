@@ -40,6 +40,15 @@ NEUTRAL_INTEGERS = {
     'GlobalViewportCBuffer.m_MiscFlags': 0,
 }
 NEUTRAL_FLOATS = {'GlobalWorldCBuffer.m_KeyLightTapScale': 1.0}    # sun shadow PCF: 8 taps
+# Engine flag volumes: the per-tile bitset of flag volumes covering a pixel (g_VolumeFlagBitsetView, whose set bits index
+# GlobalVolumeFlagBuffer boxes; rain and snow shelters, puddle areas) is empty in every pass: no flag volume covers the
+# material. A viewer choice like the empty light lists.
+VOLUME_FLAGS = 'g_VolumeFlagBitsetView'
+# Material LOD distances in the engine's per-material and per-subset records (structured buffers, member names from the
+# reflection). Writers take the first positive of the object override (NEUTRAL_OBJECT: 0), the subset's and the
+# material's distance; with none set the LOD fade term is 0: full detail. A viewer choice, not game data. Other members
+# of these records stay unbound.
+NEUTRAL_RECORDS = {'g_MaterialView': {'m_LodDist': 0.0}, 'g_ModelSubsetView': {'m_MaterialLodDist': 0.0}}
 
 # Forward profile (pass slot 1), for exporting blended materials. The forward programs light themselves (key light, light
 # grid, probes, GI, SSR); an export lights the material's G-buffer surface with the renderer's own lights instead. So every
@@ -50,14 +59,11 @@ NEUTRAL_FLOATS = {'GlobalWorldCBuffer.m_KeyLightTapScale': 1.0}    # sun shadow 
 # - Engine textures and buffers: the stored view depth at the far clip (no soft depth fade). The lighting inputs (light
 #   grid and lists, shadow atlas, gobos, probes, SSR, AO, the BRDF lookup) read 0, as the light sources they belong to are
 #   zero. Programs that read scene colour, the G-buffer or per-object buffers stay unsupported.
-# - Volume flags: the per-tile bitset of engine flag volumes covering a pixel (g_VolumeFlagBitsetView, whose set bits
-#   index GlobalVolumeFlagBuffer boxes; rain shelters and the like) is empty: no flag volume covers the material.
 FORWARD_FAR_CLIP = 1000.0
 FORWARD_LIGHTING = ('g_LightGridLookup', 'g_LightLookupView', 'g_LightZBinView', 'g_LightGridData', 'g_LightVolumes',
                     'g_Lights', 'g_ShadowAtlas', 'g_GoboAtlas', 'g_EnvProbeEnvs', 'g_EnvProbeArray', 'g_EnvProbeDefault',
                     'g_SSRFinalTex', 'g_AoSsrBuffer', 'g_BrdfLookup', 'g_RayTracedShadows')
-FORWARD_RESOURCES = dict({name: 0.0 for name in FORWARD_LIGHTING}, g_ViewDepthBuffer=FORWARD_FAR_CLIP,
-                         g_VolumeFlagBitsetView=0.0)
+FORWARD_RESOURCES = dict({name: 0.0 for name in FORWARD_LIGHTING}, g_ViewDepthBuffer=FORWARD_FAR_CLIP)
 # - View: the programs rebuild the view-space position from SV_POSITION (screen xy, view depth w) and turn it into world
 #   space with m_ViewToWorldMat. With these values the view-space position is SV_POSITION.(x, y, w) and view space has the
 #   world's axes, so a renderer supplies SV_POSITION.xyw as the world offset from the camera to the point (input

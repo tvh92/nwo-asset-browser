@@ -539,7 +539,6 @@ Blended materials are drawn by their forward program (slot 1), which lights itse
 - **Draw flags:** only the material's lit bit (`material.draw_flags`).
 - **Object:** the neutral object of [Per-object values](#per-object-values).
 - **Depth:** the stored scene depth sits at the far clip, so there is no soft depth fade.
-- **Volume flags:** the per-tile bitset of engine flag volumes (`g_VolumeFlagBitsetView`, whose bits index the boxes in `GlobalVolumeFlagBuffer`) is empty, so no flag volume covers the material. Rain on glass, for example, reads it to find shelters.
 - **Clip plane:** the custom clip plane clips nothing.
 - **View:** the programs rebuild the view position from `SV_POSITION` and `m_ViewToWorldMat`. With `FORWARD_VIEW_FLOATS`, `SV_POSITION.xyw` is the camera-to-point offset in world axes, so a renderer supplies it as `VIEW.xyz` and the matrix translation as the camera position `CAMERA.xyz`.
 
@@ -549,10 +548,10 @@ Blended materials are drawn by their forward program (slot 1), which lights itse
 
 **Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps (`TextureCube`, and a `TextureCubeArray` read at a constant cube index) are sampled along the direction the program computes (the first three address lanes, in game space). The explicit mip level, bias or gradients of a cube lookup are not applied: the top mip is read, and the result says so. An array read at a run-time index, or a cube read by `gather` or `ld`, is unsupported. A cube texture's slices are its faces, six per cube in the order +X, -X, +Y, -Y, +Z, -Z, top row first.
 
-**Coverage:** 1,592 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated:
+**Coverage:** 1,609 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated:
 - G-buffer reads (57), mostly screen effects and a few decals
 - lit materials that read the scene colour (46), and colour that is not affine in it (20)
-- integer arithmetic left in the colour (about 32)
+- integer arithmetic left in the colour (15)
 
 ### Per-object values
 
@@ -581,16 +580,18 @@ The packing is the same engine code in every graph (see [G-buffer and deferred l
 - occlusion, or emission `E` (self-lit `albedo × E`)
 - the writer's discard, which becomes alpha clip
 
-F0 and gloss keep the game's 8-bit rounding. A material passes only when every term is a float expression of the mesh interpolants (UV0, UV1, normal, tangent and sign, vertex colour, front face) and its own textures and constants.
+F0 and gloss keep the game's 8-bit rounding. A material passes only when every term is a float expression of the mesh interpolants (UV0, UV1, normal, tangent and sign, vertex colour, front face) and its own textures and constants. Integer arithmetic on constants and at most four boolean conditions, such as a triplanar writer's dominant-axis index, is evaluated in every case and becomes a select of constants. This is exact; other integer arithmetic stays unsupported. A normal word chosen by a select between two packed words is unpacked per case. The snow writer does this: its snow arm writes another lighting class, but it is gated by the deformable-snow inputs, which hold review values of 0.
 
 Values a material does not own are bound and listed in its limitations:
 - **Neutral draw:** no dissolve, opaque, no render flags (lighting class 0), shader time 0.
+- **Volume flags:** the per-tile bitset of engine flag volumes (`g_VolumeFlagBitsetView`, whose bits index the boxes in `GlobalVolumeFlagBuffer`) is empty in every pass, so no flag volume covers the material. Rain on glass and the rain, snow and puddle writers read it to find shelters.
+- **Material LOD distance:** the per-material and per-subset records (`g_MaterialView.m_LodDist`, `g_ModelSubsetView.m_MaterialLodDist`, `shaders.NEUTRAL_RECORDS`) hold no distance, like the neutral object's override. Writers then take no LOD fade, so they draw at full detail. Other members of these records are not bound.
 - **Review values:** screen position for dither, LOD fade and adapted luminance 1.
 
-**Coverage:** 5,286 of 5,721 materials. The rest are reported with a reason (`rc2016.games.rcra.surface.Unsupported`):
-- integer operations left in the writer
-- writers without the engine packing
-- unbounded loops
+**Coverage:** 5,551 of 5,721 materials. The rest are reported with a reason (`rc2016.games.rcra.surface.Unsupported`):
+- reads of the scene depth (80) or the G-buffer (32), mostly decals
+- emission alpha that is not the engine encoding (18)
+- the default environment probe (8), and a few writers without the engine packing
 
 ### Textures
 
@@ -672,7 +673,7 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 
 ### Not translated
 
-- **Blended materials whose forward program does not translate** (155 of 1,747): Blender gets their G-buffer surface, opaque.
+- **Blended materials whose forward program does not translate** (138 of 1,747): Blender gets their G-buffer surface, opaque.
 - **Forward lighting:** the forward program's own light loop is not used. Blender's lights shade the G-buffer surface instead, which assumes that the forward program lights the same terms as the deferred apply.
 - **Lighting classes 1 to 5:** skin, hair and the other special classes need their own apply programs. They are lit with class 0.
 

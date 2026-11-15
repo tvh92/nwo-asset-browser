@@ -22,7 +22,9 @@ BLENDER = os.environ.get('RC2016_BLENDER') or r'C:\Program Files\Blender Foundat
 GRAPHS = ('required/materials/basic_normal_gloss.materialgraph',
           'materialgraph/global/gbl_rgb_blend/gbl_rgb_blend.materialgraph',
           'materialgraph/characters/hero/hero_armor_palette/hero_armor_palette.materialgraph',
-          'required/materials/basic_normal_gloss_emissive.materialgraph')
+          'required/materials/basic_normal_gloss_emissive.materialgraph',
+          'required/materials/snow_two_layer.materialgraph',   # a select between two packed words, material LOD records
+          'materialgraph/global/gbl_rgb_blend/sav_rgb_blend_scale_sand_up_01.materialgraph')   # triplanar axis cases
 CHECKED = 'material/environment/megalopolis/prop/meg_prop_plastic_trims/meg_prop_plastic_ship_002.material'
 DOME = 'characters/enemy/enm_neo_nefarious_trooper/materials/enm_neo_nefarious_trooper_dome.material'
 # (material, blend, lit) as the flags word decodes them.
@@ -68,6 +70,32 @@ class TexelTests(unittest.TestCase):
         from rc2016.games import rcra_game
         self.assertTrue(FORMATS['blend'][2])
         self.assertIn('blender_materials', rcra_game.GAME.hooks)
+
+
+class CaseTests(unittest.TestCase):
+    def test_integer_cases_become_selects_of_constants(self):
+        """A triplanar axis index (integer selects and compares of two conditions) is replaced exactly."""
+        g = sm5.Graph()
+        x, y = g.input('TEXCOORD.x'), g.input('TEXCOORD.y')
+        a, b = g.op('lt', x, y), g.op('lt', y, g.const('f', 0.25))
+        axis = g.op('iadd', g.select(a, g.const('i', 2), g.const('i', 0)), g.select(b, g.const('i', 1), g.const('i', 0)))
+        weight = g.op('itof', g.op('ineg', axis))
+        colour = g.op('mul', g.select(g.op('ieq', axis, g.const('i', 3)), x, y), weight)
+        terms = {'colour': colour}
+        self.assertTrue({g.nodes[i]['op'] for i in g.reachable([colour])} - rsurface.PORTABLE_OPS)
+        out = rsurface._enumerate_cases(g, terms)
+        self.assertFalse({g.nodes[i]['op'] for i in g.reachable(list(out.values()))} - rsurface.PORTABLE_OPS)
+        for u in (0.1, 0.2, 0.6):
+            for v in (0.0, 0.3, 0.9):
+                inputs = {'TEXCOORD.x': u, 'TEXCOORD.y': v}
+                self.assertEqual(sm5.evaluate(g, [out['colour']], inputs)[out['colour']],
+                                 sm5.evaluate(g, [colour], inputs)[colour], (u, v))
+
+    def test_integer_expressions_of_inputs_stay(self):
+        g = sm5.Graph()
+        n = g.op('ftoi', g.input('TEXCOORD.x'))
+        terms = {'colour': g.op('itof', g.op('iadd', n, g.const('i', 1)))}
+        self.assertEqual(rsurface._enumerate_cases(g, terms), terms)
 
 
 class VolumeTests(unittest.TestCase):
@@ -199,6 +227,14 @@ class RealSurfaceTests(unittest.TestCase):
                 self.assertEqual(bool(word[(0, 1)] & 0x8000), v['normal.z'] < 0, graph_path)
                 for c, axis in enumerate(('albedo.r', 'albedo.g', 'albedo.b')):
                     self.assertAlmostEqual(min(max(word[(1, c)], 0.0), 1.0), v[axis], places=6)
+                alpha = min(max(word[(1, 3)], 0.0), 1.0)
+                if word[(0, 1)] & 0x2000:   # occlusion mode
+                    self.assertAlmostEqual(alpha, min(max(v['occlusion'], 0.0), 1.0), places=6, msg=graph_path)
+                    self.assertEqual(v['emission'], 0.0, graph_path)
+                else:
+                    self.assertEqual(v['occlusion'], 1.0, graph_path)
+                    self.assertAlmostEqual(alpha, min(max(0.2 * math.log2(min(v['emission'], 31.0) + 1.0), 0.0), 1.0),
+                                           places=5, msg=graph_path)
 
     def test_blend_modes_and_forward_recipes(self):
         from rc2016.games.rcra import material as rmat
