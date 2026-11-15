@@ -1,11 +1,14 @@
 """Native PS4 geometry/material builder plus the evidence-bound FBX adapter."""
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 import bpy
 import numpy as np
 from mathutils import Matrix
 from rc2016.formats.container import game_crc32
+from rc2016.formats.linear_png import SRGB_LINEAR16_CONTAINER,SRGB_LINEAR16_CONVERSION,srgb8_linear16_png
 from rc2016.common import asset_path,file_hash
 from rc2016.formats.texture_transport import image_interpretation_identity,image_interpretation_key
 from rc2016.pipeline.blender_support import targets,structural_snapshot,read_values,write_values
@@ -74,11 +77,15 @@ def import_fbx(job,rig):
     original.hide_set(True);original.hide_render=True
     for obj in imported:
         if obj.type in ('LIGHT','CAMERA'):bpy.data.objects.remove(obj,do_unlink=True)
-    for image in bpy.data.images:
+    for image in list(bpy.data.images):
         if image.source=='FILE' and image.filepath.lower().endswith('.dds'):
             image.alpha_mode='CHANNEL_PACKED'
             stem=Path(image.filepath).stem.lower()
-            image.colorspace_settings.name='Non-Color' if stem.endswith(('_g','_n','_m')) else 'sRGB'
+            if stem.endswith(('_g','_n','_m')):image.colorspace_settings.name='Non-Color'
+            else:   # sRGB: decoded to linear texels, packed, so Cycles filters them as the GPU does
+                with tempfile.TemporaryDirectory() as folder:
+                    image=_linear16_image(image,Path(folder)/(Path(image.filepath).stem+'.linear16.png'))
+                image['blender_conversion']=SRGB_LINEAR16_CONVERSION
         if image.source=='FILE' and not image.packed_file:
             try:image.pack()
             except RuntimeError:pass
@@ -92,6 +99,35 @@ def import_fbx(job,rig):
         inferred_source_to_fbx_scale=scale,source_to_fbx_basis=rotation.tolist(),rest_head_error=error,
         unweighted_vertices=unweighted,source_topology_uv_weights_material_assignments_preserved=True,
         materials='FBX materials preserved; exact game shader reconstruction is not implemented')
+
+
+def _linear16_image(image,path):
+    """Replace the 8-bit sRGB ``image`` with a packed Non-Color 16-bit PNG of its texels decoded to linear, written to
+    ``path``. The GPU decodes each sRGB texel before it filters; Cycles filters an sRGB image and decodes after, so it is
+    given decoded texels as data (rc2016.formats.linear_png). Alpha stays as stored. Returns the new image, which takes over
+    the old one's users and name."""
+    width,height=image.size
+    if not width or not height or image.is_float:
+        raise ValueError('sRGB texture did not load as an 8-bit image: '+image.filepath)
+    pixels=np.empty(width*height*4,dtype=np.float32);image.pixels.foreach_get(pixels)
+    # A byte image reads back its stored codes / 255; Blender rows are bottom first, PNG rows top first.
+    data=srgb8_linear16_png(np.rint(pixels.reshape(height,width,4)[::-1]*255.0).astype(np.uint8))
+    path=Path(path);temporary=path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    temporary.write_bytes(data)
+    try:os.replace(temporary,path)
+    except PermissionError:   # another build has the same derived file open
+        temporary.unlink(missing_ok=True)
+        if path.read_bytes()!=data:raise
+    linear=bpy.data.images.load(str(path),check_existing=False)
+    linear.colorspace_settings.name='Non-Color';linear.alpha_mode=image.alpha_mode
+    linear.pack()
+    linear['packed_container']=SRGB_LINEAR16_CONTAINER
+    linear['blender_packed_sha256']=hashlib.sha256(bytes(linear.packed_file.data)).hexdigest()
+    linear['blender_dimensions']=list(linear.size)
+    name=image.name
+    image.user_remap(linear);bpy.data.images.remove(image)
+    linear.name=name
+    return linear
 
 
 # Source images by their custom-property identity, so each binding looks up candidates
@@ -144,7 +180,8 @@ def _image(binding):
         prototype=min(prototypes,key=lambda image:image.name)
         payload_prototype_name=prototype.name
         image=prototype.copy()
-        image.filepath=str(source_path.with_suffix('.blender.png') if binding.get('format') in (49,61) else source_path)
+        if binding.get('format') in (49,61):image.filepath=str(source_path.with_suffix('.blender.png'))
+        elif identity['conversion']!=SRGB_LINEAR16_CONVERSION:image.filepath=str(source_path)
     elif binding.get('format')==49:
         width=binding['width'];height=binding['height'];raw=source_path.read_bytes()
         expected=width*height*2
@@ -175,7 +212,10 @@ def _image(binding):
         packed_path=source_path.with_suffix('.blender.png')
         image.filepath_raw=str(packed_path);image.file_format='PNG';image.save()
         image['packed_container']='PNG with exact R8_UNORM scalar replicated to RGB'
-    else:image=bpy.data.images.load(str(source_path),check_existing=False)
+    else:
+        image=bpy.data.images.load(str(source_path),check_existing=False)
+        if identity['conversion']==SRGB_LINEAR16_CONVERSION:
+            image=_linear16_image(image,source_path.with_suffix('.linear16.png'))
     image.alpha_mode=identity['alpha_mode']
     image.colorspace_settings.name=identity['colorspace']
     image['source_texture_path']=identity['source_path'];image['source_texture_sha256']=identity['dds_sha256']
@@ -184,7 +224,7 @@ def _image(binding):
     image['source_texture_payload_conversion']=identity['conversion']
     if payload_prototype_name:image['source_texture_payload_copied_from']=payload_prototype_name
     if binding.get('format')!=49:image['blender_conversion']=identity['conversion']
-    image.pack()
+    if not image.packed_file:image.pack()   # linear sRGB images (and their copies) are packed already
     if binding.get('format')==49:
         image['blender_conversion']='R8G8_UNORM_DDS_TO_RGBA8_PNG_V1'
         image['blender_packed_sha256']=hashlib.sha256(bytes(image.packed_file.data)).hexdigest()

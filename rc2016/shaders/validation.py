@@ -6,6 +6,12 @@ import struct
 from rc2016.shaders.families import FAMILY_REGISTRY
 
 
+def blender_colorspace(binding):
+    """The Blender colourspace of a source binding's image: an sRGB texture decoded to linear texels is Non-Color."""
+    from rc2016.formats.texture_transport import image_interpretation_identity
+    return image_interpretation_identity(binding)["colorspace"]
+
+
 DEFERRED_GROUP = "RC PS4 Deferred BRDF"
 ANISO_GROUP = "RC PS4 Deferred BRDF (aniso 33C21955)"   # game_shader.build_aniso_group (bng kind 5)
 SKIN_GROUP = "RC PS4 skin_emissive G-buffer"
@@ -65,7 +71,7 @@ def _check_binding_image(source, node, role):
     assert node.get("source_texture_path") == binding["path"]
     assert node.get("source_texture_sha256") == binding.get("dds_sha256"), \
         f"Reopened {role} image source hash changed"
-    assert node.image.colorspace_settings.name == binding["colorspace"], \
+    assert node.image.colorspace_settings.name == blender_colorspace(binding), \
         f"Reopened {role} image colourspace differs from native DXGI preflight"
     return node
 
@@ -873,7 +879,8 @@ def _viewer_check_constants_and_images(source, material, rule, upstream, has_n):
             path = str(node.get("source_texture_path", "")).lower()
             assert path in rows, f"Viewer-rule image {path} is not a source binding"
             assert node.get("source_texture_sha256") == rows[path].get("dds_sha256"), f"{path} source hash changed"
-            assert node.image.colorspace_settings.name == rows[path]["colorspace"], f"{path} colourspace differs from native DXGI"
+            assert node.image.colorspace_settings.name == blender_colorspace(rows[path]), \
+                f"{path} colourspace differs from native DXGI"
     for role in roles:
         path = (rule["textures"].get(role) or "").lower()
         assert any(node.type == "TEX_IMAGE" and str(node.get("source_texture_path", "")).lower() == path for node in upstream), \

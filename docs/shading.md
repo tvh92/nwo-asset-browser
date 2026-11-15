@@ -22,7 +22,7 @@ The equations below were read from the SPIR-V of a RenderDoc capture of the game
 ## Textures
 
 - Set DDS images to `Alpha Mode: Channel Packed`. Alpha is always linear data.
-- Colourspace follows the native DXGI format, not the filename: sRGB for formats 29, 72, 75, 78, 91, 93 and 99, Non-Color for every other format. `rc2016/formats/materials.py` applies this; for example a `_g` stored as BC7 sRGB (format 99) is sRGB.
+- Colourspace follows the native DXGI format, not the filename: sRGB for formats 29, 72, 75, 78, 91, 93 and 99, Non-Color for every other format. `rc2016/formats/materials.py` applies this; for example a `_g` stored as BC7 sRGB (format 99) is sRGB. In Blender an sRGB texture is a `Non-Color` 16-bit image of its texels already decoded to linear, because Cycles would filter before decoding while the GPU decodes first ([pipeline](pipeline.md#textures)).
 - Normals are always Non-Color.
 - Roles by suffix:
   - `_c`: base colour, normally BC7 sRGB. Its alpha is a self-lit mask, never ordinary transparency. The one exception is the foliage writers (`basic_foliage`, the tree-leaf graphs) and the protosuit chest logo (`basic_normal_coloredgloss_alpha`), where it is read only as cut-out coverage compared with an alpha-test threshold and nothing else (see [viewer](viewer.md#leaf-cut-out)).

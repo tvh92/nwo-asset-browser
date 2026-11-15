@@ -21,8 +21,9 @@ What is built (every value is the viewer's, see holocard_effect.py there for wha
   viewport that looks from elsewhere. Every object is a child of the card mesh in native space and the drivers read the
   card's world transform, so moving or turning the card carries the glow (``attach``). No light: the effect has none.
 
-The images are written next to the output (``prepare_textures``) as 8-bit PNGs of the decoded top mips: the glow texture
-tagged sRGB, the others Non-Color. Not built: the rings' scroll over time (the frame is still), mip filtering, component 0
+The images are written next to the output (``prepare_textures``) as PNGs of the decoded top mips, all loaded Non-Color: the
+glow texture (sRGB) as 16-bit linear texels, so Cycles filters decoded values as the GPU does (rc2016.formats.linear_png),
+the others as 8-bit data. Not built: the rings' scroll over time (the frame is still), mip filtering, component 0
 and the strip program b6f67d16. ``bpy`` is imported inside the functions that need it, so the data helpers import anywhere.
 """
 from __future__ import annotations
@@ -70,9 +71,11 @@ def effect_description(preview):
 
 
 def prepare_textures(archive, preview, directory):
-    """Write the glow's images as 8-bit RGB PNGs under ``directory``; returns role -> path."""
+    """Write the glow's images as PNGs under ``directory``: the sRGB glow texture as 16-bit linear texels (alpha 1), the
+    others as 8-bit RGB. Returns role -> path."""
     import numpy as np
     from PIL import Image
+    from rc2016.formats.linear_png import srgb8_linear16_png
     from rc2016.pipeline.holocon_effect import _decoded
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -80,7 +83,11 @@ def prepare_textures(archive, preview, directory):
     for role in ROLES:
         rgba = _decoded(archive, preview['texture_paths'][role])
         path = directory / ('holocard_%s.png' % role)
-        Image.fromarray(np.clip(rgba[..., :3] * 255.0 + 0.5, 0, 255).astype(np.uint8), 'RGB').save(path)
+        texels = np.clip(rgba[..., :3] * 255.0 + 0.5, 0, 255).astype(np.uint8)
+        if role == 'holocard_glow':
+            path.write_bytes(srgb8_linear16_png(np.dstack([texels, np.full(texels.shape[:2], 255, np.uint8)])))
+        else:
+            Image.fromarray(texels, 'RGB').save(path)
         paths[role] = str(path)
     return paths
 
@@ -228,7 +235,7 @@ def build(scene, anchor, description, texture_paths, camera=None):
     for role in ROLES:
         path = texture_paths[role]
         image = bpy.data.images.get(os.path.basename(path)) or bpy.data.images.load(path, check_existing=True)
-        image.colorspace_settings.name = 'sRGB' if role == 'holocard_glow' else 'Non-Color'
+        image.colorspace_settings.name = 'Non-Color'   # the glow's sRGB texels are written decoded (prepare_textures)
         image.alpha_mode = 'NONE'
         image.pack()
         images[role] = image

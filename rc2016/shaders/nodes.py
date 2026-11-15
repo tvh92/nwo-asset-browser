@@ -297,6 +297,7 @@ def apply_translated_material(material,source, *, experimental=False):
 def validate_translated_material(source,material, *, experimental=False):
     expected=source['shader_experimental_preview' if experimental else 'shader_translation']
     from rc2016.shaders.bindings import validate_source_preview_inputs
+    from rc2016.shaders.validation import blender_colorspace
     validate_source_preview_inputs(expected)
     stored=json.loads(material.get('rc_shader_translation','{}'))
     assert stored==expected,'Persisted native translation receipt changed'
@@ -333,7 +334,7 @@ def validate_translated_material(source,material, *, experimental=False):
         assert matches,'Native API source image missing'
         for n in matches:
             assert n.image.get('source_texture_sha256')==texture['dds_sha256']
-            assert n.image.colorspace_settings.name==texture['colorspace']
+            assert n.image.colorspace_settings.name==blender_colorspace(texture)
             assert n.image.alpha_mode=='CHANNEL_PACKED'
     result=dict(status='passed_experimental_preview' if experimental else 'passed_native_translation',code_sha256=expected['code_sha256'],
         translation_sha256=expected['translation_sha256'],node_count=len(front.node_tree.nodes),

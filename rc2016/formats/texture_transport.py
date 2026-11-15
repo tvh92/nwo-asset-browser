@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from rc2016.formats.archive import lz4_block
+from rc2016.formats.linear_png import SRGB_LINEAR16_CONTAINER, SRGB_LINEAR16_CONVERSION
 from rc2016.common import asset_path, sha, write
 from rc2016.formats.texture import (BLOCK_BYTES, UNCOMPRESSED_BPP, parse_header,
     ps4_deswizzle_top, read, tiled_top_mip_size, top_mip_size)
@@ -70,15 +71,24 @@ class TextureDecodeCache:
             pass
 
 
+def blender_conversion(fmt, colorspace):
+    """How the pipeline hands a DDS of DXGI format ``fmt`` and native ``colorspace`` to Blender.
+
+    An sRGB texture is decoded to linear when it is loaded and stored as a 16-bit Non-Color PNG, because Cycles filters an
+    sRGB image before it decodes it while the GPU decodes each texel first (rc2016.formats.linear_png)."""
+    return ('R8G8_UNORM_DDS_TO_RGBA8_PNG_V1' if fmt==49 else 'R8_UNORM_DDS_TO_RGBA8_PNG_V1' if fmt==61 else
+        SRGB_LINEAR16_CONVERSION if colorspace=='sRGB' else 'DDS_NATIVE_V1')
+
+
 def image_interpretation_identity(binding):
-    """Return the stable Blender-image identity, separate from DDS byte identity."""
-    fmt=binding.get('format')
-    conversion=(binding.get('conversion_kind') or
-        ('R8G8_UNORM_DDS_TO_RGBA8_PNG_V1' if fmt==49 else
-         'R8_UNORM_DDS_TO_RGBA8_PNG_V1' if fmt==61 else 'DDS_NATIVE_V1'))
+    """Return the stable Blender-image identity, separate from DDS byte identity.
+
+    ``colorspace`` is the Blender image's colourspace: a native sRGB binding converted to linear texels is 'Non-Color'."""
+    colorspace=binding.get('colorspace','sRGB')
+    conversion=binding.get('conversion_kind') or blender_conversion(binding.get('format'),colorspace)
     return dict(source_path=asset_path(binding.get('source_path',binding.get('path',''))),
         dds_sha256=str(binding.get('dds_sha256','')).lower(),
-        colorspace=binding.get('colorspace','sRGB'),
+        colorspace='Non-Color' if conversion==SRGB_LINEAR16_CONVERSION else colorspace,
         alpha_mode=binding.get('alpha_mode','CHANNEL_PACKED'),
         conversion=conversion)
 
@@ -276,9 +286,15 @@ def validate_reopened_texture_bindings(expected, images):
                     and image.get('source_texture_sha256')==expected_sha
                     and tuple(image.get('blender_dimensions',()))==tuple(expected_size)
                     and packed.startswith(b'\x89PNG\r\n\x1a\n') and image_sha is not None)
+            elif identity['conversion']==SRGB_LINEAR16_CONVERSION:
+                image_sha=image.get('blender_packed_sha256')
+                conversion_ok=(image.get('packed_container')==SRGB_LINEAR16_CONTAINER
+                    and image.get('source_texture_sha256')==expected_sha
+                    and tuple(image.get('blender_dimensions',()))==tuple(image_size)
+                    and packed.startswith(b'\x89PNG\r\n\x1a\n') and image_sha is not None)
             settings=(tuple(image.size)==tuple(image_size) and
                 image.alpha_mode==identity['alpha_mode'] and
-                image.colorspace_settings.name==binding.get('colorspace') and packed_sha==image_sha
+                image.colorspace_settings.name==identity['colorspace'] and packed_sha==image_sha
                 and conversion_ok)
             row.update(reopened=settings,reopened_packed_sha256=packed_sha,
                 reopened_dimensions=list(image.size),reopened_colorspace=image.colorspace_settings.name,
@@ -286,7 +302,7 @@ def validate_reopened_texture_bindings(expected, images):
             if binding.get('format')==49:
                 row.update(blender_conversion=image.get('blender_conversion'),
                     blender_packed_sha256=image_sha,conversion_marker_valid=conversion_ok)
-            elif binding.get('format')==61:
+            elif binding.get('format')==61 or identity['conversion']==SRGB_LINEAR16_CONVERSION:
                 row.update(blender_conversion=image.get('blender_conversion'),
                     blender_packed_sha256=image_sha,conversion_marker_valid=conversion_ok)
             if not settings:

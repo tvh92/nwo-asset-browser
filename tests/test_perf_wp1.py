@@ -11,6 +11,7 @@ import numpy as np
 
 from rc2016.common import asset_path, sha
 from rc2016.formats.archive import lz4_block
+from rc2016.formats.linear_png import SRGB_LINEAR16_CONTAINER, SRGB_LINEAR16_CONVERSION
 from rc2016.formats.texture import (BLOCK_BYTES, UNCOMPRESSED_BPP, decode_texture, parse_header,
     ps4_deswizzle_top, read, top_mip_size)
 from rc2016.formats.texture_transport import (TextureDecodeCache, _limited, _occurrence_summary,
@@ -166,9 +167,15 @@ def old_validate_reopened_texture_bindings(expected, images):
                     and image.get('source_texture_sha256')==expected_sha
                     and tuple(image.get('blender_dimensions',()))==tuple(expected_size)
                     and packed.startswith(b'\x89PNG\r\n\x1a\n') and image_sha is not None)
+            elif identity['conversion']==SRGB_LINEAR16_CONVERSION:
+                image_sha=image.get('blender_packed_sha256')
+                conversion_ok=(image.get('packed_container')==SRGB_LINEAR16_CONTAINER
+                    and image.get('source_texture_sha256')==expected_sha
+                    and tuple(image.get('blender_dimensions',()))==tuple(image_size)
+                    and packed.startswith(b'\x89PNG\r\n\x1a\n') and image_sha is not None)
             settings=(tuple(image.size)==tuple(image_size) and
                 image.alpha_mode==identity['alpha_mode'] and
-                image.colorspace_settings.name==binding.get('colorspace') and packed_sha==image_sha
+                image.colorspace_settings.name==identity['colorspace'] and packed_sha==image_sha
                 and conversion_ok)
             row.update(reopened=settings,reopened_packed_sha256=packed_sha,
                 reopened_dimensions=list(image.size),reopened_colorspace=image.colorspace_settings.name,
@@ -176,7 +183,7 @@ def old_validate_reopened_texture_bindings(expected, images):
             if binding.get('format')==49:
                 row.update(blender_conversion=image.get('blender_conversion'),
                     blender_packed_sha256=image_sha,conversion_marker_valid=conversion_ok)
-            elif binding.get('format')==61:
+            elif binding.get('format')==61 or identity['conversion']==SRGB_LINEAR16_CONVERSION:
                 row.update(blender_conversion=image.get('blender_conversion'),
                     blender_packed_sha256=image_sha,conversion_marker_valid=conversion_ok)
             if not settings:
@@ -504,8 +511,11 @@ class TextureTransportTests(unittest.TestCase):
 
     def test_reopened_bindings_match_reference(self):
         data=b'DDS payload';digest=hashlib.sha256(data).hexdigest()
+        png=b'\x89PNG\r\n\x1a\n linear texels'
         images=[
-            FakeImage(dict(source_texture_path='Textures/A_c.texture',source_texture_sha256=digest.upper()),'sRGB',data=data),
+            FakeImage(dict(source_texture_path='Textures/A_c.texture',source_texture_sha256=digest,
+                blender_conversion=SRGB_LINEAR16_CONVERSION,packed_container=SRGB_LINEAR16_CONTAINER,
+                blender_packed_sha256=hashlib.sha256(png).hexdigest(),blender_dimensions=[8,8]),'Non-Color',data=png),
             FakeImage(dict(source_texture_path='textures/b_n.texture',source_texture_sha256=digest),'Non-Color',data=data),
             FakeImage(dict(source_texture_path='textures/b_n.texture',source_texture_sha256=digest),'Non-Color',data=data),
             FakeImage(dict(source_texture_path='textures/c_g.texture',source_texture_sha256=digest,blender_conversion='R8G8_UNORM_DDS_TO_RGBA8_PNG_V1'),'Non-Color',data=data),
@@ -522,6 +532,8 @@ class TextureTransportTests(unittest.TestCase):
         new=validate_reopened_texture_bindings(expected,images)
         self.assertEqual(new,old_validate_reopened_texture_bindings(expected,images))
         self.assertEqual([row['status'] for row in new][:3],['passed','failed','failed'])
+        self.assertEqual(new[0]['image_identity']['colorspace'],'Non-Color')   # sRGB texels decoded to linear
+        self.assertTrue(new[0]['conversion_marker_valid'])
         self.assertEqual(validate_reopened_texture_bindings([],images),[])
         self.assertEqual(validate_reopened_texture_bindings(expected,[]),old_validate_reopened_texture_bindings(expected,[]))
 

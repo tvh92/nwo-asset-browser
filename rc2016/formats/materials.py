@@ -10,7 +10,7 @@ from rc2016.formats.container import read_container
 from rc2016.common import asset_path, dump, file_hash, load, read, sha, write
 from rc2016.formats.index import references
 from rc2016.formats.texture import decode_texture
-from rc2016.formats.texture_transport import TextureDecodeCache,validate_source_transport
+from rc2016.formats.texture_transport import TextureDecodeCache,blender_conversion,validate_source_transport
 from rc2016.shaders.families import preflight_graph
 
 
@@ -698,8 +698,7 @@ def prepare_materials(archive, model_geometry, output_dir, export_textures, log,
                 if colorspace!=default_colorspace:
                     binding['colorspace_override']='captured Ratchet body _g exact material and decoded texture hash'
                 binding['alpha_mode']='CHANNEL_PACKED'
-                binding['conversion_kind']=('R8G8_UNORM_DDS_TO_RGBA8_PNG_V1' if binding.get('format')==49 else
-                    'R8_UNORM_DDS_TO_RGBA8_PNG_V1' if binding.get('format')==61 else 'DDS_NATIVE_V1')
+                binding['conversion_kind']=blender_conversion(binding.get('format'),binding['colorspace'])
                 interpretation_key=(asset_path(binding['path']),binding['dds_sha256'],binding['colorspace'],
                     binding['alpha_mode'],binding['conversion_kind'])
                 texture_interpretations[interpretation_key]=dict(path=binding['path'],dds_sha256=binding['dds_sha256'],

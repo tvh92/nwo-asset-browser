@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
+from rc2016.formats.linear_png import linear_to_srgb as _linear_to_srgb, png16, srgb_to_linear as _srgb_to_linear
 from rc2016.games.rcra import surface as rsurface
 from rc2016.games.rcra.texture import texture_size
 
@@ -169,15 +170,6 @@ def equirect_directions(width, height, rows=None):
                      np.broadcast_to(np.sin(theta), shape)], -1)
 
 
-def _srgb_to_linear(x):
-    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
-
-
-def _linear_to_srgb(x):
-    x = np.clip(x, 0.0, 1.0)
-    return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055)
-
-
 def cube_equirect(faces, srgb=False):
     """(2n, 4n, 4) float32 equirectangular image of a cube map (``faces`` (6, n, n, 4), top row first): each pixel is the
     cube lookup of its direction (``equirect_directions``). sRGB colour is filtered in linear light, as the hardware does."""
@@ -220,21 +212,6 @@ def write_cube_texture(source, path, folder, index=0, cache=None):
     if cache is not None:
         cache[key] = row
     return row
-
-
-def png16(rgba):
-    """A 16-bit RGBA PNG of ``rgba`` (h, w, 4) uint16, rows top first."""
-    import struct
-    import zlib
-    h, w = rgba.shape[:2]
-    rows = np.empty((h, 1 + w * 8), np.uint8)
-    rows[:, 0] = 0
-    rows[:, 1:] = np.ascontiguousarray(rgba, '>u2').view(np.uint8).reshape(h, w * 8)
-
-    def chunk(tag, payload):
-        return struct.pack('>I', len(payload)) + tag + payload + struct.pack('>I', zlib.crc32(tag + payload) & 0xFFFFFFFF)
-    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 16, 6, 0, 0, 0))
-            + chunk(b'IDAT', zlib.compress(rows.tobytes(), 6)) + chunk(b'IEND', b''))
 
 
 def _save(data, texture, stem, folder, path, colourspace=None):

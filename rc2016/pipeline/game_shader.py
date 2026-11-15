@@ -286,6 +286,17 @@ def _find_textures(mat):
     return found
 
 
+# blender_conversion of an sRGB texture decoded to linear 16-bit texels (rc2016.formats.linear_png.SRGB_LINEAR16_CONVERSION;
+# spelled out so this module also runs on its own inside Blender).
+SRGB_LINEAR16_CONVERSION = "SRGB_DDS_TO_LINEAR16_PNG_V1"
+
+
+def _is_srgb(image):
+    """True for an sRGB texture, whether Blender decodes it or the pipeline decoded its texels to linear already."""
+    return (image.colorspace_settings.name == "sRGB" or
+            image.get("blender_conversion") == SRGB_LINEAR16_CONVERSION)
+
+
 def _has_selflit_mask(image, threshold=0.5):
     """True when _c alpha contains a sparse authored mask (typical emissive graphs)."""
     try:
@@ -328,8 +339,10 @@ def convert_material(mat, emissive_intensity=None, specular_scale=1.0, gloss_sca
         backup["rc_backup_of"] = mat.name
 
     c, gnode, n = tex["c"], tex["g"], tex.get("n")
-    c.image.colorspace_settings.name = "sRGB"
-    gnode.image.colorspace_settings.name = "sRGB" if g_is_srgb else "Non-Color"
+    # An sRGB image the pipeline already decoded to linear texels stays Non-Color (rc2016.formats.linear_png).
+    for image, srgb in ((c.image, True), (gnode.image, g_is_srgb)):
+        if image.get("blender_conversion") != SRGB_LINEAR16_CONVERSION:
+            image.colorspace_settings.name = "sRGB" if srgb else "Non-Color"
     for t in (c, gnode):
         t.image.alpha_mode = "CHANNEL_PACKED"
     if n is not None:
@@ -789,7 +802,7 @@ def apply_deferred_family(mat, pre, family):
         return False
     convert_material(mat, emissive_intensity=params["Self-lit K"], specular_scale=params["Specular scale"],
                      gloss_scale=params["Gloss scale"],
-                     g_is_srgb=tex['g'].image.colorspace_settings.name == 'sRGB')
+                     g_is_srgb=_is_srgb(tex['g'].image))
     nt, L = mat.node_tree, mat.node_tree.links
     grp = next(n for n in nt.nodes if n.type == 'GROUP' and n.node_tree.name == GROUP_NAME)
     g = tex['g']
@@ -3394,7 +3407,7 @@ def apply_preflight_material(mat, source):
     detail_ok=(spec['detail_normal'] and blend not in (None,0.0) and uv_scale is not None and
                'n' in tex and len(secondary)==1)
     convert_material(mat,emissive_intensity=params.get('Self-lit K',0.0),
-                     g_is_srgb=tex['g'].image.colorspace_settings.name=='sRGB',
+                     g_is_srgb=_is_srgb(tex['g'].image),
                      keep_nodes=secondary if detail_ok else ())
     skin=apply_skin_emissive(mat,params,family)
     if blend==0.0 and 'n' in tex:
