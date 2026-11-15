@@ -394,13 +394,27 @@ def selected_meshes(decoded, lod, look):
     return [m for m in decoded['meshes'] if m['index'] in chosen]
 
 
+# The shape key that keeps a mesh's stored vertices when a decoder moved them (Rift Apart vertex programs at rest,
+# rc2016.games.rcra.vertex.STORED_SHAPE): a glTF morph target at weight 0, a shape key in Blender.
+STORED_SHAPE = 'stored vertices'
+
+
+def _unit_normals(normals):
+    length = np.linalg.norm(normals, axis=1, keepdims=True)
+    return np.where(length > 1e-8, normals / np.maximum(length, 1e-8), np.array([0, 1, 0], np.float32))
+
+
 def mesh_arrays(mesh, joint_count):
-    """Native positions/normals, game UVs (top row first), triangles, and skin sets (or None)."""
+    """Native positions/normals, game UVs (top row first), triangles, skin sets (or None), and the stored vertices and
+    normals of a mesh the decoder moved (``stored``, or None)."""
     positions = np.asarray(mesh['positions'], np.float32).reshape(-1, 3)
     normals = np.asarray(mesh['normals'], np.float32).reshape(-1, 3) if len(mesh.get('normals') if mesh.get('normals') is not None else ()) else None
     if normals is not None:
-        length = np.linalg.norm(normals, axis=1, keepdims=True)
-        normals = np.where(length > 1e-8, normals / np.maximum(length, 1e-8), np.array([0, 1, 0], np.float32))
+        normals = _unit_normals(normals)
+    stored = None
+    if mesh.get('stored_positions') is not None:
+        stored = dict(positions=np.asarray(mesh['stored_positions'], np.float32).reshape(-1, 3),
+                      normals=_unit_normals(np.asarray(mesh['stored_normals'], np.float32).reshape(-1, 3)))
     uvs = []
     for key in ('uv0', 'uv1'):
         uv = mesh.get(key)
@@ -422,7 +436,7 @@ def mesh_arrays(mesh, joint_count):
         weights[total[:, 0] <= 0, 0] = 1.0   # unweighted vertices follow joint 0 (the root)
         sets = 2 if np.any(weights[:, 4:] > 0) else 1
         skin = dict(joints=joints[:, :4 * sets], weights=weights[:, :4 * sets].astype(np.float32), sets=sets, unweighted=unweighted)
-    return dict(positions=positions, normals=normals, uvs=uvs, triangles=triangles, skin=skin)
+    return dict(positions=positions, normals=normals, uvs=uvs, triangles=triangles, skin=skin, stored=stored)
 
 
 def _quat_from_matrix(m):
@@ -796,6 +810,12 @@ class ModelExporter:
         if casters and len(casters) < len(meshes):
             meshes = [m for m in meshes if not any(m is c for c in casters)]
             notes.append(f'{len(casters)} shadow-cast-only mesh(es) left out: the game never draws them (material flags bit 0x80).')
+        shown = {m['index'] for m in meshes}
+        moved = {}
+        for row in decoded.get('vertex_programs') or ():   # Rift Apart vertex programs (rc2016.games.rcra.vertex)
+            if row.get('note') and row['mesh'] in shown:
+                moved.setdefault(row['note'], []).append(Path(row['material']).stem)
+        notes += [f"{', '.join(dict.fromkeys(names))}: {note}" for note, names in moved.items()]
         if not meshes:
             raise ValueError('The selected look/LOD has no geometry')
         need_gltf = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd'))
@@ -1024,7 +1044,7 @@ class ModelExporter:
         if 'extensionsUsed' in doc:
             doc['extensionsUsed'] = sorted(set(doc['extensionsUsed']))
 
-        def primitive(part, skinned):
+        def primitive(part, skinned, morph=False):
             a = part['arrays']
             attributes = dict(POSITION=g.accessor(a['positions'], 'VEC3', 34962, minmax=True))
             if a['normals'] is not None:
@@ -1041,7 +1061,22 @@ class ModelExporter:
             prim = dict(attributes=attributes, indices=g.accessor(index, 'SCALAR', 34963), mode=4)
             if part['material'] in material_ids:
                 prim['material'] = material_ids[part['material']]
+            if morph:   # every primitive of the mesh carries the target; unmoved ones a zero offset
+                stored = a.get('stored')
+                target = dict(POSITION=g.accessor(stored['positions'] - a['positions'] if stored else np.zeros_like(a['positions']),
+                                                  'VEC3', 34962, minmax=True))
+                if a['normals'] is not None:
+                    target['NORMAL'] = g.accessor(stored['normals'] - a['normals'] if stored else np.zeros_like(a['normals']),
+                                                  'VEC3', 34962)
+                prim['targets'] = [target]
             return prim
+
+        def mesh(name, members, skinned):
+            morph = any(p['arrays'].get('stored') is not None for p in members)
+            entry = dict(name=name, primitives=[primitive(p, skinned, morph) for p in members])
+            if morph:
+                entry.update(weights=[0.0], extras=dict(targetNames=[STORED_SHAPE]))
+            doc['meshes'].append(entry)
 
         root_children = []
         skinned_parts = [p for p in parts if p['arrays']['skin'] is not None] if library is not None else []
@@ -1070,12 +1105,10 @@ class ModelExporter:
             for p in skinned_parts:   # the body first, then one node per attached part, so each can be hidden on its own
                 groups.setdefault(p.get('group'), []).append(p)
             for group, members in groups.items():
-                doc['meshes'].append(dict(name=f'{group}_skinned' if group else f'{stem}_skinned',
-                                          primitives=[primitive(p, True) for p in members]))
+                mesh(f'{group}_skinned' if group else f'{stem}_skinned', members, True)
                 root_children.append(g.node(name=group or stem, mesh=len(doc['meshes']) - 1, skin=0))
         if rigid_parts:
-            doc['meshes'].append(dict(name=f'{stem}_static' if skinned_parts else stem,
-                                      primitives=[primitive(p, False) for p in rigid_parts]))
+            mesh(f'{stem}_static' if skinned_parts else stem, rigid_parts, False)
             root_children.append(g.node(name=f'{stem}_static' if skinned_parts else stem, mesh=len(doc['meshes']) - 1))
         top = g.node(name=stem, children=root_children)
         doc['scenes'][0]['nodes'] = [top]

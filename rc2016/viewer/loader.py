@@ -497,6 +497,9 @@ class SourcePreviewLoader:
                 except (ValueError,KeyError,OSError) as error:
                     row.update(format_name='unreadable',error=str(error))
             decoded['material_rules']=game.material_rules(archive,decoded['materials'],translations)
+            for path,notes in (decoded.get('material_notes') or {}).items():   # decoder notes per material (Rift Apart vertex programs)
+                rule=decoded['material_rules'].get(path)
+                if rule is not None:rule['native_limitations']=list(rule.get('native_limitations') or [])+list(notes)
             decoded['effect_preview']=game.effect_preview(archive,data,source_path)
         else:
             decoded.update(textures={},texture_list=[],material_rules={},effect_preview=None)

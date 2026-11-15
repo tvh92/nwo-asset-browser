@@ -162,6 +162,7 @@ The export writes only what is decoded, through `rc2016/games/rcra_export.py`:
 - **Normals** use ALERT's two-angle form: x and y come from two 10-bit fields, z from the remainder, and z's sign is bit 31. Across the corpus, decoded normals agree with face normals at a median dot product of 0.9995.
 - **UVs** are `int16 * uv scale`. V is flipped for the Blender convention, as the 2016 decoder does.
 - **The vertex w word is not decoded.** It spans the whole int16 range, so it is not a ±1 handedness. Tangents are therefore not available yet.
+- **Vertex programs** move some meshes at rest. Those meshes are drawn moved, and they keep their stored vertices ([Vertex programs](#vertex-programs)).
 
 ### Skin weights
 
@@ -275,7 +276,7 @@ The clip notes take about 8 s to compute, off the Tk thread.
 - Root-motion paths.
 - Clip blending and additive partners. Additive clips are previewed on the rest pose, as in 2016.
 - Face performance clips (`.performanceclip`) and the phoneme and viseme pose clips their performance sets use.
-- Vertex-animation textures.
+- Vertex-animation textures over time: the viewer and exports draw the pose at shader time 0 ([Vertex programs](#vertex-programs)).
 
 ## Textures
 
@@ -463,7 +464,7 @@ The slot meanings below come from each program's stage, outputs and bindings acr
 | 8 | 1,474 | Depth-only pixel program (alpha test). |
 | 11 | 1,474 | Two-target pixel program. |
 | 15, 16 | 1,474 | GI voxelization pixel program (UAV stores) and its geometry program. |
-| 3, 7, 10, 13, 17 | 208 | Vertex programs of vertex-deforming graphs. |
+| 3, 7, 10, 13, 17 | 208 | Vertex programs of vertex-deforming graphs ([Vertex programs](#vertex-programs)). |
 | 0, 14, 18 to 31 | fewer | Other pixel and vertex programs, mostly in the 36-record tables. |
 
 The engine vertex program that feeds slots 1, 4 and 5 is in the exe (vertex pulling from `g_MainVBPosView`, `g_MainVBNrmTanView`, `g_MainVBUV0View` and others). Its translation gives the interpolants:
@@ -510,6 +511,8 @@ With the neutral profile, over all programs (`ready` means no output depends on 
 | G-buffer 4 and 5 | 1,449 of 1,474 programs | 5,611 of 5,692 |
 | Forward 1 | 356 fully, 1,073 in part, 45 not at all | 552 of 5,692 fully |
 | Vertex 3, 7, 10, 13, 17 | 194 of 208 | 526 of 583 |
+
+With the vertex bindings of [Vertex programs](#vertex-programs), which bind the vertex streams and leave the force-field bitset empty, all five vertex slots translate for the 207 graphs that materials use (583 of 583 uses); the 208th, `gbl_displacement_singularity`, has no material.
 
 The forward programs still in part keep further engine loops, so their outputs need more engine inputs bound. Not translated:
 - groupshared memory
@@ -572,6 +575,51 @@ Programs read the engine's per-object record, `g_SceneObjectView` (element `$Ele
 - **Interpolants:** the vertex program passes the custom values on as `TEXCOORD6 = (1, Misc, Rand, LOD factor)` and `TEXCOORD7 = (custom X, custom Y, custom Z, FX lighting index)`.
 
 The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain object: identity transform, alpha 1, white colour, and every custom value, time and bias 0. Both the G-buffer and the forward translations bind it, and a material that reads it says so in its limitations. Effects driven by the custom values, such as the particle quads `exp_quad` and `smk_quad`, come out at their zero state (often transparent).
+
+### Vertex programs
+
+208 graphs (583 material uses) replace the engine model vertex program with their own, in pass slots 3, 7, 10, 13 and 17: vertex-animation textures (crowds, prison-cell idles, the Zurkon pub band, swarmer eyes and dials), wind sway, flags, beams and shockwaves, rotating debris, and offsets along the normal. `rc2016/games/rcra/vertex.py` translates them with the SM5 translator and places each mesh's vertices where its material's program puts them at rest.
+
+**Vertex pulling.** The programs read the vertex themselves from `SV_VertexID`. The streams are typed views, and each read lands on the vertex's own element of the 16-byte vertex ([Vertex decoding](#vertex-decoding)), which the translation checks for every stream:
+
+| View | Element | Read as |
+| --- | --- | --- |
+| `g_MainVBPosView` | 2v | int16 x, y, z, w, scaled by the subset's `m_MetersPerUnit` (the model's position scale) |
+| `g_MainVBNrmTanView` | 4v + 2 | The normal word as four UNORM channels, 10, 10, 10 and 2 bits. The programs rebuild the normal from them as `model.unpack_normals` does. |
+| `g_MainVBUV0View` | 4v + 3 | int16 u, v, times the UV scale of `m_GeomLodAndUVScales` bits 0 to 3 (UV1: bits 4 to 7) |
+| `g_MainVBUV1View`, `g_MainColorVBView` | v | UV1 and the colour section |
+
+The subset record (`g_ModelSubsetView`) gives the stream offsets, the scale and the UV-scale word; the paint and skinned streams are not read for a static subset.
+
+**Bindings** (`vertex.translate`; review values, labelled `REST_NOTE`):
+- **Draw:** `MatDrawCB.m_RenderFlags` holds 0x1, 0x8000 and the material's lit bit. With both low bits clear the programs write no geometry, and their meaning is not decoded; 0x8000 reads the model's colour section, as the viewer does.
+- **Object:** the neutral object of [Per-object values](#per-object-values), and the same transform as its previous one.
+- **Engine:** shader time 0 and every other engine constant 0: no wind, no ambient animation, no force fields (the per-tile force-field bitset is empty).
+- **View:** the camera at the origin with world axes and an identity world-to-clip matrix, so `SV_POSITION.xyz` is the moved position in model units and `TEXCOORD2.xyz` the world normal.
+
+**View check.** A second translation moves the camera and uses another affine world-to-clip matrix (`CHECK_VIEW`). When the world positions or normals it gives differ from the review view's, the placement depends on the view (screen-space glitches, camera-facing geometry) and the stored vertices are drawn, labelled (`VIEW_NOTE`). A program that writes a clip w other than 1 counts as view-dependent too.
+
+**Survey** (shader time 0, the neutral object, 256 random vertices per material):
+
+| At rest | Material uses | Graphs | Examples |
+| --- | --- | --- | --- |
+| Moves | 434 | 148 | Vertex-animation textures (190 uses, 52 graphs, read with `ld`; the normal comes from the texture too), wind sway, flags, beams, the holo offset |
+| Stored vertices | 89 | 28 | Interactive foliage, floating hexes and bubbles: their offsets are 0 at rest |
+| View-dependent | 60 | 33 | The dimensional and klemming glitches (an offset along the normal that depends on the view), a grass shader, four HUD programs that write screen positions |
+
+All 583 translate. Slots 3, 10, 13 and 17 place every vertex where slot 7 does, and no program changes UV0, UV1 or the vertex colour at rest, so the pixel programs read the same interpolants. Of the moving uses, 397 move further over shader time; the at-rest pose is the one at time 0.
+
+**Application.** `vertex.deform_model` runs from the `decode_model` hook (`model.decode_for_viewer`), so the viewer, OBJ, glTF and the Blender formats all draw the moved vertices. The meshes of one material run as one batch:
+- **Evaluation:** the translation runs on the CPU over the model's vertex streams (`vertex.evaluate`, float32 numpy, bit for bit the translator's operations, except which signed zero a min or max of two zeros returns). The vertex-animation textures are read with integer texel loads and half-float unpacking (`ld`, `f16tof32`, `ubfe`), which the viewer's GLSL 1.20 cannot express. At rest the result is static, so the CPU run is the same arithmetic. `rcra_glsl.vertex_source` stays the engine program's colour square.
+- **Textures:** `ld` reads the stored texel (0 outside the texture). A filtered read (`sample_l`) is bilinear with wrap at the top mip; the sampler state and mip level are not applied, and the note says so. A texture the install does not hold gets the pixel side's stand-in (`blender_export.replace_missing`).
+- **Results:** a mesh moves when a vertex changes by more than 10⁻⁵ model units or a normal by more than 10⁻⁴. A moved mesh keeps its stored vertices and normals (`stored_positions`, `stored_normals`); the glTF export writes them as a morph target at weight 0, named `stored vertices`, which Blender imports as a shape key.
+- **Notes:** each material's note reaches the viewer's material list (`decoded['material_notes']`) and `export.json`. `decoded['vertex_programs']` holds one row per mesh: state, note and largest offset.
+- **Caching:** both translations are kept in the source's translation disk cache, keyed by the material, the graph, the model's stream layout and `vertex.CODE_SHA256`. A cold load of the stadium crowd (550 meshes, 92 materials) takes about 5 s.
+
+**Limitations:**
+- Motion over time is not drawn.
+- On a skinned mesh, the at-rest offset is added to the bind pose, so its joints carry it; the game adds it after skinning, in object space.
+- The tangent output is not applied: the viewer and Blender build their own tangent frame.
 
 ### Fur materials
 
@@ -646,6 +694,7 @@ The emitter reads its inputs from the mesh:
 - **Normal:** Geometry Normal, un-flipped on back faces.
 - **Tangent frame:** Blender's UV0 tangent space. Its bitangent follows the game's `−v`, as in the viewer; the stored vertex tangent is not decoded yet.
 - **Vertex colour:** the first colour attribute, else 1.
+- **Vertices:** where the material's vertex program places them at rest, with the stored vertices as the shape key `stored vertices` ([Vertex programs](#vertex-programs)).
 - **Vectors:** game `(x, y, z)` is Blender `(x, −z, y)`.
 
 The BRDF group follows the deferred apply program:
@@ -690,6 +739,7 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 
 | Part | Viewer |
 | --- | --- |
+| Vertices | Where the material's vertex program places them at rest, evaluated when the model is decoded ([Vertex programs](#vertex-programs)) |
 | Inputs | UV0 and UV1, the world normal, the UV-derivative tangent frame (`native_glsl.FRAME_HELPERS`), the vertex colour, front face, and the view from `vTintViewOffset` |
 | Textures | A sampled array slice as stored. Arrays with a run-time slice and 3D textures as the padded atlas of the Blender export, without mipmaps. A cube map as a GL cube map of its six stored faces (face k to `GL_TEXTURE_CUBE_MAP_POSITIVE_X + k`, rows top first), top mip, linear, seamless where the driver has it: D3D and GL share the face table, so `textureCube` along the game direction returns the D3D texel. Float data formats as `RGBA32F`. |
 | Lighting | The review rig with the Rift Apart BRDF: GGX α = (0.9725 − 0.7514 gloss)², Smith joint approximation, Schlick F90 = 1, Lambert, occlusion on ambient light only |
@@ -727,5 +777,7 @@ python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --su
 
 - **Synthetic tests** build a small toc, dag and set of DSAR archives, a two-mesh model, texture and material assets, clips (plain and with a frame table) or skin batches (with a palette and a joint base).
 - **Real-install tests** read `RCRA_GAME` (the install folder) and skip when it is not set. They also compare bytes against ALERT's own TOC2 reader.
+
+`tests/test_rcra_vertex.py` checks the vertex-program path. Without game files, it checks the vectorised evaluator against the translator's operations bit for bit, the view check, the stored vertices as a glTF morph target, and the notes in the loader. With `RCRA_GAME` it checks that the swarmer's vertex-animation texture moves every mesh, with each vertex where the translator's own evaluator puts it. It also checks that a dimensional glitch is view-dependent and that a balloon keeps its stored vertices.
 
 `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores). It skips without the DLL. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.
