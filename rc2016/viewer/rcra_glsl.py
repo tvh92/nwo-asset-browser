@@ -44,7 +44,11 @@ GEOMETRY = {'TEXCOORD.x': 'vUV.x', 'TEXCOORD.y': 'vUV.y', 'TEXCOORD1.x': 'vUV1.x
             'TEXCOORD4.z': COLOUR_VARYING + '.z', 'TEXCOORD4.w': COLOUR_VARYING + '.w',
             'SV_IsFrontFace': '(gl_FrontFacing ? 1.0 : 0.0)',
             'VIEW.x': 'vTintViewOffset.x', 'VIEW.y': 'vTintViewOffset.y', 'VIEW.z': 'vTintViewOffset.z',
-            'CAMERA.x': 'rcraCamera.x', 'CAMERA.y': 'rcraCamera.y', 'CAMERA.z': 'rcraCamera.z'}
+            'CAMERA.x': 'rcraCamera.x', 'CAMERA.y': 'rcraCamera.y', 'CAMERA.z': 'rcraCamera.z',
+            # The scene behind (surface.forward's scene mode): the frame copy at the pixel (viewport._scene_copies).
+            'BACKGROUND.r': 'rcraScene.r', 'BACKGROUND.g': 'rcraScene.g', 'BACKGROUND.b': 'rcraScene.b',
+            'BACKGROUND.a': 'rcraScene.a'}
+SCENE_UNIFORMS = ('uSceneColour', 'uHasSceneColour', 'uSceneDepth', 'uHasSceneDepth', 'uSceneDepthInfo')
 LIMITATION = ('Viewer: the tangent frame comes from UV derivatives (the stored tangent is not decoded); vertex colour is the '
               'model\'s colour section squared, as the engine squares it, with its bytes read in R, G, B, A order (the '
               'game\'s view format is not read), 1 without one, and no per-object paint; the review rig and environment '
@@ -249,6 +253,9 @@ def fragment_source(receipt):
     """The fragment program of a receipt: {'source', 'samplers' [uniform names], 'key'}."""
     layouts = receipt['layouts']
     body = _frame_lines()
+    scene = bool(receipt.get('forward')) and reads_scene(receipt['forward'])
+    if scene:
+        body.append('    vec4 rcraScene = texture2D(uSceneColour, gl_FragCoord.xy / uSceneDepthInfo.xy);')
     surface = forward = None
     if receipt.get('surface'):
         surface = _Emitter(receipt['surface'], layouts, 'g')
@@ -285,12 +292,19 @@ def fragment_source(receipt):
     declarations = '\n'.join('uniform %s %s;' % ('samplerCube' if layouts[b]['kind'] == 'cube' else 'sampler2D', uniform(b))
                              for b in sorted(layouts))
     declarations += '\nuniform int %s;\n' % PASS_UNIFORM
+    if scene:
+        declarations += 'uniform sampler2D uSceneColour; uniform vec4 uSceneDepthInfo;   // frame copy, viewport size\n'
     from rc2016.viewer.native_glsl import FRAME_HELPERS, HELPERS as NATIVE_HELPERS
     source = (_prefix() + declarations + NATIVE_HELPERS + FRAME_HELPERS + HELPERS + '\nvoid main() {\n'
               '    vec3 N = normalize(vNrm) * (gl_FrontFacing ? 1.0 : -1.0); sceneCaptureNormal = N;\n'
               '    vec3 V = normalize(-vPos);\n' + '\n'.join(body) + '\n}\n')
     key = (EMITTER_VERSION, receipt['translation_sha256'], hashlib.sha256(source.encode()).hexdigest())
     return dict(source=source, samplers=[uniform(b) for b in sorted(layouts)], key=key)
+
+
+def reads_scene(recipe):
+    """True when a forward recipe samples the scene behind (inputs BACKGROUND.*; rc2016.games.rcra.surface.reads_scene)."""
+    return any(n['op'] == 'input' and n.get('name', '').startswith('BACKGROUND.') for n in recipe['nodes'])
 
 
 def receipt_sha256(surface, forward, blend, layouts):

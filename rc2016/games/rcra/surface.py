@@ -62,6 +62,10 @@ class Unsupported(ValueError):
     pass
 
 
+class _NotAffine(Unsupported):
+    """The forward target is not an affine tint of the scene behind it (forward keeps the scene as an input instead)."""
+
+
 # Engine values a Blender material cannot supply, bound to review values (everything not listed is 0): adapted
 # luminance 1 (as the viewer's RCRA_ADAPTED_LUMINANCE), the pixel centre of a 1920x1080 view for screen-space dither.
 REVIEW_VALUES = {'GlobalWorldCBuffer.m_AdaptedLuminance': 1.0, 'SV_POSITION.x': 0.5, 'SV_POSITION.y': 0.5,
@@ -198,15 +202,15 @@ class _ForwardBindings(_Bindings):
         return super().resource(graph, op, binding, args)
 
 
-VIEW_MATRIX = 'GlobalViewportCBuffer.m_ViewToWorldMat'   # its zero rotation terms are the forward view binding
+WORLD_BUFFER = 'GlobalWorldCBuffer.'   # the engine's lighting constants (key light, ambient, GI, light grid, cloud shadows)
 
 
 class _EngineFreeBindings(_ForwardBindings):
-    """_ForwardBindings with every value the forward profile zeroes left symbolic (inputs ENGINE.*): the engine constants
-    that fall to 0 (key light, ambient, GI, cloud shadows and every other unbound one) and the samples of the lighting
-    textures (probes, SSR, AO, BRDF lookup, shadows, gobos). The light-list counts stay 0, and the view matrix keeps the
-    forward view binding (view space with the world axes, the camera from the CAMERA inputs). Used to prove a term does
-    not depend on any of them."""
+    """_ForwardBindings with the light sources the forward profile zeroes left symbolic (inputs ENGINE.*): the unbound
+    GlobalWorldCBuffer constants (key light, ambient fill, distant GI, light grid, cloud shadows, SSAO factors) and the
+    samples of the lighting textures (probes, SSR, AO, BRDF lookup, shadows, gobos). The light-list counts stay 0, and
+    the view and draw settings keep their profile values (view space with the world axes, no clip plane, depth of field
+    or alpha override). Used to prove a term does not depend on the lighting."""
 
     def resource(self, graph, op, binding, args):
         if binding in rshaders.FORWARD_LIGHTING and op.startswith(('sample', 'gather')):
@@ -214,9 +218,9 @@ class _EngineFreeBindings(_ForwardBindings):
         return super().resource(graph, op, binding, args)
 
     def _review(self, name):
-        if name in NEUTRAL_DRAW_FLOATS or name in REVIEW_VALUES or name.startswith(VIEW_MATRIX):
-            return super()._review(name)
-        return self.graph.input('ENGINE.' + name, 'f')
+        if name.startswith(WORLD_BUFFER) and name not in NEUTRAL_DRAW_FLOATS and name not in REVIEW_VALUES:
+            return self.graph.input('ENGINE.' + name, 'f')
+        return super()._review(name)
 
 
 class _Unpack:
@@ -869,6 +873,10 @@ FORWARD_TERMS = ('colour.r', 'colour.g', 'colour.b', 'background.r', 'background
                  'lit_background.g', 'lit_background.b', 'alpha', 'clip')
 BACKGROUND_BUFFER = 'g_FrameBuffer'
 BACKGROUND_INPUTS = ('BACKGROUND.r', 'BACKGROUND.g', 'BACKGROUND.b', 'BACKGROUND.a')
+SCENE_NOTE = ('The program reads the scene behind it (%s) other than as an affine tint (blend curves, contrast, '
+              'one channel into all three), so the target keeps the scene colour as inputs BACKGROUND.rgba, sampled '
+              'at the pixel: the viewer reads a copy of its frame; Blender has no node for it. The background tint is '
+              '0, and the sample\'s screen-space offset (distortion, refraction) is dropped.')
 UNLIT_BACKGROUND_NOTE = (' The material is lit, but the tint reads no light or other engine value, so the scene '
                          'passes through it unlit, as in the game.')
 LIT_BACKGROUND_NOTE = (' The material is lit and lights the scene behind it as albedo: the tint is background + '
@@ -988,6 +996,63 @@ def _factor_split(g, root, variable):
     return split(root)
 
 
+def _engine_translation(shader, graph_data, material_data, flags, texture_sizes):
+    """(graph, translation, engine(i)) of the forward program with every value the profile zeroes symbolic
+    (_EngineFreeBindings); engine(i) is true for nodes that read one."""
+    bindings = _EngineFreeBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
+                                   rshaders.material_units(graph_data, material_data), texture_sizes)
+    translator = sm5.Translator(shader, bindings)
+    bindings.graph = translator.g
+    tr = _run(translator)
+    g = tr.graph
+    return g, tr, _reads(g, lambda name: name.startswith('ENGINE.'))
+
+
+def _reads(g, wanted):
+    """reads(i): true for the nodes of ``g`` that read an input whose name ``wanted(name)`` accepts."""
+    memo = {}
+
+    def reads(i):
+        if i not in memo:
+            n = g.nodes[i]
+            memo[i] = (n['op'] == 'input' and wanted(n['name'])) or any(reads(a) for a in n['args'])
+        return memo[i]
+    return reads
+
+
+def _separable(g, root, first, second):
+    """True when root is a sum of parts that each read at most one of two input sets (``first(i)``, ``second(i)``): they
+    meet only through add, negate, a multiply or divide by a value that reads neither, or a select on such a condition."""
+    if not (first(root) and second(root)):
+        return True
+    n = g.nodes[root]
+    op, args = n['op'], n['args']
+    free = (lambda i: not first(i) and not second(i))
+    if op == 'add':
+        return _separable(g, args[0], first, second) and _separable(g, args[1], first, second)
+    if op in ('neg', 'cast'):
+        return _separable(g, args[0], first, second)
+    if op in ('mul', 'div') and free(args[1]):
+        return _separable(g, args[0], first, second)
+    if op == 'mul' and free(args[0]):
+        return _separable(g, args[1], first, second)
+    if op == 'select' and free(args[0]):
+        return _separable(g, args[1], first, second) and _separable(g, args[2], first, second)
+    return False
+
+
+def _check_scene_unlit(shader, graph_data, material_data, flags, texture_sizes):
+    """Raise Unsupported unless a lit forward program's target reads the scene behind and the lighting only in separate
+    summands (_separable over the symbolic translation): the scene then passes through unlit, and the profile's target
+    with the scene colour kept as an input is the game's apart from the zeroed lighting."""
+    g, tr, engine = _engine_translation(shader, graph_data, material_data, flags, texture_sizes)
+    scene = _reads(g, lambda name: name in BACKGROUND_INPUTS)
+    roots = [g.cast(tr.outputs[('o', 0, c)], 'f') for c in range(4)] + [tr.discard]
+    if not all(_separable(g, r, scene, engine) for r in roots):
+        raise Unsupported('Forward target lights the scene behind it (%s) non-linearly in a lit material'
+                          % BACKGROUND_BUFFER)
+
+
 def _lit_background(shader, graph_data, material_data, flags, texture_sizes):
     """How a lit forward program passes the scene behind it, translated again with every value the profile zeroes symbolic
     (_EngineFreeBindings). Each colour channel must be affine in its own background channel, colour = A + B x background.
@@ -995,25 +1060,13 @@ def _lit_background(shader, graph_data, material_data, flags, texture_sizes):
     B0 + Y x L with L one engine factor per channel that also lights the program's own colour (it reaches A) and reads no
     specular input: the forward diffuse light, so the program lights the scene behind as albedo. Returns (graph, [(B0, Y)]
     per channel), B0 and Y free of the symbolic values. Raises Unsupported otherwise."""
-    bindings = _EngineFreeBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
-                                   rshaders.material_units(graph_data, material_data), texture_sizes)
-    translator = sm5.Translator(shader, bindings)
-    bindings.graph = translator.g
-    tr = _run(translator)
-    g = tr.graph
-    depends = {}
-
-    def engine(i):
-        if i not in depends:
-            n = g.nodes[i]
-            depends[i] = (n['op'] == 'input' and n['name'].startswith('ENGINE.')) or any(engine(a) for a in n['args'])
-        return depends[i]
+    g, tr, engine = _engine_translation(shader, graph_data, material_data, flags, texture_sizes)
     splits = []
     for c in range(3):
         colour = tr.outputs.get(('o', 0, c))
         split = _affine_split(g, g.cast(colour, 'f'), BACKGROUND_INPUTS) if colour is not None else None
         if split is None or set(split[1]) - {BACKGROUND_INPUTS[c]}:
-            raise Unsupported('Forward colour is not affine in the scene behind (%s)' % BACKGROUND_BUFFER)
+            raise _NotAffine('Forward colour is not affine in the scene behind (%s)' % BACKGROUND_BUFFER)
         splits.append((split[0], split[1].get(BACKGROUND_INPUTS[c], g.const('f', 0.0))))
     if not any(engine(b) for _a, b in splits):
         return None
@@ -1051,6 +1104,34 @@ def _import(dst, src, roots):
     return [new[r] for r in roots]
 
 
+def _background_split(g, terms, shader, graph_data, material_data, flags, texture_sizes):
+    """(lit, terms): the colour split into A + B x background (and the lit background term, from _lit_background, for a
+    lit program that lights the scene behind). Raises _NotAffine when the target is not an affine tint of it."""
+    zero = g.const('f', 0.0)
+    lit = _lit_background(shader, graph_data, material_data, flags, texture_sizes) if flags else None
+    out = {}
+    for name in ('alpha', 'clip'):
+        split = _affine_split(g, terms[name], BACKGROUND_INPUTS)
+        if not split or split[1]:
+            raise _NotAffine('Forward %s depends on the scene behind (%s)' % (name, BACKGROUND_BUFFER))
+    for c in 'rgb':
+        split = _affine_split(g, terms['colour.' + c], BACKGROUND_INPUTS)
+        if split is None or set(split[1]) - {'BACKGROUND.' + c}:
+            raise _NotAffine('Forward colour is not affine in the scene behind (%s)' % BACKGROUND_BUFFER)
+        out['colour.' + c] = split[0]
+        out['background.' + c] = split[1].get('BACKGROUND.' + c, zero)
+    if lit is not None:   # B0 and Y from the symbolic translation (free of its symbolic values)
+        imported = _import(g, lit[0], [x for part in lit[1] for x in part])
+        for k, c in enumerate('rgb'):
+            out['background.' + c], out['lit_background.' + c] = imported[2 * k:2 * k + 2]
+    return lit, out
+
+
+def reads_scene(recipe):
+    """True when a forward recipe keeps the scene behind as inputs BACKGROUND.* (forward's scene mode)."""
+    return any(n['op'] == 'input' and n.get('name') in BACKGROUND_INPUTS for n in recipe['nodes'])
+
+
 def forward(graph_data, material_data, texture_sizes=None):
     """The forward program's target under the forward profile: colour (unclamped, HDR), alpha and the discard.
 
@@ -1073,27 +1154,18 @@ def forward(graph_data, material_data, texture_sizes=None):
              'clip': tr.discard}
     zero = g.const('f', 0.0)
     background = dict.fromkeys(('background.r', 'background.g', 'background.b'), zero)
-    lit = None
+    lit, scene = None, False
     if bindings.background_read:
         reach = g.reachable(list(terms.values()))
         if any(g.nodes[i]['op'] == 'input' and g.nodes[i]['name'] in BACKGROUND_INPUTS for i in reach):
-            if flags:
-                lit = _lit_background(shader, graph_data, material_data, flags, texture_sizes)
-            for name in ('alpha', 'clip'):
-                if not _affine_split(g, terms[name], BACKGROUND_INPUTS) or _affine_split(g, terms[name],
-                                                                                          BACKGROUND_INPUTS)[1]:
-                    raise Unsupported('Forward %s depends on the scene behind (%s)' % (name, BACKGROUND_BUFFER))
-            for c in 'rgb':
-                split = _affine_split(g, terms['colour.' + c], BACKGROUND_INPUTS)
-                if split is None or set(split[1]) - {'BACKGROUND.' + c}:
-                    raise Unsupported('Forward colour is not affine in the scene behind (%s)' % BACKGROUND_BUFFER)
-                terms['colour.' + c] = split[0]
-                background['background.' + c] = split[1].get('BACKGROUND.' + c, zero)
-            if lit is not None:   # B0 and Y from the symbolic translation (free of its symbolic values)
-                imported = _import(g, lit[0], [x for part in lit[1] for x in part])
-                for k, c in enumerate('rgb'):
-                    background['background.' + c], background['lit_background.' + c] = imported[2 * k:2 * k + 2]
-    terms.update(background)
+            try:
+                lit, split_terms = _background_split(g, terms, shader, graph_data, material_data, flags, texture_sizes)
+                terms.update(split_terms)
+            except _NotAffine:   # keep the scene colour as an input, for renderers that can sample it
+                if flags:
+                    _check_scene_unlit(shader, graph_data, material_data, flags, texture_sizes)
+                scene = True
+    terms.update({k: v for k, v in background.items() if k not in terms})
     limitations = [
         'Forward colour with every engine light source zero (key light, light grid, probes, GI, reflections): the '
         "material's own emission and effects. The renderer's lights shade its G-buffer surface instead of the forward "
@@ -1103,7 +1175,9 @@ def forward(graph_data, material_data, texture_sizes=None):
         % ('lit' if flags else 'unlit: lighting term 1') + OBJECT_NOTE * bindings.object_read
         + RECORD_NOTE * bindings.record_read
         + (SCENE_GBUFFER_NOTE if set(rshaders.SCENE_GBUFFER) & bindings.engine_read else '')]
-    if bindings.background_read:
+    if scene:
+        limitations.append(SCENE_NOTE % BACKGROUND_BUFFER + UNLIT_BACKGROUND_NOTE * bool(flags))
+    elif bindings.background_read:
         limitations.append('The program samples the scene behind it (%s); the colour is affine in it, so it is split into '
                            'an emission and a background tint, and the sample\'s screen-space offset (distortion, '
                            'refraction) is dropped.' % BACKGROUND_BUFFER

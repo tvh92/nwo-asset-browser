@@ -270,8 +270,10 @@ def _translated(source, key, entry, hd):
         return
     entry['native_translation'], entry['native_textures'] = receipt, textures
     if receipt['blend'] != 'opaque':
+        from rc2016.viewer.rcra_glsl import reads_scene
         entry['forward'] = dict(kind=TRANSLATED_KIND, blend=receipt['blend'], two_sided=False, fallback=entry.get('forward'),
-                                limitation=' '.join(receipt['limitations']))
+                                limitation=' '.join(receipt['limitations']),
+                                reads_scene=bool(receipt.get('forward')) and reads_scene(receipt['forward']))
 
 
 def model_texture_list(source, materials):

@@ -2995,7 +2995,7 @@ class Shading:
             if translation.get('kind') == 'rcra':   # a Rift Apart receipt (rc2016.viewer.rcra_glsl)
                 from rc2016.viewer import rcra_glsl
                 surface = rcra_glsl.fragment_source(translation)
-                names = (*OPAQUE_UNIFORMS, *surface['samplers'], rcra_glsl.PASS_UNIFORM)
+                names = (*OPAQUE_UNIFORMS, *surface['samplers'], rcra_glsl.PASS_UNIFORM, *rcra_glsl.SCENE_UNIFORMS)
                 extra = {} if instanced else {'aRcraColour': RCRA_COLOUR_ATTRIBUTE}
             else:
                 surface = fragment_source(translation, srgb, experimental=experimental, rule_preview=rule_preview,

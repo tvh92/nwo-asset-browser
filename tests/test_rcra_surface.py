@@ -403,7 +403,9 @@ class RealSurfaceTests(unittest.TestCase):
         key = self.source.resolve(path)[0]
         graph = next(r['path'] for r in self.source.asset_references(key) if r['path'].endswith('.materialgraph'))
         gkey = next(k for k in self.source.resolve(graph) if self.source.entries[k]['type'] == 'materialgraph')
-        return rsurface.forward(self.source.asset_data(gkey), self.source.asset_data(key))
+        from rc2016.games.rcra.texture import texture_size
+        return rsurface.forward(self.source.asset_data(gkey), self.source.asset_data(key),
+                                texture_sizes=lambda texture: texture_size(self.source, texture))   # as the export does
 
     def test_object_record_reads_the_neutral_object(self):
         result = self.forward_of('material/environment/clankpuzzles/cpz_plasma_ball.material')
@@ -439,6 +441,24 @@ class RealSurfaceTests(unittest.TestCase):
         for c in 'rgb':
             self.assertEqual(lit['background.' + c], 0.0)   # nothing passes unlit
             self.assertEqual(unit['background.' + c], lit['background.' + c] + lit['lit_background.' + c])
+
+    def test_scene_read_other_than_as_a_tint_stays_an_input(self):
+        result = self.forward_of('material/characters/npc/npc_zur_pub_hologram_01/npc_zur_pub_hologram_01.material')
+        g, terms = result['graph'], result['terms']
+        recipe = rsurface.export_recipe(result)
+        self.assertTrue(rsurface.reads_scene(recipe))
+        self.assertTrue(any('BACKGROUND.rgba' in line for line in result['limitations']))
+        self.assertEqual([g.value(terms['background.' + c]) for c in 'rgb'], [0.0, 0.0, 0.0])
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = blender_export.material_entry(
+                self.source, 'material/characters/npc/npc_zur_pub_hologram_01/npc_zur_pub_hologram_01.material', Path(tmp))
+        self.assertNotIn('forward', entry)   # Cycles cannot sample the scene behind
+        self.assertTrue(any('Cycles has no node' in line for line in entry.get('limitations', [])) or 'error' in entry)
+
+    def test_lit_particles_pass_the_scene_unlit_as_an_input(self):
+        result = self.forward_of('material/visualeffect/environment/blizar_embers_atmo_01.material')
+        self.assertTrue(rsurface.reads_scene(rsurface.export_recipe(result)))
+        self.assertTrue(any(rsurface.UNLIT_BACKGROUND_NOTE in line for line in result['limitations']))
 
     def test_background_lit_by_specular_light_is_unsupported(self):
         with self.assertRaisesRegex(rsurface.Unsupported, 'more than one light factor'):

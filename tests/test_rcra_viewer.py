@@ -20,6 +20,8 @@ PLACEHOLDER = 'characters/hero/hero_clank/materials/hero_clank_antennaglass.mate
 SWARMER = 'characters/enemy/enm_neo_nefarious_swarmer/enm_neo_nefarious_swarmer.model'
 BUTTON = 'environment/clankpuzzles/cpz_gp_pressure_button_01.model'
 CUBE = 'material/character/enemy/enm_molonoth_robot/enm_dr_nefarious_laser_tube.material'   # forward program samples a cube map
+PANE = 'characters/camera/camera_pane.model'
+HOLOGRAM = 'material/visualeffect/global/gbl_camera_pane/gbl_camera_pane_hologram.material'   # reads the scene non-linearly
 HEAT_DISTORTION = 'material/visualeffect/global/gbl_heat_distortion_01/exhaust_heat_distortion_01.material'   # lit background
 
 
@@ -79,6 +81,18 @@ class EmitterTests(unittest.TestCase):
         source = rcra_glsl.fragment_source(receipt)['source']
         self.assertIn('rcraBackground += vec3(0.5, 0.5, 0.5) * rcraDiffuse(rcraNormal, vec3(1.0), 1.0);', source)
         self.assertNotIn('rcraBackground +=', rcra_glsl.fragment_source(_receipt('blended'))['source'])
+
+    def test_scene_input_samples_the_frame_copy(self):
+        receipt = _receipt('blended')
+        nodes = receipt['forward']['nodes'] + [dict(op='input', type='f', name='BACKGROUND.g', args=[])]
+        terms = dict(receipt['forward']['terms'], **{'colour.r': len(nodes) - 1})
+        receipt['forward'] = dict(receipt['forward'], nodes=nodes, terms=terms)
+        self.assertTrue(rcra_glsl.reads_scene(receipt['forward']))
+        source = rcra_glsl.fragment_source(receipt)['source']
+        self.assertIn('vec4 rcraScene = texture2D(uSceneColour, gl_FragCoord.xy / uSceneDepthInfo.xy);', source)
+        self.assertIn('uniform sampler2D uSceneColour;', source)
+        self.assertIn('rcraScene.g', source)
+        self.assertNotIn('uSceneColour', rcra_glsl.fragment_source(_receipt('blended'))['source'])
 
     def test_forward_receipt_keeps_the_forward_discard_only(self):
         source = rcra_glsl.fragment_source(_receipt('blended'))['source']
@@ -265,6 +279,39 @@ class ViewportDrawTests(unittest.TestCase):
             self.assertTrue(view._upload_cube(cube))
             self.assertEqual(view._gl.glGetError(), 0)
         self._link(CUBE, check)
+
+    def test_scene_reading_material_draws_from_a_frame_copy(self):
+        with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
+            import tkinter as tk
+            from rc2016.games.rcra.material import _translated
+            from rc2016.viewer.loader import SourcePreviewLoader
+            from rc2016.viewer.viewport import ModelViewport
+            loader = SourcePreviewLoader()
+            archive = loader._ensure_archive(GAME)
+            key = next(k for k in archive.resolve(PANE) if archive.entries[k]['type'] == 'model')
+            payload = loader.load(GAME, key, PANE, output_root=os.path.join(appdata, 'out'))
+            entry = next(e for e in payload['textures'].values() if e.get('native_translation'))
+            hologram = next(k for k in archive.resolve(HOLOGRAM) if archive.entries[k]['type'] == 'material')
+            _translated(archive, hologram, entry, False)   # the pane drawn with the hologram's translated program
+            self.assertTrue(entry['forward']['reads_scene'])
+            root = tk.Tk()
+            try:
+                root.geometry('320x320')
+                view = ModelViewport(root)
+                view.pack(fill='both', expand=True)
+                root.update()
+                if view._context_error or view._shading is None:
+                    self.skipTest(view._context_error or 'no shading context')
+                copies = []
+                real = view._scene_copies
+                view._scene_copies = lambda: copies.append(1) or real()
+                view.set_mode('Shaded')
+                view.set_mesh(payload)
+                view._draw()
+                self.assertIsNone(view.shading_error)
+                self.assertTrue(copies)
+            finally:
+                root.destroy()
 
     def test_lit_background_material_links(self):
         def check(_view, receipt, _textures):

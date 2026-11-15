@@ -2456,7 +2456,8 @@ class ModelViewport(_TkFrame):
     def _draw_translated_forward(self, index_array, entry, forward, first, count, skin):
         """One translated Rift Apart forward batch (rc2016.viewer.rcra_glsl) in its own program: the multiply pass scales what
         is behind by the material's background factor (blended: mix(1, B, alpha); additive: 1 + alpha B; modulate: the
-        tint), then the colour pass adds its premultiplied colour, coverage blended over. Depth is tested, not written."""
+        tint), then the colour pass adds its premultiplied colour, coverage blended over. Depth is tested, not written. A
+        program that samples the scene behind (forward rule reads_scene) reads a copy of the frame taken before the batch."""
         from rc2016.viewer.rcra_glsl import PASS_UNIFORM
         from rc2016.viewer.shading import BONE_TEXTURE_UNIT
         gl, sh = self._gl, self._shading
@@ -2468,6 +2469,8 @@ class ModelViewport(_TkFrame):
         sh.glUniform1f(u['uBoneWidth'], float(4 * self._bone_count))
         sh.glUniform1i(u['uMode'], 2)
         self._apply_material(u, entry, 2)
+        if forward.get('reads_scene'):
+            self._bind_scene_copies(u, self._scene_copies())
         mode = forward.get('blend')
         separate = self._hdr_fns.get('glBlendFuncSeparate') if getattr(self, '_linear_output', False) else None
         zero, one, src_colour, one_minus_src_alpha = 0, 1, 0x0300, 0x0303

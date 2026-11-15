@@ -360,6 +360,12 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
         del results[name], recipes[name]
     if not recipes:
         return dict(error=errors.get('recipe') or errors.get('forward'), graph=graph_path, blend=blend)
+    if 'forward' in recipes and rsurface.reads_scene(recipes['forward']):
+        errors['forward'] = ('Unsupported: the forward program reads the scene behind it other than as a tint, which '
+                             'Cycles has no node for (the viewer samples a copy of its frame)')
+        del results['forward'], recipes['forward']
+        if 'recipe' not in results:
+            return dict(error=errors.get('recipe') or errors['forward'], graph=graph_path, blend=blend)
     if blend == 'modulate' and 'forward' in recipes and _reads_background(recipes['forward']):
         errors['forward'] = 'Unsupported: a modulate material that passes the scene behind through is not linear in it'
         del results['forward'], recipes['forward']
