@@ -8,6 +8,8 @@ recipe evaluated by rc2016.shaders.sm5 for the same inputs and the same unit tex
 map is compared with the exact D3D cube lookup of the stored faces (blender_export.cube_lookup), not with the equirectangular
 image Blender reads, so its difference includes the resampling.
 A blended material's forward colour and alpha are baked too, with the view inputs held at FORWARD_VIEW.
+A pixel whose recipe samples a texture at a non-finite coordinate (a neutral profile value used as a divisor, such as a
+custom object value of 0) has no defined colour on either side; it is left out of the comparison and counted.
 Prints and returns the worst absolute difference per surface term.
 """
 import argparse
@@ -30,6 +32,10 @@ CHECK_SCRIPT = Path(__file__).resolve().parents[2] / 'export' / 'rcra_blender_ch
 FORWARD_VIEW = {'VIEW.x': -0.6, 'VIEW.y': -2.4, 'VIEW.z': 0.9, 'CAMERA.x': 0.6, 'CAMERA.y': 2.4, 'CAMERA.z': -0.9}
 TERMS = {'albedo': ('albedo.r', 'albedo.g', 'albedo.b'), 'f0': ('f0.r', 'f0.g', 'f0.b'),
          'scalars': ('gloss', 'occlusion', 'emission')}
+
+
+class UndefinedSample(ArithmeticError):
+    """The recipe sampled a texture at a non-finite coordinate."""
 
 
 class Volume(list):
@@ -101,6 +107,8 @@ def expected(entry, size, source=None):
     units = {b: load_unit(row, source) for b, row in entry['images'].items()}
 
     def sample(node, args):
+        if not all(math.isfinite(a) for a in args[:3]):
+            raise UndefinedSample(node['binding'])
         image = units[node['binding']]
         if isinstance(image, CubeFaces):
             return [float(c) for c in blender_export.cube_lookup(image.faces, args[:3])]
@@ -121,17 +129,27 @@ def expected(entry, size, source=None):
                       'TEXCOORD3.x': 1.0, 'TEXCOORD3.y': 0.0, 'TEXCOORD3.z': 0.0, 'TEXCOORD3.w': 1.0,
                       'TEXCOORD4.x': 1.0, 'TEXCOORD4.y': 1.0, 'TEXCOORD4.z': 1.0, 'TEXCOORD4.w': 1.0, 'SV_IsFrontFace': True}
             if entry.get('recipe'):
-                terms = rsurface.evaluate_recipe(entry['recipe'], inputs, sample)
-                for name, keys in TERMS.items():
-                    out[name].append([terms[k] for k in keys])
-                n = np.array([terms['normal.x'], -terms['normal.z'], terms['normal.y']])   # game -> Blender
-                out['normal'].append(list(n / max(np.linalg.norm(n), 1e-12)))
-                out['alpha'].append([0.0 if terms['clip'] else 1.0] * 3)
+                try:
+                    terms = rsurface.evaluate_recipe(entry['recipe'], inputs, sample)
+                except UndefinedSample:
+                    for name in (*TERMS, 'normal', 'alpha'):
+                        out[name].append([math.nan] * 3)
+                else:
+                    for name, keys in TERMS.items():
+                        out[name].append([terms[k] for k in keys])
+                    n = np.array([terms['normal.x'], -terms['normal.z'], terms['normal.y']])   # game -> Blender
+                    out['normal'].append(list(n / max(np.linalg.norm(n), 1e-12)))
+                    out['alpha'].append([0.0 if terms['clip'] else 1.0] * 3)
             if entry.get('forward'):
-                terms = rsurface.evaluate_recipe(entry['forward'], dict(inputs, **FORWARD_VIEW), sample)
-                out['forward_colour'].append([terms['colour.r'], terms['colour.g'], terms['colour.b']])
-                out['forward_alpha'].append([0.0 if terms['clip'] else terms['alpha']] * 3)
-                out['forward_background'].append([terms.get('background.' + c, 0.0) for c in 'rgb'])
+                try:
+                    terms = rsurface.evaluate_recipe(entry['forward'], dict(inputs, **FORWARD_VIEW), sample)
+                except UndefinedSample:
+                    for name in ('forward_colour', 'forward_alpha', 'forward_background'):
+                        out[name].append([math.nan] * 3)
+                else:
+                    out['forward_colour'].append([terms['colour.r'], terms['colour.g'], terms['colour.b']])
+                    out['forward_alpha'].append([0.0 if terms['clip'] else terms['alpha']] * 3)
+                    out['forward_background'].append([terms.get('background.' + c, 0.0) for c in 'rgb'])
     return {k: np.array(v) for k, v in out.items()}
 
 
@@ -153,7 +171,8 @@ def bake(entry, blender, size, folder):
 
 
 def check(source, material_path, blender, folder, size=37):
-    """{term: worst absolute difference} of one material; raises when it has no Blender entry."""
+    """{term: worst absolute difference} of one material, with the count of pixels left out as undefined; raises when it
+    has no Blender entry."""
     entry = blender_export.material_entry(source, material_path, Path(folder) / 'units')
     if 'error' in entry:
         raise rsurface.Unsupported(entry['error'])
@@ -161,8 +180,14 @@ def check(source, material_path, blender, folder, size=37):
     got = bake(entry, blender, size, folder)
     report = {}
     for name, values in want.items():
-        diff = np.abs(got[name][:, :3] - values)
-        report[name] = dict(max=float(diff.max()), p99=float(np.percentile(diff.max(axis=1), 99)))
+        defined = ~np.isnan(values).any(axis=1)
+        if not defined.any():
+            report[name] = dict(undefined=int(len(values)))
+            continue
+        diff = np.abs(got[name][defined, :3] - values[defined]).max(axis=1)
+        report[name] = dict(max=float(diff.max()), p99=float(np.percentile(diff, 99)))
+        if not defined.all():
+            report[name]['undefined'] = int((~defined).sum())
     return report
 
 

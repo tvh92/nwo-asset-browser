@@ -107,6 +107,26 @@ class VolumeTests(unittest.TestCase):
         self.assertGreater(float(np.ptp(want['albedo'])), 0.3)
         self.assertLess(float(np.abs(got['albedo'][:, :3] - want['albedo']).max()), 3e-3)   # 8-bit atlas, float bake
 
+    def test_non_finite_sample_coordinates_are_undefined(self):
+        """A coordinate divided by a neutral 0 (here u * inf) samples nowhere: the pixel is left out, not a crash."""
+        nodes = [dict(op='input', type='f', name='TEXCOORD.x', args=[]), dict(op='input', type='f', name='TEXCOORD.y', args=[]),
+                 dict(op='const', type='f', value=math.inf, args=[]), dict(op='const', type='f', value=0.0, args=[]),
+                 dict(op='const', type='f', value=1.0, args=[])]
+        nodes.append(dict(op='mul', type='f', args=[0, 2]))                                                # 5
+        nodes.append(dict(op='sample', type='v', args=[5, 1, 3, 3], binding='textureUnit5', opcode='sample',
+                          dimension=3, sampler=None, offsets=[], controls=None))                          # 6
+        nodes += [dict(op='channel', type='f', args=[6], index=c) for c in range(3)]                      # 7, 8, 9
+        terms = {'albedo.r': 7, 'albedo.g': 8, 'albedo.b': 9, 'f0.r': 3, 'f0.g': 3, 'f0.b': 3, 'gloss': 3, 'normal.x': 3,
+                 'normal.y': 4, 'normal.z': 3, 'occlusion': 4, 'emission': 3, 'clip': 3}
+        with tempfile.TemporaryDirectory() as tmp:
+            row = blender_export._save(np.full((4, 4, 4), 0.5, np.float32), dict(format=28), 'flat', Path(tmp) / 'units',
+                                       'synthetic')
+            entry = dict(recipe=dict(version=1, nodes=nodes, terms=terms, textures={}, inputs=[], limitations=[]),
+                         images={'textureUnit5': row})
+            want = blender_check.expected(entry, 5)
+        self.assertEqual(want['albedo'].shape, (25, 3))
+        self.assertTrue(np.isnan(want['albedo']).all() and np.isnan(want['normal']).all())
+
 
 def _q(x):
     return int(math.floor(min(max(x, 0.0), 1.0) * 255.0 + 0.5))
