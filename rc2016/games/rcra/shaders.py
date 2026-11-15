@@ -63,7 +63,9 @@ FORWARD_FAR_CLIP = 1000.0
 FORWARD_LIGHTING = ('g_LightGridLookup', 'g_LightLookupView', 'g_LightZBinView', 'g_LightGridData', 'g_LightVolumes',
                     'g_Lights', 'g_ShadowAtlas', 'g_GoboAtlas', 'g_EnvProbeEnvs', 'g_EnvProbeArray', 'g_EnvProbeDefault',
                     'g_SSRFinalTex', 'g_AoSsrBuffer', 'g_BrdfLookup', 'g_RayTracedShadows')
-FORWARD_RESOURCES = dict({name: 0.0 for name in FORWARD_LIGHTING}, g_ViewDepthBuffer=FORWARD_FAR_CLIP)
+# - The deformable-snow map (snow writers read it at the world position once the view is bound): empty, 0, as the
+#   deformable-snow constants are 0 under review values. Not decoded.
+FORWARD_RESOURCES = dict({name: 0.0 for name in FORWARD_LIGHTING}, g_ViewDepthBuffer=FORWARD_FAR_CLIP, g_DeformablesView=0.0)
 # - The scene's G-buffer (screen effects, eye normal smoothing, decals read it around the pixel): cleared, every word 0,
 #   as the empty scene the far-clip depth stands for; its size is the review viewport's (resinfo). Not decoded.
 SCENE_GBUFFER = {'g_GBufNormalSpec': 0}

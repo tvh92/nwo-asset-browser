@@ -387,15 +387,67 @@ def _run(translator):
         raise Unsupported('Program is too deep to translate (recursion limit)') from None
 
 
+class _ViewBindings(_Bindings):
+    """_Bindings with the forward profile's view (VIEW and CAMERA inputs, FORWARD_VIEW_FLOATS), for writers that read the
+    view direction."""
+
+    def input(self, name):
+        if name in rshaders.FORWARD_VIEW_INPUTS:
+            return self.graph.input(rshaders.FORWARD_VIEW_INPUTS[name], 'f')
+        return super().input(name)
+
+    def constant(self, name):
+        if name in rshaders.FORWARD_VIEW_INPUTS:
+            return self.graph.input(rshaders.FORWARD_VIEW_INPUTS[name], 'f')
+        if name in rshaders.FORWARD_VIEW_FLOATS:
+            return self.graph.const('f', rshaders.FORWARD_VIEW_FLOATS[name])
+        return super().constant(name)
+
+
+VIEW_NOTE = ('The writer reads the view direction, which the review screen position leaves undefined (the camera at the '
+             'point: a normalised zero vector, NaN). It is translated with the view of the forward profile instead: the camera-to-'
+             'point offset and camera position are inputs (VIEW, CAMERA), and screen coordinates are that offset.')
+
+
+NAN_NOTE = ('Under the neutral values some terms are undefined (NaN): the program divides by a per-object or per-draw value '
+            'the game sets at run time (an animation frame count, a random seed), which the neutral object holds at 0. '
+            'Renderers resolve the NaN by D3D rules (blender_recipe); a texture read at an undefined address is undefined.')
+
+
+def _reads_nan(result):
+    """True when a term of a translation depends on a NaN constant."""
+    g = result['graph']
+    return any(g.nodes[i]['op'] == 'const' and isinstance(g.nodes[i]['value'], float) and g.nodes[i]['value'] != g.nodes[i]['value']
+               for i in g.reachable(list(result['terms'].values())))
+
+
 def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes=None):
     """The material's surface terms as one expression DAG. ``texture_sizes(path)`` gives a texture's (width, height, depth or
     array size, mip count) for programs that query sizes (rc2016.games.rcra.texture.texture_size); without it they fail.
 
+    A writer whose terms depend on NaN under the review screen position (it reads the view direction) is translated again
+    with the forward profile's view (_ViewBindings, VIEW_NOTE), and that translation is used when it has no NaN.
+
     Returns dict(graph, terms {name: node}, textures {binding: path}, inputs [names], limitations [text]).
     Raises Unsupported when the writer is not the engine packing or keeps non-portable operations."""
+    result = _surface(graph_data, material_data, slot, texture_sizes, _Bindings)
+    if not _reads_nan(result):
+        return result
+    try:
+        viewed = _surface(graph_data, material_data, slot, texture_sizes, _ViewBindings)
+    except Unsupported:
+        viewed = None
+    if viewed is not None and not _reads_nan(viewed):
+        viewed['limitations'].append(VIEW_NOTE)
+        return viewed
+    result['limitations'].append(NAN_NOTE)
+    return result
+
+
+def _surface(graph_data, material_data, slot, texture_sizes, binding_class):
     shader = rshaders.pass_shader(graph_data, slot)
     cb2 = rshaders.material_constants(graph_data, material_data)
-    bindings = _Bindings(cb2, shader.reflection, rshaders.material_units(graph_data, material_data), texture_sizes)
+    bindings = binding_class(cb2, shader.reflection, rshaders.material_units(graph_data, material_data), texture_sizes)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)

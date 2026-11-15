@@ -306,6 +306,16 @@ class RealSurfaceTests(unittest.TestCase):
                 return key
         self.fail('no material uses ' + graph_path)
 
+    def test_view_direction_writer_takes_the_forward_view(self):
+        """The dimensional glass normalises the direction to the camera: under review values that is NaN, so it is translated
+        with VIEW and CAMERA inputs, labelled, and no term depends on NaN."""
+        graph_path = 'materialgraph/global/basic_glass_dimensional/basic_glass_dimensional.materialgraph'
+        gkey = next(k for k in self.source.resolve(graph_path) if self.source.entries[k]['type'] == 'materialgraph')
+        result = rsurface.surface(self.source.asset_data(gkey), self.source.asset_data(self.material_of(graph_path)))
+        self.assertIn(rsurface.VIEW_NOTE, result['limitations'])
+        self.assertTrue({'VIEW.x', 'VIEW.y'} <= set(result['inputs']))
+        self.assertFalse(rsurface._reads_nan(result))
+
     def test_terms_repack_to_the_writers_bits(self):
         """Each term, packed again with the engine's formulas, gives the writer's own G-buffer words."""
         rng = np.random.default_rng(3)

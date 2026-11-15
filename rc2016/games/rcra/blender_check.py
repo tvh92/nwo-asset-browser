@@ -154,7 +154,7 @@ def expected(entry, size, source=None):
                       'TEXCOORD4.x': 1.0, 'TEXCOORD4.y': 1.0, 'TEXCOORD4.z': 1.0, 'TEXCOORD4.w': 1.0, 'SV_IsFrontFace': True}
             if entry.get('recipe'):
                 try:
-                    terms = rsurface.evaluate_recipe(entry['recipe'], inputs, sample)
+                    terms = rsurface.evaluate_recipe(entry['recipe'], dict(inputs, **FORWARD_VIEW), sample)
                 except UndefinedSample:
                     for name in (*TERMS, 'normal', 'alpha'):
                         out[name].append([math.nan] * 3)

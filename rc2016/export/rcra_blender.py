@@ -560,7 +560,7 @@ SURFACE_OUTPUTS = (('Albedo', 'NodeSocketColor'), ('F0', 'NodeSocketColor'), ('G
                    ('Alpha', 'NodeSocketFloat'))
 
 
-def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear'):
+def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear', fixed=None):
     """A node group computing the recipe's surface terms (Albedo, F0, Gloss, Normal, Occlusion, Emission, Alpha)."""
     digest = recipe_sha256(recipe)
     name = SURFACE_PREFIX + digest[:16]
@@ -569,7 +569,7 @@ def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpol
     for socket, kind in SURFACE_OUTPUTS:
         _socket(group, socket, 'OUTPUT', kind)
     out = group.nodes.new('NodeGroupOutput')
-    em = _Emitter(group, recipe, images, uv_maps, colour_attribute, interpolation)
+    em = _Emitter(group, recipe, images, uv_maps, colour_attribute, interpolation, fixed)
     terms = {k: em.value(i) for k, i in recipe['terms'].items()}
 
     def combine(names, kind):

@@ -53,7 +53,7 @@ def main():
     images = rcra_blender.load_images(job['images'])
     groups = []
     if job.get('recipe'):
-        groups.append((rcra_blender.build_surface_group(job['recipe'], images, ['UVMap']), BAKES))
+        groups.append((rcra_blender.build_surface_group(job['recipe'], images, ['UVMap'], fixed=job.get('fixed')), BAKES))
     if job.get('forward'):
         groups.append((rcra_blender.build_forward_group(job['forward'], images, ['UVMap'], fixed=job.get('fixed')),
                        FORWARD_BAKES))
