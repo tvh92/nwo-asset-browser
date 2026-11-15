@@ -416,6 +416,17 @@ class RealSurfaceTests(unittest.TestCase):
         self.assertEqual([g.value(terms['colour.' + c]) for c in 'rgb'], [0.0, 0.0, 0.0])
         self.assertTrue(any('distortion' in line for line in result['limitations']))
 
+    def test_lit_material_passes_the_scene_behind_unlit(self):
+        result = self.forward_of('material/visualeffect/global/gbl_shockwave_hemisphere_01/fx_ground_wave_01.material')
+        g, terms = result['graph'], result['terms']
+        self.assertTrue(any(rsurface.LIT_BACKGROUND_NOTE in line for line in result['limitations']))
+        self.assertTrue(all(g.value(terms['background.' + c]) is None for c in 'rgb'))   # a tint expression, not 0
+
+    def test_lit_material_that_lights_the_scene_behind_is_unsupported(self):
+        with self.assertRaisesRegex(rsurface.Unsupported, 'lights the scene behind'):
+            self.forward_of('material/visualeffect/global/gbl_heat_distortion_01/gbl_heat_distortion_01_nodistancefade'
+                            '.material')
+
     @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
     def test_blender_forward_nodes_bake_to_the_recipe(self):
         with tempfile.TemporaryDirectory() as tmp:

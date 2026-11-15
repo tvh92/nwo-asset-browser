@@ -58,7 +58,7 @@ NEUTRAL_RECORDS = {'g_MaterialView': {'m_LodDist': 0.0}, 'g_ModelSubsetView': {'
 #   it (lighting class, per-object state) is 0.
 # - Engine textures and buffers: the stored view depth at the far clip (no soft depth fade). The lighting inputs (light
 #   grid and lists, shadow atlas, gobos, probes, SSR, AO, the BRDF lookup) read 0, as the light sources they belong to are
-#   zero. G-buffer writers that read them (soft-faded effects, a default probe in the emission) get the same values. Programs that read scene colour, the G-buffer or per-object buffers stay unsupported.
+#   zero. G-buffer writers that read them (soft-faded effects, a default probe in the emission) get the same values. The scene colour behind is split out by surface.forward; the scene G-buffer and per-object records are bound below.
 FORWARD_FAR_CLIP = 1000.0
 FORWARD_LIGHTING = ('g_LightGridLookup', 'g_LightLookupView', 'g_LightZBinView', 'g_LightGridData', 'g_LightVolumes',
                     'g_Lights', 'g_ShadowAtlas', 'g_GoboAtlas', 'g_EnvProbeEnvs', 'g_EnvProbeArray', 'g_EnvProbeDefault',
