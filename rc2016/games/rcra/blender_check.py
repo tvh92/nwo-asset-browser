@@ -178,6 +178,7 @@ def expected(entry, size, source=None):
 
 
 def bake(entry, blender, size, folder):
+    Path(folder).mkdir(parents=True, exist_ok=True)   # a material without texture units writes nothing before
     job = Path(folder) / 'job.json'
     out = Path(folder) / 'baked.json'
     origin, span = window(entry, size)

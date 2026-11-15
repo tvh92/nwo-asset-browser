@@ -262,6 +262,10 @@ def fragment_source(receipt):
                           '    vec3 rcraBackground = vec3(%s, %s, %s);' % (t('background.r'), t('background.g'),
                                                                           t('background.b')),
                           '    float rcraAlpha = clamp(%s, 0.0, 1.0);' % t('alpha')]
+        if 'lit_background.r' in receipt['forward']['terms']:   # the scene behind lit as albedo (surface.forward)
+            lit_tint = 'vec3(%s, %s, %s)' % (t('lit_background.r'), t('lit_background.g'), t('lit_background.b'))
+            forward.lines.append('    rcraBackground += %s * rcraDiffuse(%s, vec3(1.0), 1.0);'
+                                 % (lit_tint, 'rcraNormal' if surface else 'N'))
         body += forward.lines
     blend = receipt.get('blend', 'opaque')
     lit = ('rcraDiffuse(rcraNormal, rcraAlbedo, rcraOcclusion) + rcraSpecular(rcraNormal, V, rcraF0, rcraGloss)'

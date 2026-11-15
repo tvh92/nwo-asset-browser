@@ -552,11 +552,15 @@ Blended materials are drawn by their forward program (slot 1), which lights itse
 
 **The scene behind.** A program that samples the scene colour behind it (`g_FrameBuffer`: heat haze, shockwaves, water splats) binds the sample as symbolic `BACKGROUND.rgb`. `surface._affine_split` keeps it only when each colour channel is affine in its own background channel, colour = A + B × background (through add, negate, a multiply or divide by a free value, or a select on a free condition), and the alpha and discard do not read it. It then returns A as the colour and B as the `background` terms. Over the 45 materials it splits, A + B × background matches the unsplit program within 1.4 × 10⁻⁷ relative at random inputs. The sample's screen-space offset (the distortion) is dropped and labelled.
 
-A lit material's background coefficient could carry the forward lighting the profile zeroes. `surface._check_unlit_background` translates such a program again with every value the profile sets to 0 left symbolic (`_EngineFreeBindings`: the unbound engine constants, such as the key light, ambient fill, GI and cloud shadows, and samples of the lighting textures; the light-list counts stay 0). When B reads none of them, the scene passes through unlit whatever the lights, and the profile's B is the game's: the shockwaves, ground waves and portal energy (10 materials, whose split matches the unsplit program within 8 × 10⁻⁸ relative). The other lit programs use the scene behind as albedo and light it: in `gbl_heat_distortion_01`, B is 0 with every light zero and 1 with only the ambient fill at 1. They stay unsupported.
+A lit material's background coefficient could carry the forward lighting the profile zeroes. `surface._lit_background` translates such a program again with every value the profile sets to 0 left symbolic (`_EngineFreeBindings`: the unbound engine constants, such as the key light, ambient fill, GI and cloud shadows, and samples of the lighting textures; the light-list counts stay 0 and the view matrix keeps the forward view binding). Then:
+
+- **B reads none of them:** the scene passes through unlit whatever the lights, and the profile's B is the game's: the shockwaves, ground waves and portal energy (10 materials, whose split matches the unsplit program within 8 × 10⁻⁸ relative).
+- **B = B0 + Y × L:** the program lights the scene behind as albedo. L is one engine factor per channel that also lights the program's own colour and reads no specular input (`SPECULAR_INPUTS`): the forward diffuse light, key light × shadows (cascades, cloud shadows, gobo) × N·L plus (1 − the BRDF lookup's diffuse term) × the ambient fill or light grid, distant GI and AO. In `gbl_heat_distortion_01`, B is 0 with every light zero and 1 with only the ambient fill at 1. `surface._factor_split` finds L; B0 and Y are free of every symbolic value and become the terms `background` and `lit_background`, and a renderer supplies its own diffuse light for L (26 materials: heat distortion, goo and water splat decals, ripples, bubbles, liquids). Over them, A + (B0 + Y × L) × background matches the program within float rounding (3.8 × 10⁻⁵ relative at random engine values).
+- **Otherwise** it stays unsupported: three goo decals (`fx_goo_decal_simple_alt`) also pass the background through a specular factor (the BRDF lookup's scale term and the gloss reflection constants).
 
 **Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps (`TextureCube`, and a `TextureCubeArray` read at a constant cube index) are sampled along the direction the program computes (the first three address lanes, in game space). The explicit mip level, bias or gradients of a cube lookup are not applied: the top mip is read, and the result says so. An array read at a run-time index, or a cube read by `gather` or `ld`, is unsupported. A cube texture's slices are its faces, six per cube in the order +X, -X, +Y, -Y, +Z, -Z, top row first.
 
-**Coverage:** 1,691 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated: lit materials that light the scene behind them (29), and colour that is not affine in it (27; seven of them lit, six of those particles that read one background channel into all three).
+**Coverage:** 1,717 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated: lit materials that light the scene behind them through a specular factor (3), and colour that is not affine in it (27; seven of them lit, six of those particles that read one background channel into all three).
 
 ### Per-object values
 
@@ -647,6 +651,8 @@ A blended material's entry carries `blend` and a `forward` recipe ([Forward prof
 | Mode | Shader |
 | --- | --- |
 | Blended | Transparent(mix(white, B, alpha)) + alpha × (BRDF + Emission(colour)); with B = 0 this is mix(Transparent, BRDF + Emission(colour), alpha). The BRDF's own emission input is left unlinked, because the forward colour already holds it. |
+
+A material that lights the scene behind it (`lit_background`, [The scene behind](#forward-profile)) needs the diffuse light reaching the point, which Cycles has no node for. `surface.unit_irradiance` folds it at a unit white light, B = background + lit_background, and the material's limitations say so (`UNIT_IRRADIANCE_NOTE`).
 | Additive | Transparent(1 + alpha B) + Emission(colour, strength alpha) |
 | Modulate | Transparent tinted by mix(white, colour, alpha) |
 
@@ -673,7 +679,7 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 | Inputs | UV0 and UV1, the world normal, the UV-derivative tangent frame (`native_glsl.FRAME_HELPERS`), the vertex colour, front face, and the view from `vTintViewOffset` |
 | Textures | A sampled array slice as stored. Arrays with a run-time slice and 3D textures as the padded atlas of the Blender export, without mipmaps. A cube map as a GL cube map of its six stored faces (face k to `GL_TEXTURE_CUBE_MAP_POSITIVE_X + k`, rows top first), top mip, linear, seamless where the driver has it: D3D and GL share the face table, so `textureCube` along the game direction returns the D3D texel. Float data formats as `RGBA32F`. |
 | Lighting | The review rig with the Rift Apart BRDF: GGX α = (0.9725 − 0.7514 gloss)², Smith joint approximation, Schlick F90 = 1, Lambert, occlusion on ambient light only |
-| Blending | Forward materials draw in the float scene target, tested but not writing depth. A multiply pass scales what is behind by the background factor (blended: mix(1, B, α); additive: 1 + αB; modulate: the tint). Then a colour pass adds the premultiplied colour, coverage blended over. |
+| Blending | Forward materials draw in the float scene target, tested but not writing depth. A multiply pass scales what is behind by the background factor (blended: mix(1, B, α); additive: 1 + αB; modulate: the tint). B adds lit_background × the rig's diffuse light at the surface normal (`rcraDiffuse` with albedo 1 and no occlusion) for a material that lights the scene behind it. Then a colour pass adds the premultiplied colour, coverage blended over. |
 | Texture sizes | Programs that query a texture's size () get it from the full-resolution texture, as in the Blender export. Without it 143 materials failed in the viewer; with it 31 do (29 have no graph, 2 fail the G-buffer writer). |
 | Caching | The translation (`viewer_materials.translate`: recipes, blend, limitations, bindings, or the reason it fails) is kept across sessions in the source's translation disk cache, keyed by the material and graph bytes and `CODE_SHA256` (the Rift Apart reader, `sm5`, `dxbc` and `rcra_glsl`). Infinite and NaN constants are stored tagged. Atlases are kept per source (least recently used out past 256 MB), since materials share their texture arrays, and 8-bit atlases are built in bytes. |
 
@@ -688,7 +694,7 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 
 ### Not translated
 
-- **Blended materials whose forward program does not translate** (56 of 1,747): Blender gets their G-buffer surface, opaque.
+- **Blended materials whose forward program does not translate** (30 of 1,747): Blender gets their G-buffer surface, opaque.
 - **Forward lighting:** the forward program's own light loop is not used. Blender's lights shade the G-buffer surface instead, which assumes that the forward program lights the same terms as the deferred apply.
 - **Lighting classes 1 to 5:** skin, hair and the other special classes need their own apply programs. They are lit with class 0.
 

@@ -20,6 +20,7 @@ PLACEHOLDER = 'characters/hero/hero_clank/materials/hero_clank_antennaglass.mate
 SWARMER = 'characters/enemy/enm_neo_nefarious_swarmer/enm_neo_nefarious_swarmer.model'
 BUTTON = 'environment/clankpuzzles/cpz_gp_pressure_button_01.model'
 CUBE = 'material/character/enemy/enm_molonoth_robot/enm_dr_nefarious_laser_tube.material'   # forward program samples a cube map
+HEAT_DISTORTION = 'material/visualeffect/global/gbl_heat_distortion_01/exhaust_heat_distortion_01.material'   # lit background
 
 
 def _recipe(terms, extra=()):
@@ -70,6 +71,14 @@ class EmitterTests(unittest.TestCase):
         self.assertIn('mix(vec3(1.0), rcraColour, rcraAlpha)', modulate)
         for source in (blended, additive):
             self.assertIn('if (%s == 0)' % rcra_glsl.PASS_UNIFORM, source)
+
+    def test_lit_background_takes_the_rig_diffuse_light(self):
+        receipt = _receipt('blended')
+        terms = dict(receipt['forward']['terms'], **{'lit_background.' + c: 5 for c in 'rgb'})
+        receipt['forward'] = dict(receipt['forward'], terms=terms)
+        source = rcra_glsl.fragment_source(receipt)['source']
+        self.assertIn('rcraBackground += vec3(0.5, 0.5, 0.5) * rcraDiffuse(rcraNormal, vec3(1.0), 1.0);', source)
+        self.assertNotIn('rcraBackground +=', rcra_glsl.fragment_source(_receipt('blended'))['source'])
 
     def test_forward_receipt_keeps_the_forward_discard_only(self):
         source = rcra_glsl.fragment_source(_receipt('blended'))['source']
@@ -223,7 +232,8 @@ class ViewportDrawTests(unittest.TestCase):
             finally:
                 root.destroy()
 
-    def test_cube_material_links_and_uploads_its_cube_map(self):
+    def _link(self, path, check):
+        """Link the translated program of material ``path`` in a viewport, then ``check(view, receipt, textures)``."""
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             import tkinter as tk
             from rc2016.games.rcra.material import _material_key
@@ -232,7 +242,7 @@ class ViewportDrawTests(unittest.TestCase):
             from rc2016.viewer.viewport import ModelViewport
             source = RcraSource(GAME, os.path.join(appdata, 'out'))
             try:
-                receipt, textures = material_receipt(source, _material_key(source, CUBE))
+                receipt, textures = material_receipt(source, _material_key(source, path))
             finally:
                 source.close()
             root = tk.Tk()
@@ -245,11 +255,21 @@ class ViewportDrawTests(unittest.TestCase):
                     self.skipTest(view._context_error or 'no shading context')
                 program, _uniforms = view._shading.native_program(receipt, {})
                 self.assertTrue(program)
-                cube = next(t for t in textures.values() if t.get('cube'))
-                self.assertTrue(view._upload_cube(cube))
-                self.assertEqual(view._gl.glGetError(), 0)
+                check(view, receipt, textures)
             finally:
                 root.destroy()
+
+    def test_cube_material_links_and_uploads_its_cube_map(self):
+        def check(view, _receipt, textures):
+            cube = next(t for t in textures.values() if t.get('cube'))
+            self.assertTrue(view._upload_cube(cube))
+            self.assertEqual(view._gl.glGetError(), 0)
+        self._link(CUBE, check)
+
+    def test_lit_background_material_links(self):
+        def check(_view, receipt, _textures):
+            self.assertIn('lit_background.r', receipt['forward']['terms'])
+        self._link(HEAT_DISTORTION, check)
 
     def test_button_reads_its_vertex_colour(self):
         """The pressure button's base material (sav_gp_templegate_start_base_button) takes albedo and emission from

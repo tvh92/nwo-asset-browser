@@ -373,6 +373,8 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
         if 'forward' in results:
             limitations.append(BLEND_LIMITATIONS[blend])
             limitations += results['forward']['limitations']
+            if 'lit_background.r' in results['forward']['terms']:
+                limitations.append(rsurface.UNIT_IRRADIANCE_NOTE)
             if 'recipe' not in results:
                 limitations.append('The G-buffer surface does not translate (%s): only the forward colour is drawn, '
                                    'unlit by the renderer.' % errors['recipe'])

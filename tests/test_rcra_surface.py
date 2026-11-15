@@ -419,12 +419,30 @@ class RealSurfaceTests(unittest.TestCase):
     def test_lit_material_passes_the_scene_behind_unlit(self):
         result = self.forward_of('material/visualeffect/global/gbl_shockwave_hemisphere_01/fx_ground_wave_01.material')
         g, terms = result['graph'], result['terms']
-        self.assertTrue(any(rsurface.LIT_BACKGROUND_NOTE in line for line in result['limitations']))
+        self.assertTrue(any(rsurface.UNLIT_BACKGROUND_NOTE in line for line in result['limitations']))
         self.assertTrue(all(g.value(terms['background.' + c]) is None for c in 'rgb'))   # a tint expression, not 0
+        self.assertNotIn('lit_background.r', terms)
 
-    def test_lit_material_that_lights_the_scene_behind_is_unsupported(self):
-        with self.assertRaisesRegex(rsurface.Unsupported, 'lights the scene behind'):
-            self.forward_of('material/visualeffect/global/gbl_heat_distortion_01/gbl_heat_distortion_01_nodistancefade'
+    def test_lit_material_lights_the_scene_behind_as_albedo(self):
+        result = self.forward_of('material/visualeffect/global/gbl_heat_distortion_01/gbl_heat_distortion_01_nodistancefade'
+                                 '.material')
+        g, terms = result['graph'], result['terms']
+        self.assertTrue(any(rsurface.LIT_BACKGROUND_NOTE in line for line in result['limitations']))
+        self.assertTrue(all(g.value(terms['lit_background.' + c]) is None for c in 'rgb'))
+        recipe = rsurface.export_recipe(result)
+        folded = rsurface.unit_irradiance(recipe)   # Blender: background + lit_background
+        self.assertNotIn('lit_background.r', folded['terms'])
+        inputs = defaultdict(float, {'TEXCOORD.x': 0.3, 'TEXCOORD.y': 0.6, 'SV_IsFrontFace': True, 'VIEW.y': -2.0})
+        sample = lambda node, args: [0.5, 0.5, 0.5, 1.0]   # noqa: E731
+        lit = rsurface.evaluate_recipe(recipe, inputs, sample)
+        unit = rsurface.evaluate_recipe(folded, inputs, sample)
+        for c in 'rgb':
+            self.assertEqual(lit['background.' + c], 0.0)   # nothing passes unlit
+            self.assertEqual(unit['background.' + c], lit['background.' + c] + lit['lit_background.' + c])
+
+    def test_background_lit_by_specular_light_is_unsupported(self):
+        with self.assertRaisesRegex(rsurface.Unsupported, 'more than one light factor'):
+            self.forward_of('material/visualeffect/character/enemy/enm_fx_goo_decal_simple_alt/enm_cord_juice_decal'
                             '.material')
 
     @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')

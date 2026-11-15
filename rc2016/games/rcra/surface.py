@@ -198,11 +198,15 @@ class _ForwardBindings(_Bindings):
         return super().resource(graph, op, binding, args)
 
 
+VIEW_MATRIX = 'GlobalViewportCBuffer.m_ViewToWorldMat'   # its zero rotation terms are the forward view binding
+
+
 class _EngineFreeBindings(_ForwardBindings):
     """_ForwardBindings with every value the forward profile zeroes left symbolic (inputs ENGINE.*): the engine constants
     that fall to 0 (key light, ambient, GI, cloud shadows and every other unbound one) and the samples of the lighting
-    textures (probes, SSR, AO, BRDF lookup, shadows, gobos). The light-list counts stay 0. Used to prove a term does not
-    depend on any of them."""
+    textures (probes, SSR, AO, BRDF lookup, shadows, gobos). The light-list counts stay 0, and the view matrix keeps the
+    forward view binding (view space with the world axes, the camera from the CAMERA inputs). Used to prove a term does
+    not depend on any of them."""
 
     def resource(self, graph, op, binding, args):
         if binding in rshaders.FORWARD_LIGHTING and op.startswith(('sample', 'gather')):
@@ -210,7 +214,7 @@ class _EngineFreeBindings(_ForwardBindings):
         return super().resource(graph, op, binding, args)
 
     def _review(self, name):
-        if name in NEUTRAL_DRAW_FLOATS or name in REVIEW_VALUES:
+        if name in NEUTRAL_DRAW_FLOATS or name in REVIEW_VALUES or name.startswith(VIEW_MATRIX):
             return super()._review(name)
         return self.graph.input('ENGINE.' + name, 'f')
 
@@ -861,11 +865,15 @@ def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, wh
                 program_status=tr.status(), outputs=dict(tr.outputs))
 
 
-FORWARD_TERMS = ('colour.r', 'colour.g', 'colour.b', 'background.r', 'background.g', 'background.b', 'alpha', 'clip')
+FORWARD_TERMS = ('colour.r', 'colour.g', 'colour.b', 'background.r', 'background.g', 'background.b', 'lit_background.r',
+                 'lit_background.g', 'lit_background.b', 'alpha', 'clip')
 BACKGROUND_BUFFER = 'g_FrameBuffer'
 BACKGROUND_INPUTS = ('BACKGROUND.r', 'BACKGROUND.g', 'BACKGROUND.b', 'BACKGROUND.a')
-LIT_BACKGROUND_NOTE = (' The material is lit, but the tint reads no light or other engine value, so the scene '
-                       'passes through it unlit, as in the game.')
+UNLIT_BACKGROUND_NOTE = (' The material is lit, but the tint reads no light or other engine value, so the scene '
+                         'passes through it unlit, as in the game.')
+LIT_BACKGROUND_NOTE = (' The material is lit and lights the scene behind it as albedo: the tint is background + '
+                       'lit_background x the forward diffuse light (key light with its shadows, ambient fill or light '
+                       'grid, distant GI, AO), for which the renderer substitutes its own diffuse light.')
 
 
 def _affine_split(g, root, names):
@@ -928,28 +936,119 @@ def _affine_split(g, root, names):
     return split(root)
 
 
-def _check_unlit_background(shader, graph_data, material_data, flags, texture_sizes):
-    """Raise Unsupported unless a lit forward program passes the scene behind it through unlit: translated again with
-    every value the profile zeroes symbolic (_EngineFreeBindings), each colour channel must be affine in its own
-    background channel with a coefficient that reads none of them. The profile's coefficient is then the game's, whatever
-    the lights. A program that lights the scene behind it (uses it as albedo) gets the light in its coefficient."""
+# Engine inputs of the specular lighting (split-sum scale, reflections, probe cube maps, gloss reflection constants): a
+# lighting factor that reads one is not the diffuse light.
+SPECULAR_INPUTS = ('ENGINE.g_BrdfLookup.0', 'ENGINE.g_SSRFinalTex.', 'ENGINE.g_EnvProbeEnvs.', 'ENGINE.g_EnvProbeArray.',
+                   'ENGINE.GlobalWorldCBuffer.m_GlossReflParams')
+
+
+def _factor_split(g, root, variable):
+    """(F0, {L: Y}) with root = F0 + sum Y x L exactly, where the L are the maximal subexpressions ``variable(i)`` is true
+    for, reached only through add, negate, a multiply or divide by a value it is false for, or a select on such a
+    condition; F0 and every Y are free of them. None when a variable is reached through anything else."""
+    zero, one = g.const('f', 0.0), g.const('f', 1.0)
+    memo = {}
+
+    def split(i):
+        if i in memo:
+            return memo[i]
+        n = g.nodes[i]
+        op, args = n['op'], n['args']
+        if not variable(i):
+            result = (i, {})
+        elif op == 'add':
+            a, b = split(args[0]), split(args[1])
+            if a is None or b is None:
+                return None
+            coeffs = dict(a[1])
+            for k, c in b[1].items():
+                coeffs[k] = g.op('add', coeffs[k], c) if k in coeffs else c
+            result = (g.op('add', a[0], b[0]), coeffs)
+        elif op == 'neg':
+            a = split(args[0])
+            result = None if a is None else (g.op('neg', a[0]), {k: g.op('neg', c) for k, c in a[1].items()})
+        elif op in ('mul', 'div') and not variable(args[1]):
+            a = split(args[0])
+            result = None if a is None else (g.op(op, a[0], args[1]),
+                                             {k: g.op(op, c, args[1]) for k, c in a[1].items()})
+        elif op == 'mul' and not variable(args[0]):
+            a = split(args[1])
+            result = None if a is None else (g.op('mul', args[0], a[0]),
+                                             {k: g.op('mul', args[0], c) for k, c in a[1].items()})
+        elif op == 'select' and not variable(args[0]):
+            a, b = split(args[1]), split(args[2])
+            if a is None or b is None:
+                return None
+            result = (g.select(args[0], a[0], b[0]), {k: g.select(args[0], a[1].get(k, zero), b[1].get(k, zero))
+                                                      for k in set(a[1]) | set(b[1])})
+        else:
+            result = (zero, {i: one})
+        memo[i] = result
+        return result
+    return split(root)
+
+
+def _lit_background(shader, graph_data, material_data, flags, texture_sizes):
+    """How a lit forward program passes the scene behind it, translated again with every value the profile zeroes symbolic
+    (_EngineFreeBindings). Each colour channel must be affine in its own background channel, colour = A + B x background.
+    None when B reads none of the symbolic values: the profile's B is the game's, whatever the lights. Otherwise B must be
+    B0 + Y x L with L one engine factor per channel that also lights the program's own colour (it reaches A) and reads no
+    specular input: the forward diffuse light, so the program lights the scene behind as albedo. Returns (graph, [(B0, Y)]
+    per channel), B0 and Y free of the symbolic values. Raises Unsupported otherwise."""
     bindings = _EngineFreeBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
                                    rshaders.material_units(graph_data, material_data), texture_sizes)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
     g = tr.graph
-    engine = {i for i, n in enumerate(g.nodes) if n['op'] == 'input' and n['name'].startswith('ENGINE.')}
-    coefficients = []
+    depends = {}
+
+    def engine(i):
+        if i not in depends:
+            n = g.nodes[i]
+            depends[i] = (n['op'] == 'input' and n['name'].startswith('ENGINE.')) or any(engine(a) for a in n['args'])
+        return depends[i]
+    splits = []
     for c in range(3):
         colour = tr.outputs.get(('o', 0, c))
         split = _affine_split(g, g.cast(colour, 'f'), BACKGROUND_INPUTS) if colour is not None else None
         if split is None or set(split[1]) - {BACKGROUND_INPUTS[c]}:
             raise Unsupported('Forward colour is not affine in the scene behind (%s)' % BACKGROUND_BUFFER)
-        coefficients += split[1].values()
-    if engine & g.reachable(coefficients):
-        raise Unsupported('Forward colour lights the scene behind it (%s) in a lit material: its background '
-                          'coefficient reads the forward lighting' % BACKGROUND_BUFFER)
+        splits.append((split[0], split[1].get(BACKGROUND_INPUTS[c], g.const('f', 0.0))))
+    if not any(engine(b) for _a, b in splits):
+        return None
+    parts = []
+    for a, b in splits:
+        factors = _factor_split(g, b, engine)
+        if factors is None or len(factors[1]) != 1:
+            raise Unsupported('Forward colour lights the scene behind it (%s) in a lit material, by more than one light '
+                              'factor' % BACKGROUND_BUFFER)
+        (light, y), = factors[1].items()
+        names = {g.nodes[i]['name'] for i in g.reachable([light]) if g.nodes[i]['op'] == 'input'}
+        if light not in g.reachable([a]) or any(name.startswith(SPECULAR_INPUTS) for name in names):
+            raise Unsupported('Forward colour lights the scene behind it (%s) in a lit material, by a light factor that '
+                              'is not its diffuse light' % BACKGROUND_BUFFER)
+        parts.append((factors[0], y))
+    return g, parts
+
+
+def _import(dst, src, roots):
+    """The nodes ``roots`` of graph ``src`` added to graph ``dst``; returns their indices there."""
+    new = {}
+    for r in roots:
+        stack = [(r, False)]
+        while stack:   # post-order without recursion
+            i, ready = stack.pop()
+            if i in new:
+                continue
+            n = src.nodes[i]
+            if ready:
+                meta = {k: v for k, v in n.items() if k not in ('op', 'type', 'args')}
+                new[i] = dst._add(n['op'], n['type'], [new[a] for a in n['args']], **meta)
+            else:
+                stack.append((i, True))
+                stack.extend((a, False) for a in n['args'] if a not in new)
+    return [new[r] for r in roots]
 
 
 def forward(graph_data, material_data, texture_sizes=None):
@@ -974,11 +1073,12 @@ def forward(graph_data, material_data, texture_sizes=None):
              'clip': tr.discard}
     zero = g.const('f', 0.0)
     background = dict.fromkeys(('background.r', 'background.g', 'background.b'), zero)
+    lit = None
     if bindings.background_read:
         reach = g.reachable(list(terms.values()))
         if any(g.nodes[i]['op'] == 'input' and g.nodes[i]['name'] in BACKGROUND_INPUTS for i in reach):
             if flags:
-                _check_unlit_background(shader, graph_data, material_data, flags, texture_sizes)
+                lit = _lit_background(shader, graph_data, material_data, flags, texture_sizes)
             for name in ('alpha', 'clip'):
                 if not _affine_split(g, terms[name], BACKGROUND_INPUTS) or _affine_split(g, terms[name],
                                                                                           BACKGROUND_INPUTS)[1]:
@@ -989,6 +1089,10 @@ def forward(graph_data, material_data, texture_sizes=None):
                     raise Unsupported('Forward colour is not affine in the scene behind (%s)' % BACKGROUND_BUFFER)
                 terms['colour.' + c] = split[0]
                 background['background.' + c] = split[1].get('BACKGROUND.' + c, zero)
+            if lit is not None:   # B0 and Y from the symbolic translation (free of its symbolic values)
+                imported = _import(g, lit[0], [x for part in lit[1] for x in part])
+                for k, c in enumerate('rgb'):
+                    background['background.' + c], background['lit_background.' + c] = imported[2 * k:2 * k + 2]
     terms.update(background)
     limitations = [
         'Forward colour with every engine light source zero (key light, light grid, probes, GI, reflections): the '
@@ -1002,7 +1106,8 @@ def forward(graph_data, material_data, texture_sizes=None):
     if bindings.background_read:
         limitations.append('The program samples the scene behind it (%s); the colour is affine in it, so it is split into '
                            'an emission and a background tint, and the sample\'s screen-space offset (distortion, '
-                           'refraction) is dropped.' % BACKGROUND_BUFFER + LIT_BACKGROUND_NOTE * bool(flags))
+                           'refraction) is dropped.' % BACKGROUND_BUFFER
+                           + (LIT_BACKGROUND_NOTE if lit is not None else UNLIT_BACKGROUND_NOTE * bool(flags)))
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Forward colour')
 
 
@@ -1125,9 +1230,29 @@ def fold_nan(recipe):
     return dict(recipe, nodes=nodes) if changed else recipe
 
 
+UNIT_IRRADIANCE_NOTE = ('Blender: the scene behind is lit by a unit white diffuse light (background + lit_background), '
+                        'not by the scene\'s lights: Cycles has no node for the diffuse light reaching a point. The '
+                        'viewer uses its rig\'s diffuse light.')
+
+
+def unit_irradiance(recipe):
+    """A forward recipe with its lit background term folded into the background tint at a unit diffuse light:
+    background + lit_background (the Blender stand-in for the renderer's diffuse light, UNIT_IRRADIANCE_NOTE)."""
+    terms = recipe['terms']
+    if 'lit_background.r' not in terms:
+        return recipe
+    nodes = [dict(n) for n in recipe['nodes']]
+    terms = dict(terms)
+    for c in 'rgb':
+        nodes.append(dict(op='add', type='f', args=[terms['background.' + c], terms.pop('lit_background.' + c)]))
+        terms['background.' + c] = len(nodes) - 1
+    return dict(recipe, nodes=nodes, terms=terms)
+
+
 def blender_recipe(recipe):
-    """The recipe as the Blender export builds it: constant NaN folded (fold_nan), unrolled tables as lookups."""
-    return lookup_tables(fold_nan(recipe))
+    """The recipe as the Blender export builds it: the lit background at a unit light (unit_irradiance), constant NaN
+    folded (fold_nan), unrolled tables as lookups."""
+    return lookup_tables(fold_nan(unit_irradiance(recipe)))
 
 
 def _expand_lookups(nodes):

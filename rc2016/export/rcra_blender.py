@@ -34,7 +34,8 @@ BRDF group "RC RA Deferred BRDF", from the engine's class-0 deferred apply progr
 Blended materials (entry ``blend`` additive, blended or modulate) carry a forward recipe: the colour and alpha the game
 blends, with every engine light source zero, and a background tint B where the program passes the scene behind it
 through (colour = A + B x background). ``apply_recipe`` composes it with a Transparent BSDF by the mode, and for 'blended'
-adds the G-buffer surface lit by Blender (its emission left to the forward colour, which already holds it):
+adds the G-buffer surface lit by Blender (its emission left to the forward colour, which already holds it). A lit
+background term arrives folded into B at a unit light (rc2016.games.rcra.surface.unit_irradiance):
 - blended: Transparent(mix(white, B, alpha)) + alpha x (BRDF + Emission(colour)), i.e. mix(Transparent, body, alpha)
   when B = 0
 - additive: Transparent(1 + alpha B) + Emission(colour, strength alpha)
