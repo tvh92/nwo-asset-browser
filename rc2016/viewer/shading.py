@@ -186,6 +186,9 @@ BONE_TEXTURE_UNIT = 3
 ROCK_TEXTURE_UNIT = 15   # RockBlend sole new sampler, four tiled source slices
 ROCK_ALPHA_ATTRIBUTE = 14
 GROUND_BLEND_ATTRIBUTE = 15
+# Rift Apart vertex colour (rcra_glsl.vertex_source, model viewer only): the level viewer's aInst0 slot, aliasing texcoord 2,
+# which no model-viewer program reads.
+RCRA_COLOUR_ATTRIBUTE = 10
 GLOW_PARALLAX_TEXTURE_UNIT = 13   # prompt 08; existing unit 5 carries the light mask
 VEHICLE_PALETTE_TEXTURE_UNIT = 10   # EB1AC2CD second palette; prompt 05 reservation
 PICK_TEXTURE_UNIT = 4   # colour-pick palette (blarg_saucer_colorpick)
@@ -2972,23 +2975,33 @@ class Shading:
         from rc2016.viewer.native_glsl import EMITTER_VERSION
         pane = (alpha_api, float(alpha_discard), float(alpha_opacity)) if alpha_api is not None else None
         return ('native', EMITTER_VERSION, instanced, scene, experimental, rule_preview, pane, translation['translation_sha256'],
-                tuple(sorted(srgb.items())), FRAGMENT, INSTANCED_VERTEX if instanced else VERTEX)
+                tuple(sorted(srgb.items())), FRAGMENT, self._native_vertex(translation, instanced))
+
+    @staticmethod
+    def _native_vertex(translation, instanced):
+        """The vertex program of a native translation: Rift Apart receipts (model viewer) read their vertex colour."""
+        if translation.get('kind') == 'rcra' and not instanced:
+            from rc2016.viewer.rcra_glsl import vertex_source
+            return vertex_source()
+        return INSTANCED_VERTEX if instanced else VERTEX
 
     def native_program(self, translation, srgb, instanced=False, scene=False, experimental=False, rule_preview=False, alpha_api=None,
                        alpha_discard=0.0, alpha_opacity=1.0):
         from rc2016.viewer.native_glsl import fragment_source
-        vertex = INSTANCED_VERTEX if instanced else VERTEX
+        vertex = self._native_vertex(translation, instanced)
         key = self.native_program_key(translation, srgb, instanced, scene, experimental, rule_preview, alpha_api, alpha_discard, alpha_opacity)
         if key not in self.programs:
+            extra = {}
             if translation.get('kind') == 'rcra':   # a Rift Apart receipt (rc2016.viewer.rcra_glsl)
                 from rc2016.viewer import rcra_glsl
                 surface = rcra_glsl.fragment_source(translation)
                 names = (*OPAQUE_UNIFORMS, *surface['samplers'], rcra_glsl.PASS_UNIFORM)
+                extra = {} if instanced else {'aRcraColour': RCRA_COLOUR_ATTRIBUTE}
             else:
                 surface = fragment_source(translation, srgb, experimental=experimental, rule_preview=rule_preview,
                                           alpha_api=alpha_api, alpha_discard=alpha_discard, alpha_opacity=alpha_opacity)
                 names = (*OPAQUE_UNIFORMS, *(s['uniform'] for s in surface['samplers']))
-            attributes = INSTANCE_ATTRIBUTES if instanced else dict(ATTRIBUTES, aRockAlpha=ROCK_ALPHA_ATTRIBUTE, aGroundBlend=GROUND_BLEND_ATTRIBUTE, aStaticPackedVector=STATIC_VECTOR_ATTRIBUTE, aTangent=TANGENT_ATTRIBUTE, aUV1=UV1_ATTRIBUTE)
+            attributes = INSTANCE_ATTRIBUTES if instanced else dict(ATTRIBUTES, aRockAlpha=ROCK_ALPHA_ATTRIBUTE, aGroundBlend=GROUND_BLEND_ATTRIBUTE, aStaticPackedVector=STATIC_VECTOR_ATTRIBUTE, aTangent=TANGENT_ATTRIBUTE, aUV1=UV1_ATTRIBUTE, **extra)
             source=surface['source'].replace('#version 120', '#version 120\n#define RC_SCENE_EFFECTS 1',1) if scene else surface['source']
             self.programs[key] = self._link(vertex, source, attributes, names)
         return self.programs[key]

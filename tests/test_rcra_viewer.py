@@ -18,6 +18,7 @@ EYE = 'characters/hero/hero_clank/materials/hero_clank_eyeinner.material'
 VOLUME = 'material/characters/hero/hero_mj_invisible_transition_01/dimension_swap_proto_frame_grab_01.material'
 PLACEHOLDER = 'characters/hero/hero_clank/materials/hero_clank_antennaglass.material'   # binds the float default_pink_shader_n
 SWARMER = 'characters/enemy/enm_neo_nefarious_swarmer/enm_neo_nefarious_swarmer.model'
+BUTTON = 'environment/clankpuzzles/cpz_gp_pressure_button_01.model'
 
 
 def _recipe(terms, extra=()):
@@ -83,6 +84,39 @@ class EmitterTests(unittest.TestCase):
         receipt['surface']['nodes'][0]['name'] = 'TEXCOORD7.x'
         with self.assertRaises(ValueError):
             rcra_glsl.fragment_source(receipt)
+
+    def test_vertex_colour_reaches_the_program_squared(self):
+        colour = dict(op='input', type='f', name='TEXCOORD4.y', args=[])
+        recipe = _recipe(dict(SURFACE, **{'albedo.g': 7}), extra=[colour])
+        layouts = {'textureUnit5': dict(kind='slice')}
+        receipt = dict(kind='rcra', blend='opaque', surface=recipe, forward=None, layouts=layouts,
+                       translation_sha256=rcra_glsl.receipt_sha256(recipe, None, 'opaque', layouts))
+        source = rcra_glsl.fragment_source(receipt)['source']
+        self.assertIn('varying vec4 vRcraColour;', source)
+        self.assertIn('vRcraColour.y', source)
+        self.assertEqual({rcra_glsl.GEOMETRY['TEXCOORD4.' + c] for c in 'xyzw'}, {'vRcraColour.' + c for c in 'xyzw'})
+        vertex = rcra_glsl.vertex_source()
+        self.assertIn('attribute vec4 aRcraColour;', vertex)
+        self.assertIn('vRcraColour = aRcraColour * aRcraColour;', vertex)   # the engine squares before interpolation
+
+
+class VertexColourPayloadTests(unittest.TestCase):
+    """The loader passes a Rift Apart model's colour bytes on (loader._vertex_colours); R&C 2016 payloads do not change."""
+
+    def test_colour_bytes_follow_the_drawn_meshes(self):
+        from rc2016.games.rcra import model as rm
+        from rc2016.viewer.loader import mesh_payload
+        from tests.test_rcra_model import build_model
+        for arrays in (True, False):
+            decoded = rm.decode_model('t', data=build_model(), as_arrays=arrays)
+            colours = mesh_payload(decoded, 'Highest', 0)['vertex_colours']
+            self.assertEqual(colours.dtype.name, 'uint8')
+            self.assertEqual(colours.tolist(), [[255, 0, 0, 128]] * 4)
+        decoded = rm.decode_model('t', data=build_model(), as_arrays=True)
+        self.assertNotIn('vertex_colours', mesh_payload(dict(decoded, game='rc2016'), 'Highest', 0))
+        for mesh in decoded['meshes']:
+            mesh['colors'] = None
+        self.assertNotIn('vertex_colours', mesh_payload(decoded, 'Highest', 0))   # the viewer reads 1
 
 
 class ForwardRuleTests(unittest.TestCase):
@@ -176,6 +210,71 @@ class ViewportDrawTests(unittest.TestCase):
                 self.assertIn('rcra', programs)
             finally:
                 root.destroy()
+
+    def test_button_reads_its_vertex_colour(self):
+        """The pressure button's base material (sav_gp_templegate_start_base_button) takes albedo and emission from
+        TEXCOORD4.x; its model carries a colour section. The frame changes when the colour is replaced by the constant 1."""
+        from rc2016.viewer.shading import RCRA_COLOUR_ATTRIBUTE
+        with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
+            import tkinter as tk
+            from rc2016.viewer.loader import SourcePreviewLoader
+            from rc2016.viewer.viewport import ModelViewport
+            loader = SourcePreviewLoader()
+            archive = loader._ensure_archive(GAME)
+            key = next(k for k in archive.resolve(BUTTON) if archive.entries[k]['type'] == 'model')
+            payload = loader.load(GAME, key, BUTTON, output_root=os.path.join(appdata, 'out'))
+            self.assertEqual(len(payload['vertex_colours']), len(payload['vertices']))
+            reads = [e for e in payload['textures'].values() if e.get('native_translation')
+                     and any(n['op'] == 'input' and n['name'] == 'TEXCOORD4.x'
+                             for n in (e['native_translation']['surface'] or {}).get('nodes', []))]
+            self.assertTrue(reads)
+            root = tk.Tk()
+            try:
+                root.geometry('240x240')
+                view = ModelViewport(root)
+                view.pack(fill='both', expand=True)
+                root.update()
+                if view._context_error or view._shading is None:
+                    self.skipTest(view._context_error or 'no shading context')
+                pointers = []
+                real_pointer = view._shading.glVertexAttribPointer
+                view._shading.glVertexAttribPointer = lambda *a: pointers.append(a[:5]) or real_pointer(*a)
+                view.set_mode('Shaded')
+                view.set_mesh(payload)
+                self.assertEqual(bytes(view._rcra_colour), payload['vertex_colours'].tobytes())
+                coloured = _frame(view)
+                self.assertIsNone(view.shading_error)
+                self.assertIn((RCRA_COLOUR_ATTRIBUTE, 4, view.GL_UNSIGNED_BYTE, 1, 0), pointers)   # normalized bytes
+                view._rcra_colour = None
+                self.assertNotEqual(coloured, _frame(view))
+            finally:
+                root.destroy()
+
+
+def _frame(view):
+    """The viewport's back buffer (RGB bytes) read just before the swap of one draw."""
+    real, grabbed = view._gdi32, {}
+
+    class Grab:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def SwapBuffers(self, hdc):
+            gl = view._gl
+            w, h = max(1, view.winfo_width()), max(1, view.winfo_height())
+            pixels = (ctypes.c_ubyte * (w * h * 3))()
+            gl.glPixelStorei(0x0D05, 1)   # GL_PACK_ALIGNMENT
+            gl.glReadBuffer(0x0405)       # GL_BACK
+            gl.glReadPixels.argtypes = [ctypes.c_int] * 4 + [ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+            gl.glReadPixels(0, 0, w, h, 0x1907, 0x1401, pixels)   # GL_RGB, GL_UNSIGNED_BYTE
+            grabbed['pixels'] = bytes(pixels)
+            return real.SwapBuffers(hdc)
+    view._gdi32 = Grab()
+    try:
+        view._draw()
+    finally:
+        view._gdi32 = real
+    return grabbed['pixels']
 
 
 if __name__ == '__main__':

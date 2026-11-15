@@ -42,6 +42,16 @@ def _static_raw_vectors(mesh, count):
     return vectors
 
 
+def _vertex_colours(decoded, meshes):
+    """{'vertex_colours': (n, 4) uint8 RGBA} for a Rift Apart model with a colour section, else {}: the stored bytes, which
+    the translated materials (rcra_glsl) read as TEXCOORD4. Meshes without colours read 255 (1.0), the engine's value for a
+    subset without a colour stream. R&C 2016 rules read the colour alpha only (rock_alpha)."""
+    if decoded.get('game')!='rcra' or not any(mesh.get('colors') for mesh in meshes):return {}
+    parts=[np.rint(np.asarray(mesh['colors'],dtype=np.float64).reshape(-1,4)*255.0) if mesh.get('colors')
+           else np.full((len(mesh['positions']),4),255.0) for mesh in meshes]
+    return dict(vertex_colours=np.clip(np.concatenate(parts),0,255).astype(np.uint8))
+
+
 def _mesh_payload_arrays(decoded, meshes, selected):
     """mesh_payload for decode_model(..., as_arrays=True) meshes: vertices, normals and triangles
     as numpy arrays (viewport.prepare_viewport takes them as-is); uvs, skin and rock alpha as the
@@ -94,7 +104,7 @@ def _mesh_payload_arrays(decoded, meshes, selected):
                 uvs=np.concatenate(uvs).tolist() if uvs is not None else None,batches=batches,
                 **({'uv1s':np.concatenate(uv1s)} if has_uv1 else {}),
                 skin_joints=np.concatenate(joints).ravel().tolist(),skin_weights=np.concatenate(weights).ravel().tolist(),
-                rock_alpha=np.concatenate(alpha).tolist(),rock_alpha_sources=alpha_sources,
+                rock_alpha=np.concatenate(alpha).tolist(),rock_alpha_sources=alpha_sources,**_vertex_colours(decoded,meshes),
                 source_sha256=decoded['source_sha256'],selected_mesh_indices=sorted(selected),
                 source_exact_geometry=True,game_equivalence=False,material_preview='neutral geometry inspection')
 
@@ -176,6 +186,7 @@ def mesh_payload(decoded, lod='Highest', look=0):
                 tangents=tangents if len(tangents)==len(vertices) else None,
                 static_vector_eligible=eligible,triangles=triangles,uvs=uvs,batches=batches,**({'uv1s':uv1s} if has_uv1 else {}),
                 skin_joints=skin_joints,skin_weights=skin_weights,rock_alpha=rock_alpha,rock_alpha_sources=rock_alpha_sources,
+                **_vertex_colours(decoded,[m for m in decoded['meshes'] if m['index'] in selected]),
                 source_sha256=decoded['source_sha256'],selected_mesh_indices=sorted(selected),
                 source_exact_geometry=True,game_equivalence=False,material_preview='neutral geometry inspection')
 

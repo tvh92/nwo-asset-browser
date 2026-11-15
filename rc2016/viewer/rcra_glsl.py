@@ -9,7 +9,12 @@ Inputs, in the viewer's varyings:
 - TEXCOORD2.xyz: the world normal vTintWorldNrm (native Y-up), not turned on back faces, as the game's interpolant.
 - TEXCOORD3.xyz and .w: the vertex tangent frame of native_glsl.FRAME_HELPERS (the UV-derivative frame while the Rift Apart
   tangent stream is not decoded), bitangent along the game's -v as in the Blender export.
-- TEXCOORD4: vertex colour, 1 (the viewer does not draw the colour stream).
+- TEXCOORD4: vRcraColour, the vertex colour squared per channel in the vertex stage, as the engine model vertex program
+  does (``mul r13, r14, r14`` after its typed load of g_MainColorVBView). vertex_source(), the materials' vertex program,
+  reads the model's colour section as normalized bytes in R, G, B, A order (attribute aRcraColour at
+  shading.RCRA_COLOUR_ATTRIBUTE); the game sets its view's format at run time, so that order is the reader's, not read
+  from the game. A model without the section reads 1, the engine's value for a subset without a colour stream when render
+  flag 0x800 is clear. Per-object paint, which the engine reads instead when an object has it, is not drawn.
 - SV_IsFrontFace: gl_FrontFacing. VIEW.xyz: vTintViewOffset (camera to point); CAMERA.xyz: vTintWorldPos - vTintViewOffset.
 
 Textures bind as uNativeTex<binding> (the native path's uniforms, so the viewport's binding code serves both games). A
@@ -21,21 +26,26 @@ gloss)^2, the Smith joint visibility approximation, Schlick with F90 = 1, Lamber
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import math
 
-EMITTER_VERSION = 1
+EMITTER_VERSION = 2
 PASS_UNIFORM = 'uRcraPass'   # forward programs: 0 the multiply pass (background factor), 1 the colour pass
+COLOUR_VARYING = 'vRcraColour'
 GEOMETRY = {'TEXCOORD.x': 'vUV.x', 'TEXCOORD.y': 'vUV.y', 'TEXCOORD1.x': 'vUV1.x', 'TEXCOORD1.y': 'vUV1.y',
             'TEXCOORD2.x': 'vTintWorldNrm.x', 'TEXCOORD2.y': 'vTintWorldNrm.y', 'TEXCOORD2.z': 'vTintWorldNrm.z',
             'TEXCOORD3.x': 'rcraTangent.x', 'TEXCOORD3.y': 'rcraTangent.y', 'TEXCOORD3.z': 'rcraTangent.z',
-            'TEXCOORD3.w': 'rcraHandedness', 'TEXCOORD4.x': '1.0', 'TEXCOORD4.y': '1.0', 'TEXCOORD4.z': '1.0',
-            'TEXCOORD4.w': '1.0', 'SV_IsFrontFace': '(gl_FrontFacing ? 1.0 : 0.0)',
+            'TEXCOORD3.w': 'rcraHandedness', 'TEXCOORD4.x': COLOUR_VARYING + '.x', 'TEXCOORD4.y': COLOUR_VARYING + '.y',
+            'TEXCOORD4.z': COLOUR_VARYING + '.z', 'TEXCOORD4.w': COLOUR_VARYING + '.w',
+            'SV_IsFrontFace': '(gl_FrontFacing ? 1.0 : 0.0)',
             'VIEW.x': 'vTintViewOffset.x', 'VIEW.y': 'vTintViewOffset.y', 'VIEW.z': 'vTintViewOffset.z',
             'CAMERA.x': 'rcraCamera.x', 'CAMERA.y': 'rcraCamera.y', 'CAMERA.z': 'rcraCamera.z'}
-LIMITATION = ('Viewer: vertex colour reads 1, the tangent frame comes from UV derivatives (the stored tangent is not decoded), '
-              'and the review rig and environment stand in for the game\'s lights.')
+LIMITATION = ('Viewer: the tangent frame comes from UV derivatives (the stored tangent is not decoded); vertex colour is the '
+              'model\'s colour section squared, as the engine squares it, with its bytes read in R, G, B, A order (the '
+              'game\'s view format is not read), 1 without one, and no per-object paint; the review rig and environment '
+              'stand in for the game\'s lights.')
 
 
 def _literal(value):
@@ -188,11 +198,21 @@ vec3 rcraSpecular(vec3 N, vec3 V, vec3 F0, float gloss) {
 """
 
 
+@functools.lru_cache(maxsize=1)
+def vertex_source():
+    """The vertex program of the translated materials: shading.VERTEX, plus the vertex colour squared into COLOUR_VARYING
+    (the engine squares its colour load in its vertex program, so the square is interpolated, not the colour)."""
+    from rc2016.viewer.shading import VERTEX
+    head, body = VERTEX.split('void main() {', 1)
+    return (head + 'attribute vec4 aRcraColour; varying vec4 %s;   // Rift Apart vertex colour (rcra_glsl)\n'
+            'void main() {\n    %s = aRcraColour * aRcraColour;' % (COLOUR_VARYING, COLOUR_VARYING) + body)
+
+
 def _prefix():
     from rc2016.viewer.shading import FRAGMENT
     prefix = FRAGMENT.split('void main() {', 1)[0]
     extra = []
-    for declaration in ('varying vec2 vUV1;', 'varying mat3 vNativeToView;'):
+    for declaration in ('varying vec2 vUV1;', 'varying mat3 vNativeToView;', 'varying vec4 %s;' % COLOUR_VARYING):
         if declaration.split()[-1].rstrip(';') not in prefix:
             extra.append(declaration)
     return prefix + '\n'.join(extra) + '\n'

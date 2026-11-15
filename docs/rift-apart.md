@@ -470,7 +470,7 @@ The engine vertex program that feeds slots 1, 4 and 5 is in the exe (vertex pull
 | `TEXCOORD1.xy` | UV1 |
 | `TEXCOORD2.xyz`, `.w` | World normal; instance index + 0.25 |
 | `TEXCOORD3.xyz`, `.w` | World tangent; bitangent sign |
-| `TEXCOORD4` | Vertex colour or paint |
+| `TEXCOORD4` | Vertex colour or paint, squared ([In the viewer](#in-the-viewer)) |
 | `TEXCOORD5` | Previous clip position (velocity) |
 
 ### Translation
@@ -655,12 +655,19 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 
 | Part | Viewer |
 | --- | --- |
-| Inputs | UV0 and UV1, the world normal, the UV-derivative tangent frame (`native_glsl.FRAME_HELPERS`), front face, and the view from `vTintViewOffset`. Vertex colour reads 1: the viewer draws no colour stream. |
+| Inputs | UV0 and UV1, the world normal, the UV-derivative tangent frame (`native_glsl.FRAME_HELPERS`), the vertex colour, front face, and the view from `vTintViewOffset` |
 | Textures | A sampled array slice as stored. Arrays with a run-time slice and 3D textures as the padded atlas of the Blender export, without mipmaps. Float data formats as `RGBA32F`. |
 | Lighting | The review rig with the Rift Apart BRDF: GGX α = (0.9725 − 0.7514 gloss)², Smith joint approximation, Schlick F90 = 1, Lambert, occlusion on ambient light only |
 | Blending | Forward materials draw in the float scene target, tested but not writing depth. A multiply pass scales what is behind by the background factor (blended: mix(1, B, α); additive: 1 + αB; modulate: the tint). Then a colour pass adds the premultiplied colour, coverage blended over. |
 
-`tests/test_rcra_viewer.py` draws the swarmer through the model viewport (Windows, `RCRA_GAME`) and checks that the translated programs link and draw.
+**Vertex colour.** The engine model vertex program loads a colour, squares it channel by channel and passes the square on as `TEXCOORD4`, so the square is interpolated. Which colour it loads depends on the draw:
+- **Model colour:** when the subset's colour offset (`g_ModelSubsetView` dword 1) is not negative, `g_MainColorVBView` at half that offset plus the vertex index with render flag 0x8000, else `g_MainPaintVBView` at the offset plus the vertex index.
+- **Object paint:** when the subset's paint offset (dword 3) plus the object's (`g_SceneObjectView` byte 0x4C) is positive, `g_MainPaintVBView` there, plus the vertex index, replaces it.
+- **No colour stream:** 1, or 0 with render flag 0x800.
+
+The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes in R, G, B, A order. The translated materials' vertex program (`rcra_glsl.vertex_source`, attribute `aRcraColour`) squares it. The game sets the views' formats at run time, so this channel order is the reader's, not read from the game. A model without the section reads 1. Object paint and the paint stream are not drawn: the viewer takes render flag 0x8000 as set and 0x800 as clear.
+
+`tests/test_rcra_viewer.py` draws the swarmer through the model viewport (Windows, `RCRA_GAME`) and checks that the translated programs link and draw. It also draws a pressure button whose material reads `TEXCOORD4.x`, and checks that its colour bytes reach the program: the frame changes when they are replaced by 1.
 
 ### Not translated
 

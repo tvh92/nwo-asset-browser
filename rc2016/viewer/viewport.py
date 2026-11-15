@@ -508,6 +508,11 @@ class ModelViewport(_TkFrame):
         if uv1 is not None and len(uv1) == len(payload.get('vertices', [])):
             import numpy as np
             self._uv1 = (ctypes.c_float * (2 * len(uv1))).from_buffer_copy(np.ascontiguousarray(uv1, dtype=np.float32))
+        self._rcra_colour = None   # Rift Apart vertex colour bytes, RGBA per vertex (loader._vertex_colours)
+        colours = payload.get('vertex_colours')
+        if colours is not None and len(colours) == len(payload.get('vertices', [])):
+            import numpy as np
+            self._rcra_colour = (ctypes.c_ubyte * (4 * len(colours))).from_buffer_copy(np.ascontiguousarray(colours, dtype=np.uint8))
         self._bones, self._bone_count = None, 0
         try:
             prepared=payload.get("_prepared_viewport")
@@ -1374,7 +1379,7 @@ class ModelViewport(_TkFrame):
 
     def _draw_shaded(self, index_array, uv_array, joint_array, weight_array, batches, raw_vector_array=None, tangent_array=None):
         """GLSL path for every mode: GPU skinning, base colour, and the game BRDF."""
-        from rc2016.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, BONE_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT
+        from rc2016.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, BONE_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT, RCRA_COLOUR_ATTRIBUTE
         gl, sh = self._gl, self._shading
         self.shading_warning = None
         effect_quads = self._effect_frame()
@@ -1428,6 +1433,15 @@ class ModelViewport(_TkFrame):
             sh.glEnableVertexAttribArray(14); sh.glVertexAttribPointer(14,1,self.GL_FLOAT,0,0,self._vptr(alpha))
         else:
             sh.glDisableVertexAttribArray(14); sh.glVertexAttrib4f(14,1.0,0.0,0.0,0.0)
+        # Rift Apart vertex colour for the translated materials (rcra_glsl.vertex_source squares it): the stored bytes as
+        # UNORM, as the engine's typed load reads them; without a colour section 1, the engine's value for a subset without
+        # one. No R&C 2016 program reads this location.
+        colour = getattr(self, '_rcra_colour', None)
+        if colour is not None:
+            sh.glEnableVertexAttribArray(RCRA_COLOUR_ATTRIBUTE)
+            sh.glVertexAttribPointer(RCRA_COLOUR_ATTRIBUTE, 4, self.GL_UNSIGNED_BYTE, 1, 0, self._vptr(colour))
+        else:
+            sh.glDisableVertexAttribArray(RCRA_COLOUR_ATTRIBUTE); sh.glVertexAttrib4f(RCRA_COLOUR_ATTRIBUTE, 1.0, 1.0, 1.0, 1.0)
         # Standalone models have no zone-keyed stream: retain uniform review controls.
         sh.glDisableVertexAttribArray(15); sh.glVertexAttrib4f(15,0.0,0.0,0.0,0.0)
         mode = self._mode
@@ -1523,6 +1537,7 @@ class ModelViewport(_TkFrame):
             gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_FILL)
         self._unbind_material_units()
         sh.glDisableVertexAttribArray(14)
+        sh.glDisableVertexAttribArray(RCRA_COLOUR_ATTRIBUTE)
         sh.glDisableVertexAttribArray(STATIC_VECTOR_ATTRIBUTE)
         sh.glDisableVertexAttribArray(TANGENT_ATTRIBUTE)
         for location in ATTRIBUTES.values():
