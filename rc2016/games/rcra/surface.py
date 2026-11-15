@@ -339,6 +339,14 @@ def _split_select(g, i, condition):
     return i, i
 
 
+def _run(translator):
+    """The translation; a program too deep for Python's recursion (very long unrolled chains) is unsupported."""
+    try:
+        return translator.run()
+    except RecursionError:
+        raise Unsupported('Program is too deep to translate (recursion limit)') from None
+
+
 def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes=None):
     """The material's surface terms as one expression DAG. ``texture_sizes(path)`` gives a texture's (width, height, depth or
     array size, mip count) for programs that query sizes (rc2016.games.rcra.texture.texture_size); without it they fail.
@@ -350,7 +358,7 @@ def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes
     bindings = _Bindings(cb2, shader.reflection, rshaders.material_units(graph_data, material_data), texture_sizes)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
-    tr = translator.run()
+    tr = _run(translator)
     g = tr.graph
     out = lambda r, c: tr.outputs.get(('o', r, c))   # noqa: E731
     if any(out(r, c) is None for r, c in ((0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2), (1, 3))):
@@ -519,7 +527,7 @@ def forward(graph_data, material_data, texture_sizes=None):
                                 rshaders.material_units(graph_data, material_data), texture_sizes)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
-    tr = translator.run()
+    tr = _run(translator)
     g = tr.graph
     target = [tr.outputs.get(('o', 0, c)) for c in range(4)]
     if None in target:

@@ -14,7 +14,10 @@ disappears when its count is bound to 0); a loop whose trip count stays unknown 
 'unknown' node, so outputs that do not depend on it still translate. Branch, break, return and discard conditions only
 act on active lanes, so they are folded under the facts the lane's active predicate implies (_given_active): a counter
 written as select(active, i + 1, i) is exactly the iteration count there, and a loop with an early break still ends at
-its count. A counter that differs between a continue path and the fall-through path does not fold this way.
+its count. Facts carry over iterations (a lane active now passed the previous iteration's exit test), and a test that
+one select condition decides splits on it, so a parallax counter that jumps past its step count on a hit ends at the
+count's bound; extra predicated iterations are allowed only up to that bound. A counter that differs between a continue
+path and the fall-through path does not fold this way.
 
 Constant buffer reads become 'input' nodes named '<cbuffer>.<variable>+<byte offset>' from the RDEF reflection;
 interpolants become 'input' nodes named '<semantic>.<component>'; texture samples and buffer loads become 'sample'/'load'
@@ -180,6 +183,7 @@ class Graph:
     def __init__(self):
         self.nodes = []
         self._cache = {}
+        self.predicated = []   # per node: a select or a truth value in its subtree (only those change under facts)
 
     def _add(self, op, type_, args=(), **meta):
         key = (op, type_, tuple(args), tuple(sorted(meta.items())))
@@ -187,6 +191,7 @@ class Graph:
         if index is None:
             index = self._cache[key] = len(self.nodes)
             self.nodes.append(dict(op=op, type=type_, args=list(args), **meta))
+            self.predicated.append(op == 'select' or type_ == 'b' or any(self.predicated[a] for a in args))
         return index
 
     # -- leaves
@@ -221,6 +226,29 @@ class Graph:
         have = self.type(index)
         if have == type_:
             return index
+        memo = self.__dict__.setdefault('_casts', {})   # pure in (node, type); selects share branches, so cast once
+        key = (index, type_)
+        if key in memo:
+            return memo[key]
+        if self.nodes[index]['op'] == 'select' and 'b' not in (have, type_):
+            # Unrolled loops leave select chains hundreds deep: cast their branches bottom-up, without recursion.
+            stack = [(index, False)]
+            while stack:
+                i, ready = stack.pop()
+                if (i, type_) in memo:
+                    continue
+                n = self.nodes[i]
+                branches = [a for a in n['args'][1:] if self.type(a) != type_ and self.nodes[a]['op'] == 'select']
+                if ready or not branches:
+                    memo[(i, type_)] = self._cast(i, type_, self.type(i))
+                else:
+                    stack.append((i, True))
+                    stack.extend((a, False) for a in branches if (a, type_) not in memo)
+            return memo[key]
+        memo[key] = self._cast(index, type_, have)
+        return memo[key]
+
+    def _cast(self, index, type_, have):
         if have == 'b':
             index, have = self.op('b2i', index), 'i'
             if type_ == 'i':
@@ -324,6 +352,14 @@ class Graph:
                     return self.const('b', name == 'b_or')
             if a[0] == a[1]:
                 return a[0]
+        if name in self.RANGE_TESTS:
+            decided = self._range_test(name, a)
+            if decided is not None:
+                return self.const('b', decided)
+            if name in ('ige', 'ilt'):
+                floated = self._truncated_test(name, a, v)
+                if floated is not None:
+                    return floated
         if name == 'b_not' and self.nodes[a[0]]['op'] == 'b_not':
             return self.nodes[a[0]]['args'][0]
         if name == 'and':
@@ -349,11 +385,115 @@ class Graph:
             for x, y in ((0, 1), (1, 0)):
                 if v[x] == 0:
                     return a[y]
+                n = self.nodes[a[y]]
+                if v[x] is not None and n['op'] == 'iadd' and self.value(n['args'][1]) is not None:
+                    return self.op('iadd', n['args'][0], self.const('i', self.value(n['args'][1]) + v[x]))   # (p+k1)+k2
         if name == 'ine' and v[1] == 0 and self.nodes[a[0]]['op'] == 'b2i':
             return self.nodes[a[0]]['args'][0]
         if name == 'ieq' and v[1] == 0 and self.nodes[a[0]]['op'] == 'b2i':
             return self.op('b_not', self.nodes[a[0]]['args'][0])
         return None
+
+    # Comparisons decided by value ranges: name -> (signed integer?, test on (low a, high a, low b, high b) -> True/False/None)
+    RANGE_TESTS = {
+        'ilt': lambda la, ha, lb, hb: True if ha < lb else False if la >= hb else None,
+        'ige': lambda la, ha, lb, hb: True if la >= hb else False if ha < lb else None,
+        'lt': lambda la, ha, lb, hb: True if ha < lb else False if la >= hb else None,
+        'ge': lambda la, ha, lb, hb: True if la >= hb else False if ha < lb else None,
+    }
+
+    def _truncated_test(self, name, args, values):
+        """A signed test of ftoi(x) against a constant k as a float test of x (x of known range: never NaN, inside int32):
+        trunc(x) <= k is x < k + 1 for k >= 0 and x <= k for k < 0."""
+        for x, y in ((0, 1), (1, 0)):
+            n = self.nodes[args[y]]
+            if values[x] is None or n['op'] != 'ftoi':
+                continue
+            k, inner = _signed(values[x]), n['args'][0]
+            r = self.bounds(inner)
+            if r is None or not -2 ** 24 < k < 2 ** 24 or r[0] <= -2 ** 31 or r[1] >= 2 ** 31:
+                return None
+            # name(args[0], args[1]) as 'trunc(x) <= m' (at_most) or its negation
+            if (name == 'ige') == (x == 0):   # k >= trunc(x), or trunc(x) < k (= trunc(x) <= k - 1)
+                m, at_most = (k if x == 0 else k - 1), True
+            else:                             # k < trunc(x), or trunc(x) >= k: not trunc(x) <= m
+                m, at_most = (k if x == 0 else k - 1), False
+            test = (self.op('lt', inner, self.const('f', m + 1)) if m >= 0
+                    else self.op('ge', self.const('f', m), inner))
+            return test if at_most else self.op('b_not', test)
+        return None
+
+    def _range_test(self, name, args):
+        ra, rb = self.bounds(args[0]), self.bounds(args[1])
+        if ra is not None and rb is not None:
+            decided = self.RANGE_TESTS[name](ra[0], ra[1], rb[0], rb[1])
+            if decided is not None:
+                return decided
+        if name in ('ilt', 'ige'):   # p + k against p, when p + k cannot overflow
+            for x, y, flip in ((0, 1, False), (1, 0, True)):
+                n = self.nodes[args[x]]
+                k = self.value(n['args'][1]) if n['op'] == 'iadd' else None
+                if k is None or n['args'][0] != args[y]:
+                    continue
+                k, rp = _signed(k), self.bounds(args[y])
+                if rp is None or not (-2 ** 31 <= rp[0] + k and rp[1] + k < 2 ** 31):
+                    return None
+                at_least = k >= 0 if not flip else k <= 0   # args[0] >= args[1]
+                return at_least if name == 'ige' else not at_least
+        return None
+
+    def bounds(self, index, depth=48):
+        """(low, high) a node's value always lies in, for integer nodes (signed) and float nodes that are never NaN or
+        infinite; None when unknown. Used to decide comparisons, so a loop whose trip count is bounded (parallax steps
+        between 8 and 32) ends once its counter passes the bound."""
+        memo = self.__dict__.setdefault('_bounds', {})
+        if index in memo:
+            return memo[index]
+        result = self._bounds_of(index, depth)
+        if result is not None and not all(math.isfinite(x) and abs(x) < 1e30 for x in result):
+            result = None
+        if result is not None and self.nodes[index]['type'] == 'f' and self.nodes[index]['op'] not in ('const', 'sat'):
+            # float32 rounding can step just past bounds computed in double: widen, so a test at the edge stays open
+            result = tuple(x + sign * (abs(x) * 2.0 ** -20 + 1e-30) for x, sign in zip(result, (-1, 1)))
+        if result is not None or depth > 0:
+            memo[index] = result
+        return result
+
+    def _bounds_of(self, index, depth):
+        n = self.nodes[index]
+        op, t = n['op'], n['type']
+        if op == 'const':
+            if t == 'f':
+                return (n['value'], n['value']) if math.isfinite(n['value']) else None
+            return (_signed(n['value']),) * 2 if t == 'i' else None
+        if op == 'sat':
+            return (0.0, 1.0)
+        if depth == 0 or t == 'b' or op not in ('add', 'mul', 'neg', 'min', 'max', 'select', 'ftoi', 'itof', 'iadd',
+                                                'round_ne', 'round_ni', 'round_pi', 'round_z', 'imin', 'imax', 'ineg'):
+            return None
+        args = n['args'][1:] if op == 'select' else n['args']
+        r = [self.bounds(x, depth - 1) for x in args]
+        if None in r:
+            return None
+        if op in ('add', 'iadd'):
+            low, high = r[0][0] + r[1][0], r[0][1] + r[1][1]
+            return (low, high) if op == 'add' or (-2 ** 31 <= low and high < 2 ** 31) else None
+        if op == 'mul':
+            products = [x * y for x in r[0] for y in r[1]]
+            return min(products), max(products)
+        if op in ('neg', 'ineg'):
+            return (-r[0][1], -r[0][0]) if op == 'neg' or r[0][0] > -2 ** 31 else None
+        if op in ('min', 'imin', 'max', 'imax'):
+            pick = min if op in ('min', 'imin') else max
+            return pick(r[0][0], r[1][0]), pick(r[0][1], r[1][1])
+        if op == 'select':
+            return min(r[0][0], r[1][0]), max(r[0][1], r[1][1])
+        if op == 'ftoi':
+            return (max(-2 ** 31, math.trunc(r[0][0])), min(2 ** 31 - 1, math.trunc(r[0][1])))
+        if op == 'itof':
+            return float(r[0][0]), float(r[0][1])
+        fn = {'round_ne': round, 'round_ni': math.floor, 'round_pi': math.ceil, 'round_z': math.trunc}[op]
+        return float(fn(r[0][0])), float(fn(r[0][1]))
 
     def select(self, cond, a, b):
         cond = self.boolean(cond)
@@ -365,6 +505,10 @@ class Graph:
         va, vb = self.value(a), self.value(b)
         if self.type(a) == 'b' == self.type(b) and va is not None and vb is not None:
             return cond if va else self.op('b_not', cond)   # c ? true : false
+        if self.type(a) == 'b' == self.type(b) and (va is not None or vb is not None):
+            if va is not None:   # c ? true : b = c or b;  c ? false : b = not c and b
+                return self.op('b_or', cond, b) if va else self.op('b_and', self.op('b_not', cond), b)
+            return self.op('b_or', self.op('b_not', cond), a) if vb else self.op('b_and', cond, a)
         ta, tb = self.type(a), self.type(b)
         if ta != tb:
             # Mixed register contents: keep the float view when either side is a float constant 0.
@@ -494,6 +638,8 @@ class Translator:
         self.stores = []          # UAV stores: dict(binding, address, values {lane: node}, active)
         self.unsupported = []
         self.loops = []           # (position, iterations or None)
+        self._loops = []          # the loop/switch states of the block being run
+        self._facts_memo = {}     # id(facts) -> {node: specialised node}
         self.instructions = shader.program.instructions
         self.match = _blocks(self.instructions)
         self.icb = shader.program.immediate_constants
@@ -676,6 +822,7 @@ class Translator:
     def _block(self, start, end, flow, loops):
         """Execute instructions [start, end) under ``flow``; ``loops`` is the stack of loop/switch states."""
         g = self.g
+        self._loops = loops
         i = start
         while i < end:
             ins = self.instructions[i]
@@ -684,7 +831,7 @@ class Translator:
                 cond = g.boolean(self.read(ins.operands[0], 'i')[0])
                 if not ins.nonzero:
                     cond = g.op('b_not', cond)
-                cond = self._given_active(cond, flow)   # both branches are entered only by active lanes
+                cond = self._given_active(cond, flow, loops)   # both branches are entered only by active lanes
                 partners, close = self.match[i]
                 else_at = partners[0] if partners else None
                 taken = g.value(cond)
@@ -719,7 +866,7 @@ class Translator:
                     c = g.boolean(self.read(ins.operands[0], 'i')[0])
                     if not ins.nonzero:
                         c = g.op('b_not', c)
-                    cond = g.op('b_and', cond, self._given_active(c, flow))
+                    cond = g.op('b_and', cond, self._given_active(c, flow, loops, op == 'breakc'))
                 if op.startswith('break'):
                     state = loops[-1]
                     state['broken'] = g.op('b_or', state['broken'], cond)
@@ -735,7 +882,7 @@ class Translator:
                     c = g.boolean(self.read(ins.operands[0], 'i')[0])
                     if not ins.nonzero:
                         c = g.op('b_not', c)
-                    cond = g.op('b_and', cond, self._given_active(c, flow))
+                    cond = g.op('b_and', cond, self._given_active(c, flow, loops))
                 self.alive = g.op('b_and', self.alive, g.op('b_not', cond))
                 flow.active = g.op('b_and', flow.active, g.op('b_not', cond))
                 i += 1
@@ -745,7 +892,7 @@ class Translator:
                 if not ins.nonzero:
                     c = g.op('b_not', c)
                 # Discarded lanes are don't-care for registers and targets: only the predicate records them.
-                self.discard = g.op('b_or', self.discard, g.op('b_and', flow.active, self._given_active(c, flow)))
+                self.discard = g.op('b_or', self.discard, g.op('b_and', flow.active, self._given_active(c, flow, loops)))
                 i += 1
                 continue
             if op in ('case', 'default', 'endswitch', 'endif', 'endloop', 'else', 'label'):
@@ -787,17 +934,49 @@ class Translator:
             state['broken'], state['continued'] = broken, continued
         return result
 
-    def _given_active(self, cond, flow):
+    LEAVES = ('const', 'input', 'unknown', 'channel', 'sample', 'load', 'cbload')
+
+    def _given_active(self, cond, flow, loops=(), exit_test=False, split=True):
         """``cond`` as it reads in an active lane: decided under the facts flow.active and the region entry imply.
 
-        The result is only ANDed with flow.active (a break, continue or return predicate), so it may differ from ``cond``
-        where the lane is inactive. A loop counter written as select(previous active, i + 1, i) is then exactly the
-        iteration count, and a test on it folds, so a loop with an early break still ends at its count."""
+        The result is only ANDed with flow.active (a branch, break, return or discard predicate), so it may differ from
+        ``cond`` where the lane is inactive. A loop counter written as select(previous active, i + 1, i) is then exactly
+        the iteration count, and a test on it folds, so a loop with an early break still ends at its count.
+
+        Facts carry over iterations: a lane active in iteration k passed the top-level breaks of iteration k - 1 that came
+        before any continue, so their (decided) conditions were false. When the result still depends on a select
+        condition c and one of its cases decides, it becomes c ? that : the other case: a parallax step counter that jumps
+        past the step count on a hit reads 'hit or k >= n', which is true once k passes n's bound."""
         g = self.g
-        facts = {}
+        state = next((s for s in reversed(loops) if s['kind'] == 'loop'), None)
+        if state is None:   # outside loops nothing needs to end: the plain predicate is exact and cheaper
+            return cond
+        facts = self._active_facts(flow, state)
+        result = self._specialise(cond, facts, self._facts_memo.get(id(facts))) if facts else cond
+        if split and g.value(result) is None:
+            result = self._case_split(result)
+        if (exit_test and state is not None and self.outer == state.get('outer')
+                and g.value(state['continued']) is False):   # later iterations: this lane's test was false here
+            state['facts'] = dict(facts)
+            if not g.is_const(result):
+                state['facts'][result] = False
+            state['version'] = state.get('version', 0) + 1
+            need = self._steps_to_bound(result)
+            if need is not None:   # an integer counter against a bounded value: allow just the steps that reach it
+                state['until'] = max(state.get('until', 0), min(MAX_LOOP_ITERATIONS, state['iteration'] + need))
+        return result
+
+    def _active_facts(self, flow, state):
+        """{node: truth} that flow.active, the region entry and the loop's carried facts imply (memoized)."""
+        g = self.g
+        key = (flow.active, self.outer, id(state), state.get('version', 0) if state is not None else 0)
+        cache = self.__dict__.setdefault('_facts_cache', {})
+        if key in cache:
+            return cache[key]
+        facts, pending = {}, []
 
         def learn(node, value):
-            if node in facts:
+            if node in facts or g.is_const(node):
                 return
             facts[node] = value
             n = g.nodes[node]
@@ -806,13 +985,35 @@ class Translator:
             elif n['op'] == ('b_and' if value else 'b_or'):
                 for a in n['args']:
                     learn(a, value)
+            elif n['op'] in ('b_and', 'b_or'):
+                pending.append(node)   # a false and, a true or: one side follows once the other is known
+        if state is not None:
+            for node, value in state.get('facts', {}).items():
+                learn(node, value)
         learn(flow.active, True)
         learn(self.outer, True)
-        facts = {k: v for k, v in facts.items() if not g.is_const(k)}
-        if not facts:
-            return cond
-        memo = {}
-        leaves = ('const', 'input', 'unknown', 'channel', 'sample', 'load', 'cbload')
+        changed = True
+        while changed:
+            changed = False
+            for node in pending:
+                x, y = g.nodes[node]['args']
+                want = g.nodes[node]['op'] == 'b_or'   # true or, one side false: the other true (and dually)
+                for p, q in ((x, y), (y, x)):
+                    if facts.get(p) is (not want) and q not in facts:
+                        learn(q, want)
+                        changed = True
+        if len(cache) > 4096:
+            cache.clear()
+            self._facts_memo.clear()
+        cache[key] = facts
+        self._facts_memo[id(facts)] = {}   # specialised nodes under these facts, shared by every condition read with them
+        return facts
+
+    def _specialise(self, root, facts, memo=None):
+        """``root`` rebuilt with the nodes in ``facts`` replaced by their truth (selects on them take their branch)."""
+        g = self.g
+        memo = {} if memo is None else memo
+        leaves = self.LEAVES
 
         def under(i):
             if i in memo:
@@ -821,7 +1022,7 @@ class Translator:
                 result = g.const('b', facts[i])
             else:
                 n = g.nodes[i]
-                if n['op'] in leaves:
+                if n['op'] in leaves or not g.predicated[i]:
                     result = i
                 elif n['op'] == 'select':
                     c = under(n['args'][0])
@@ -833,22 +1034,67 @@ class Translator:
                 else:
                     args = [under(a) for a in n['args']]
                     result = i if args == n['args'] else g.op(n['op'], *args)
+                if result in facts:   # rebuilt into a node the facts decide (hash-consing makes it the same node)
+                    result = g.const('b', facts[result])
             memo[i] = result
             return result
-        stack, order, seen = [cond], [], set()   # post-order without recursion: counter chains are as deep as the loop
+        stack, order, seen = [root], [], set()   # children first, so the recursion stays shallow on long counter chains
         while stack:
             i = stack.pop()
-            if i in seen or i in facts:
+            if i in seen or i in facts or i in memo:
                 continue
             seen.add(i)
-            order.append(i)
-            if g.nodes[i]['op'] not in leaves:
+            if g.nodes[i]['op'] not in leaves and g.predicated[i]:
+                order.append(i)
                 stack.extend(g.nodes[i]['args'])
         for i in reversed(order):
             n = g.nodes[i]
-            if n['op'] == 'select' or all(a in memo or a in facts or g.nodes[a]['op'] in leaves for a in n['args']):
+            if n['op'] == 'select' or all(a in memo or a in facts or g.nodes[a]['op'] in leaves or not g.predicated[a]
+                                          for a in n['args']):
                 under(i)
-        return under(cond)
+        return under(root)
+
+    def _case_split(self, root, limit=3, depth=8):
+        """c ? root(c true) : root(c false) for the first select condition c near the root (of a few) whose true or
+        false case decides root; else root."""
+        g = self.g
+        conditions, frontier, seen = [], [root], {root}
+        for _ in range(depth):
+            following = []
+            for i in frontier:
+                n = g.nodes[i]
+                if n['op'] in self.LEAVES:
+                    continue
+                if n['op'] == 'select' and n['args'][0] not in conditions and not g.is_const(n['args'][0]):
+                    conditions.append(n['args'][0])
+                for a in n['args']:
+                    if a not in seen:
+                        seen.add(a)
+                        following.append(a)
+            frontier = following
+            if len(conditions) >= limit or not frontier:
+                break
+        for c in conditions[:limit]:
+            yes, no = self._specialise(root, {c: True}), self._specialise(root, {c: False})
+            if g.value(yes) is not None or g.value(no) is not None:
+                return g.select(c, yes, no)
+        return root
+
+    def _steps_to_bound(self, node):
+        """Iterations until an exit test 'k >= y' or 'k < y' (k the constant counter, y of known range) is decided for
+        every y: high(y) - k + 2 (a budget for unrolling, not a correctness bound), or None without such a comparison."""
+        g = self.g
+        need = None
+        for i in g.reachable([node]):
+            n = g.nodes[i]
+            if n['op'] in ('ilt', 'ige', 'lt', 'ge'):   # float tests too: ftoi counters fold to x < k + 1
+                for x, y in (n['args'], n['args'][::-1]):
+                    r = g.bounds(y) if g.is_const(x) else None
+                    if r is not None:
+                        k = _signed(g.value(x)) if n['type'] != 'f' and g.type(x) == 'i' else g.value(x)
+                        step = int(math.ceil(r[1] - k)) + 2
+                        need = step if need is None else max(need, step)
+        return need if need is not None and need > 0 else None
 
     def _entered(self, entry):
         """Absolute entry predicate of a region entered by ``entry``: lanes that discarded before it do not enter it."""
@@ -935,7 +1181,7 @@ class Translator:
         # Data-dependent trip counts are unrolled only for small loops without nested loops (PCF taps and the like).
         predicated_limit = MAX_PREDICATED_ITERATIONS if len(body) <= 64 and not any(
             x.opcode == 'loop' for x in body) else 0
-        state = dict(kind='loop', broken=g.const('b', False), continued=g.const('b', False))
+        state = dict(kind='loop', broken=g.const('b', False), continued=g.const('b', False), outer=self.outer, facts={})
         iterations = 0
         while True:
             state['continued'] = g.const('b', False)
@@ -945,7 +1191,10 @@ class Translator:
                 break
             if not g.is_const(continuing):
                 predicated += 1
-            if (iterations >= MAX_LOOP_ITERATIONS or predicated > predicated_limit
+            state['iteration'] = iterations
+            limit = predicated_limit if not predicated_limit else max(predicated_limit, state.get('until', 0) - iterations
+                                                                      + predicated)
+            if (iterations >= MAX_LOOP_ITERATIONS or predicated > limit
                     or len(g.nodes) - node_mark > 200000):
                 iterations = None
                 break
@@ -1094,7 +1343,8 @@ class Translator:
             want = 'f' if sat or o[2].modifier or o[3].modifier else 'raw'
             c, a, b = self.read(o[1], 'raw'), self.read(o[2], want), self.read(o[3], want)
             for lane in self.lanes(dst):
-                self.write(dst, lane, g.select(g.boolean(c[lane]), a[lane], b[lane]), sat, flow)
+                cond = self._given_active(g.boolean(c[lane]), flow, self._loops, split=False) if flow else g.boolean(c[lane])
+                self.write(dst, lane, g.select(cond, a[lane], b[lane]), sat, flow)
             return
         if op == 'swapc':
             c, a, b = self.read(o[2], 'raw'), self.read(o[3], 'raw'), self.read(o[4], 'raw')

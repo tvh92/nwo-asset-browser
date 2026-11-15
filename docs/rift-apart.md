@@ -481,7 +481,7 @@ The engine vertex program that feeds slots 1, 4 and 5 is in the exe (vertex pull
 
 - **Types:** every node is a float, an integer bit pattern or a comparison result. Bitcasts fold for constants; folding uses float32 arithmetic.
 - **Branches:** each `if`, `else` and `switch` case runs as its own region and joins with one `select` per register.
-- **Loops:** a loop is unrolled while its exit condition folds. A data-dependent loop (a light list, for example) poisons only the registers it writes, with an `unknown` node, so outputs that do not depend on it still translate. Branch, break, return and discard conditions act only on active lanes, so they are folded under what a lane's active predicate implies. A counter is then exactly the iteration count, and a loop with an early break still ends at its count. The outputs are bit-identical to the unfolded translation wherever both translate. A loop that is still open: its counter differs between a `continue` path and the fall-through path, or its bound depends on the texel (parallax steps).
+- **Loops:** a loop is unrolled while its exit condition folds. A data-dependent loop (a light list, for example) poisons only the registers it writes, with an `unknown` node, so outputs that do not depend on it still translate. Branch, break, return and discard conditions act only on active lanes, so they are folded under what a lane's active predicate implies. A counter is then exactly the iteration count, and a loop with an early break still ends at its count. Facts carry over iterations: a lane active now passed the previous iteration's exit test, so its decided parts were false. An exit test that one select condition decides is split on it. A parallax counter that jumps past its step count on a hit (n = trunc(32 − 24 sat(x)), so 8 to 32 steps) then reads "hit, or step ≥ n", and the loop ends at n's bound. Value ranges (`Graph.bounds`) decide comparisons, and an integer test of `ftoi(x)` becomes the exact float test of x. Extra predicated iterations are allowed only up to the bound. The outputs are bit-identical to the unfolded translation wherever both translate. Still open: a counter that differs between a `continue` path and the fall-through path, and loops with no bounded counter (ray marches, per-pixel volume flags).
 - **Discard and return:** both become predicates. A discarded pixel's registers are don't-care, so a discard does not predicate later register writes. This keeps a register one type when a program reuses it, a mask before the discard and a float after it, as the holo graphs do. UAV stores stay gated by the discard. On the materials both versions translate, the outputs are bit-identical on every kept pixel.
 - **Texture sizes:** `resinfo` on a texture whose size the bindings know (`Bindings.texture_size`) folds to SM5's values for its dimension, mip level and return type. `surface` and `forward` take `texture_sizes`, which is `texture.texture_size`: the full texture with every streamed mip resident (labelled). Array sizes and depths do not depend on streaming.
 - **Names:** constant-buffer reads become inputs named from the reflection, such as `GlobalWorldCBuffer.m_KeyLightVec+4` or `MultiCustomMaterialCB.g_CustomMaterial_Buffer+12`. Interpolants become inputs named by semantic, such as `TEXCOORD2.x`. Texture reads become `sample` and `load` nodes carrying the binding name.
@@ -548,8 +548,8 @@ Blended materials are drawn by their forward program (slot 1), which lights itse
 
 **Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps (`TextureCube`, and a `TextureCubeArray` read at a constant cube index) are sampled along the direction the program computes (the first three address lanes, in game space). The explicit mip level, bias or gradients of a cube lookup are not applied: the top mip is read, and the result says so. An array read at a run-time index, or a cube read by `gather` or `ld`, is unsupported. A cube texture's slices are its faces, six per cube in the order +X, -X, +Y, -Y, +Z, -Z, top row first.
 
-**Coverage:** 1,547 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated:
-- loops whose trip count depends on the pixel (45): parallax steps, ray marches, per-pixel volume flags
+**Coverage:** 1,555 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0). Not translated:
+- loops whose trip count depends on the pixel (37): ray marches, per-pixel volume flags, counters that a `continue` path skips
 - G-buffer reads (57), mostly screen effects and a few decals
 - lit materials that read the scene colour (46), and colour that is not affine in it (20)
 - integer arithmetic left in the colour (about 32)
@@ -587,7 +587,7 @@ Values a material does not own are bound and listed in its limitations:
 - **Neutral draw:** no dissolve, opaque, no render flags (lighting class 0), shader time 0.
 - **Review values:** screen position for dither, LOD fade and adapted luminance 1.
 
-**Coverage:** 5,255 of 5,721 materials. The rest are reported with a reason (`rc2016.games.rcra.surface.Unsupported`):
+**Coverage:** 5,267 of 5,721 materials. The rest are reported with a reason (`rc2016.games.rcra.surface.Unsupported`):
 - integer operations left in the writer
 - writers without the engine packing
 - unbounded loops
