@@ -32,10 +32,24 @@ class LinkService:
             self.message = 'Choose the extracted game folder first.'
             callback(None)
             return
+        game = self._game(root)
+        if game is not None and not game.has('levels'):   # no level tables to index: say so instead of failing on a worker
+            self.message = f'Not available for {game.title}: its levels are not read yet.'
+            callback(None)
+            return
         self.waiting = [(k, c) for k, c in self.waiting if key is None or k != key] + [(key, callback)]
         if self.building != root:
             self.building = root
             threading.Thread(target=self._work, args=(root,), daemon=True).start()
+
+    @staticmethod
+    def _game(root):
+        try:
+            from pathlib import Path
+            from rc2016.games import detect
+            return detect(Path(root).expanduser().resolve())
+        except Exception:
+            return None   # an unreadable folder fails in the worker, with its own message
 
     def _work(self, root):
         try:

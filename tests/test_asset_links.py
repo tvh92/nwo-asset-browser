@@ -112,5 +112,22 @@ class PlacementLinesTests(unittest.TestCase):
         self.assertTrue(any('(no level lists this zone)' in line for line in lines[1:]))
 
 
+class LinkServiceGameTests(unittest.TestCase):
+    def test_game_without_levels_answers_at_once_without_a_worker(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from rc2016.app.links import LinkService
+        app = SimpleNamespace(source_var=SimpleNamespace(get=lambda: 'C:/rcra'))
+        service = LinkService(app)
+        game = SimpleNamespace(title='Rift Apart', has=lambda capability: False)
+        answers = []
+        with mock.patch('rc2016.games.detect', return_value=game), mock.patch('threading.Thread') as thread:
+            service.request(answers.append)
+        self.assertEqual(answers, [None])
+        thread.assert_not_called()
+        self.assertIn('Rift Apart', service.message)
+        self.assertIsNone(service.building)
+
+
 if __name__ == '__main__':
     unittest.main()

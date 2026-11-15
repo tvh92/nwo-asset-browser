@@ -452,6 +452,7 @@ class ModelViewport(_TkFrame):
         self._compressed_upload = None
         self._shading = None       # gl_shading.Shading once the context exists
         self.shading_error = None
+        self._shading_draw_failed = False   # shading_error came from one mesh's draw, not from the context
         self.shading_warning = None
         self._bones = None         # current frame: ctypes float array, joints x 16 (row-major)
         self._bone_count = 0
@@ -501,6 +502,8 @@ class ModelViewport(_TkFrame):
         """Install a decoded mesh mapping: vertices, triangles, and optional normals."""
         self._release_textures()
         self._payload = payload
+        if self._shading_draw_failed:   # a failed draw belongs to the previous model; the next one tries the shaded path again
+            self._shading_draw_failed, self.shading_error = False, None
         alpha = payload.get('rock_alpha') or []
         self._rock_alpha = (ctypes.c_float*len(alpha))(*alpha) if len(alpha)==len(payload.get('vertices',[])) else None
         self._uv1 = None   # the second UV pair (window glass rule), (u, v) per vertex
@@ -1314,7 +1317,10 @@ class ModelViewport(_TkFrame):
                     drawn = True
                 except Exception as exc:   # keep the fixed-function view working
                     self.shading_error = f"Shaded view unavailable: {exc}"
+                    self._shading_draw_failed = True
                     self._hdr_abort()
+                    self._unbind_material_units()
+                    self._disable_shader_arrays()   # the fixed path would otherwise read these stale pointers
                     self._shading.glUseProgram(0)
             if not drawn:
                 self._draw_fixed(index_array, uv_array, batches)
@@ -1577,13 +1583,16 @@ class ModelViewport(_TkFrame):
             gl.glDrawElements(self.GL_TRIANGLES, len(index_array), self.GL_UNSIGNED_INT, self._vptr(index_array, 0, self.GL_ELEMENT_ARRAY_BUFFER))
             gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_FILL)
         self._unbind_material_units()
-        sh.glDisableVertexAttribArray(14)
-        sh.glDisableVertexAttribArray(RCRA_COLOUR_ATTRIBUTE)
-        sh.glDisableVertexAttribArray(STATIC_VECTOR_ATTRIBUTE)
-        sh.glDisableVertexAttribArray(TANGENT_ATTRIBUTE)
-        for location in ATTRIBUTES.values():
-            sh.glDisableVertexAttribArray(location)
+        self._disable_shader_arrays()
         sh.glUseProgram(0)
+
+    def _disable_shader_arrays(self):
+        """Turn every generic vertex attribute array the shaded path can enable off again. A shaded draw that raises
+        part-way leaves them enabled, and the fixed-function fallback then reads their dangling pointers."""
+        from rc2016.viewer.shading import ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, RCRA_COLOUR_ATTRIBUTE, UV1_ATTRIBUTE
+        sh = self._shading
+        for location in (14, 15, RCRA_COLOUR_ATTRIBUTE, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, UV1_ATTRIBUTE, *ATTRIBUTES.values()):
+            sh.glDisableVertexAttribArray(location)
 
     def _effect_frame(self):
         """This frame's effect quads in Shaded mode (the health crate's idle effect, rc2016/viewer/idle_effect.py, a holocon
