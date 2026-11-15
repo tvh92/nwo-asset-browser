@@ -72,12 +72,35 @@ def load_unit(row, source=None):
                       for r, c in (divmod(k, v['columns']) for k in range(v['depth'])))
     if row['kind'] == 'float':
         return np.fromfile(row['path'], dtype='<f4').reshape(row['height'], row['width'], 4)
+    if row['kind'] == 'png16':   # already linear (blender_export._save)
+        return read_png16(row['path'])
     from PIL import Image
     data = np.asarray(Image.open(row['path']).convert('RGBA'), np.float32) / 255.0
     if row['colourspace'] == 'sRGB':   # the sampler returns linear rgb
         rgb = data[..., :3]
         data[..., :3] = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
     return data
+
+
+def read_png16(path):
+    """(h, w, 4) float32 of a 16-bit RGBA PNG as blender_export.png16 writes it (filter 0 rows)."""
+    import struct
+    import zlib
+    raw = Path(path).read_bytes()
+    at, data, size = 8, b'', None
+    while at < len(raw):
+        length, tag = struct.unpack_from('>I4s', raw, at)
+        body = raw[at + 8:at + 8 + length]
+        if tag == b'IHDR':
+            size = struct.unpack_from('>II', body)
+        elif tag == b'IDAT':
+            data += body
+        at += 12 + length
+    w, h = size
+    rows = np.frombuffer(zlib.decompress(data), np.uint8).reshape(h, 1 + w * 8)
+    if rows[:, 0].any():
+        raise ValueError('Unsupported PNG row filter in %s' % path)
+    return rows[:, 1:].copy().view('>u2').reshape(h, w, 4).astype(np.float32) / 65535.0
 
 
 def bilinear(image, u, v):
@@ -93,11 +116,12 @@ def bilinear(image, u, v):
 
 
 def window(entry, size):
-    """(origin, span) of the baked UV window: each bake pixel covers at most a quarter of the largest texture's texel, so
-    the bake's sub-pixel jitter (Cycles' minimum filter width) moves a lookup by a negligible fraction of a texel."""
+    """(origin, span) of the baked UV window: each bake pixel covers at most a 32nd of the largest texture's texel, so
+    the bake's sub-pixel jitter (Cycles' minimum filter width) moves a lookup by a negligible fraction of a texel even
+    where the material tiles its UV up to 8 times."""
     widths = [r.get('volume', r).get('width', 1) for row in entry['images'].values() for r in row.get('slices', [row])
               if 'cube' not in r]
-    span = min(1.0, size / (4.0 * max(widths + [1])))
+    span = min(1.0, size / (32.0 * max(widths + [1])))
     return 0.3, span
 
 

@@ -496,7 +496,8 @@ def build_forward_group(recipe, images, uv_maps, colour_attribute=None, interpol
 
 
 def load_image(path, colourspace, kind='png', width=0, height=0):
-    """A unit texture as written by rc2016.games.rcra.blender_export: PNG, or raw float32 RGBA rows top first."""
+    """A unit texture as written by rc2016.games.rcra.blender_export: PNG, 16-bit linear PNG, or raw float32 RGBA rows top
+    first."""
     if kind == 'float':
         import numpy as np
         name = Path(path).stem
@@ -510,6 +511,8 @@ def load_image(path, colourspace, kind='png', width=0, height=0):
             image.pack()
     else:
         image = bpy.data.images.load(str(path), check_existing=True)
+    if kind == 'png16':   # sRGB texels decoded to linear when written (blender_export._save): filtered as data
+        colourspace = 'Non-Color'
     image.colorspace_settings.name = colourspace
     image.alpha_mode = 'CHANNEL_PACKED'
     return image

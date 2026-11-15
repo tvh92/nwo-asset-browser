@@ -599,13 +599,14 @@ Each unit texture is written as stored. Missing channels follow D3D: green and b
 
 | Texture | Written as |
 | --- | --- |
-| 8-bit | RGBA PNG |
+| 8-bit, `Non-Color` | RGBA PNG |
+| 8-bit, sRGB | 16-bit RGBA PNG of the decoded linear values, loaded as `Non-Color` (alpha as stored). The GPU decodes each texel before it filters; Cycles filters an sRGB image, 8 or 16 bit, and decodes afterwards, which darkens lookups between contrasting texels (0.216 instead of 0.401 between 0.1 and 0.9). Stored values are within 7.6 × 10⁻⁶ of the decode, and every byte value stays distinct |
 | Float | Raw float32 RGBA (`.f32`), loaded into a packed float image |
 | Array, slice chosen at run time | Every slice; the material picks one by `round(slice)`, clamped |
 | Cube map | One equirectangular image, 4 × face size by 2 × face size, read by an Environment Texture node with the game direction as its Vector (Blender's `u = 0.5 − atan2(y, x) / 2π`, `v = 0.5 + atan2(z, hypot(x, y)) / π`). Each pixel holds the D3D cube lookup of its direction (major axis picks the face, `s = (sc / \|ma\| + 1) / 2`, bilinear within the face); sRGB colour is filtered in linear light. A cube whose alpha is not 1 gets a second image of its alpha. Filtering differs at face seams and poles (labelled) |
 | 3D (flipbook volumes) | One atlas of every slice, each tile with a one-texel border copied from its opposite edge; the material samples the two slices around `depth × z − 0.5` bilinearly and mixes them, wrapping in depth (trilinear, as D3D filters) |
 
-The colourspace follows the DXGI format: sRGB formats are `sRGB`, everything else `Non-Color`. Some material and graph strings double their path separators; they are normalised.
+The colourspace follows the DXGI format: sRGB formats are `sRGB` (decoded when written, as above), everything else `Non-Color`. Some material and graph strings double their path separators; they are normalised.
 
 ### In Blender
 
@@ -646,9 +647,9 @@ B is the background tint of a program that passes the scene behind it through ([
 Export check: each export builds the `.blend` as a candidate, reopens it in a second Blender (`blender_convert.py --validate`), then moves it into place.
 
 `python -m rc2016.games.rcra.blender_check --game <install> --blender <blender.exe> --output-root <folder> <material> ...` bakes every surface output of the emitted node tree in Cycles. It compares the bake, texel by texel, with the recipe evaluated by the translator on the same textures:
-- **Window:** a UV window small enough that the bake's sub-pixel jitter stays below a texel.
+- **Window:** a UV window small enough that the bake's sub-pixel jitter stays below a 32nd of a texel, so a material can tile its UV up to 8 times. With the old quarter-texel window, a triplanar rock that tiles ×2 differed by 0.11 at sharp texels.
 - **Undefined pixels:** a pixel whose recipe samples a texture at a non-finite coordinate is left out and counted as `undefined`. This happens when a neutral profile value ends up as a divisor, such as a custom object value of 0 dividing a distortion offset in the waterspray material. Neither renderer defines that lookup.
-- **Results:** on one material from each of the ten most-used graphs, F0 and alpha are exact. Albedo and the normal agree within 2 × 10⁻³, and gloss, occlusion and emission within 8-bit rounding ties.
+- **Results:** on one material from each of the ten most-used graphs, F0 and alpha are exact. Albedo agrees within 1.1 × 10⁻⁶ and the normal within 3 × 10⁻⁵, and gloss, occlusion and emission within 8-bit rounding ties. The snow writer, a triplanar rock and a layered robot material agree within 3 × 10⁻⁵ too. Before the sRGB units were stored linear, they differed by up to 0.11, all from filtering between contrasting sRGB texels.
 - **Forward:** a blended material's forward colour, alpha and background tint are baked too, with the view held at fixed values (`FORWARD_VIEW`). On the trooper dome and the wine glass, colour agrees within 2 × 10⁻⁶ and alpha within 6 × 10⁻⁸; a 128-slice noise volume within 5 × 10⁻⁶. A cube map is compared with the exact D3D lookup of its stored faces, so the difference includes the equirectangular resampling: on a laser-tube material the colour (values near 31) differs by at most 0.1, and on a synthetic cube with six different faces 93 % of the baked pixels agree within 0.02 and the rest sit on face seams. The 64-step convergence-tear portal march and the rain torso glass bake exactly.
 
 ### In the viewer

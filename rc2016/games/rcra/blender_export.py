@@ -222,6 +222,21 @@ def write_cube_texture(source, path, folder, index=0, cache=None):
     return row
 
 
+def png16(rgba):
+    """A 16-bit RGBA PNG of ``rgba`` (h, w, 4) uint16, rows top first."""
+    import struct
+    import zlib
+    h, w = rgba.shape[:2]
+    rows = np.empty((h, 1 + w * 8), np.uint8)
+    rows[:, 0] = 0
+    rows[:, 1:] = np.ascontiguousarray(rgba, '>u2').view(np.uint8).reshape(h, w * 8)
+
+    def chunk(tag, payload):
+        return struct.pack('>I', len(payload)) + tag + payload + struct.pack('>I', zlib.crc32(tag + payload) & 0xFFFFFFFF)
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 16, 6, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(rows.tobytes(), 6)) + chunk(b'IEND', b''))
+
+
 def _save(data, texture, stem, folder, path, colourspace=None):
     folder.mkdir(parents=True, exist_ok=True)
     colourspace = colourspace or ('sRGB' if texture['format'] in SRGB_FORMATS else 'Non-Color')
@@ -229,6 +244,15 @@ def _save(data, texture, stem, folder, path, colourspace=None):
         target = folder / (stem + '.f32')
         target.write_bytes(np.ascontiguousarray(data, '<f4').tobytes())
         kind = 'float'
+    elif colourspace == 'sRGB':
+        # The GPU decodes each sRGB texel before it filters; Cycles filters an sRGB image (8 or 16 bit) and decodes after.
+        # So the texels are decoded here and stored as 16-bit linear values ('png16', loaded as Non-Color): within 7.6e-6
+        # of the decode, every byte value distinct. Alpha is stored as it is.
+        texels = np.round(data * 255.0) / 255.0
+        texels[..., :3] = _srgb_to_linear(texels[..., :3])
+        target = folder / (stem + '.png')
+        target.write_bytes(png16(np.round(texels * 65535.0).astype(np.uint16)))
+        kind = 'png16'
     else:
         from PIL import Image
         target = folder / (stem + '.png')

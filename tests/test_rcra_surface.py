@@ -152,6 +152,27 @@ class VolumeTests(unittest.TestCase):
         self.assertEqual(sorted(set(want['albedo'][:, 0])), [0.0, 1.0])
         np.testing.assert_array_equal(got['albedo'][:, :3], want['albedo'])
 
+    @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
+    def test_blender_srgb_units_filter_in_linear(self):
+        """Between contrasting sRGB texels the GPU filters decoded values; the written unit makes Cycles do the same."""
+        tex = np.array([[[0.1, 0.1, 0.1, 1], [0.9, 0.9, 0.9, 1]], [[0.9, 0.9, 0.9, 1], [0.1, 0.1, 0.1, 1]]], np.float32)
+        nodes = [dict(op='const', type='f', value=0.0, args=[]), dict(op='const', type='f', value=1.0, args=[]),
+                 dict(op='const', type='b', value=False, args=[]),
+                 dict(op='sample', type='v', args=[0, 0, 0, 0], binding='textureUnit5', opcode='sample', dimension=3,
+                      sampler=None, offsets=[], controls=None)]   # 3: the wrap corner, all four texels at 1/4
+        nodes.append(dict(op='channel', type='f', args=[3], index=0))   # 4
+        terms = {'albedo.r': 4, 'albedo.g': 4, 'albedo.b': 4, 'f0.r': 0, 'f0.g': 0, 'f0.b': 0, 'gloss': 0, 'normal.x': 0,
+                 'normal.y': 1, 'normal.z': 0, 'occlusion': 1, 'emission': 0, 'clip': 2}
+        with tempfile.TemporaryDirectory() as tmp:
+            row = blender_export._save(tex, dict(format=29), 'flat', Path(tmp) / 'units', 'synthetic')
+            entry = dict(recipe=dict(version=1, nodes=nodes, terms=terms, textures={}, inputs=[], limitations=[]),
+                         images={'textureUnit5': row})
+            want = blender_check.expected(entry, 5)
+            got = blender_check.bake(entry, BLENDER, 5, tmp)
+        decoded = blender_export._srgb_to_linear(np.round(np.array([0.1, 0.9]) * 255) / 255)
+        self.assertAlmostEqual(float(want['albedo'][0, 0]), float(decoded.mean()), places=5)
+        np.testing.assert_allclose(got['albedo'][:, :3], want['albedo'], atol=1e-6)
+
     def test_non_finite_sample_coordinates_are_undefined(self):
         """A coordinate divided by a neutral 0 (here u * inf) samples nowhere: the pixel is left out, not a crash."""
         nodes = [dict(op='input', type='f', name='TEXCOORD.x', args=[]), dict(op='input', type='f', name='TEXCOORD.y', args=[]),
