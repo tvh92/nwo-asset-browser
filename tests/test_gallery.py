@@ -58,6 +58,9 @@ class ChunkBangleFilterTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(g.is_chunk_or_bangle(Rec('x', path)))
 
+    def test_chunks_in_file_name_match(self):
+        self.assertTrue(g.is_chunk_or_bangle(Rec('x', 'enm/enm_sandshark_spawner_chunks_art.model')))
+
     def test_other_folders_do_not_match(self):
         for path in ('character/enemy/enm_warbot_v4/enm_warbot_v4.model',
                      'character/enemy/enm_chomper/enm_chomper_chunk_death.model',

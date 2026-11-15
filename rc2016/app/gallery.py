@@ -140,14 +140,20 @@ def display_name(record):
 CHUNK_BANGLE_FOLDER = re.compile(r'(?:^|_)(?:chunks?|bangles?)(?:_set)?(?:_?\d+)?$')
 
 
+# Rift Apart models are named by file (``enm_sandshark_spawner_chunks_art``), not kept in a chunk folder.
+CHUNK_BANGLE_STEM = re.compile(r'(?:^|_)chunks(?:_|\d|$)')
+
+
 def is_chunk_or_bangle(record):
     """Whether a model is inside an archive folder reserved for a chunk or bangle.
 
     Matches ``chunk``, ``bangle_set`` and the per-enemy ``<name>_chunk_set``, ``<name>_chunks_set`` and
     ``<name>_bangle_set`` folders, with an optional numbered suffix (``<name>_chunks_set_01``, ``<name>_chunk08``)."""
     path = getattr(record, 'archive_path', '') or getattr(record, 'relative_model', '')
-    folders = str(path).replace('\\', '/').casefold().split('/')[:-1]
-    return any(CHUNK_BANGLE_FOLDER.search(folder) for folder in folders)
+    parts = str(path).replace('\\', '/').casefold().split('/')
+    if any(CHUNK_BANGLE_FOLDER.search(folder) for folder in parts[:-1]):
+        return True
+    return bool(CHUNK_BANGLE_STEM.search(Path(parts[-1]).stem))
 
 
 def choose_records(selected, filtered, shown_ids, cap=FILTER_CAP):
@@ -260,8 +266,6 @@ class Gallery:
         bar.columnconfigure(0, weight=1)
         self.info_var = tk.StringVar(value='')
         ttk.Label(bar, textvariable=self.info_var, wraplength=520).grid(row=0, column=0, sticky='ew')
-        self.render_all_button = ttk.Button(bar, text='Render all thumbnails', command=self.render_all)
-        self.render_all_button.grid(row=0, column=1, padx=(6, 2))
         self.hide_chunks_button = ttk.Button(bar, text='Hide chunks/bangles', command=self.toggle_chunks_bangles)
         self.hide_chunks_button.grid(row=0, column=2, padx=(2, 2))
         self.cancel_button = ttk.Button(bar, text='Cancel', command=self.cancel_render, state='disabled')
@@ -441,12 +445,10 @@ class Gallery:
             self.canvas.grid_remove()
             self.scrollbar.grid_remove()
             self.message.grid(row=1, column=0, columnspan=2, sticky='nsew')
-            self.render_all_button.configure(state='disabled')
         else:
             self.message.grid_remove()
             self.canvas.grid()
             self.scrollbar.grid()
-            self.render_all_button.configure(state='normal')
 
     # Layout and drawing ----------------------------------------------------
     def _relayout(self):
@@ -824,16 +826,6 @@ class Gallery:
         self.cancel_button.configure(state='normal' if all_models else 'disabled')
         self.total_done_logged = 0
         self._poll()
-
-    def render_all(self):
-        if not self.cache_root or not self._source():
-            return
-        self.stop_renderer()
-        self.blocked = ''
-        first, last = self._visible
-        ordered = render_queue(self.records, self._is_ready, first, last)
-        self.app._append_log('Rendering thumbnails for every archive model…', 'muted')
-        self._start(ordered, all_models=True)
 
     def cancel_render(self):
         if self.proc is not None:
