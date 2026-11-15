@@ -14,6 +14,10 @@ RGBA (``gl_float``) with the stored values, missing channels following D3D (blen
 """
 from __future__ import annotations
 
+import hashlib
+import math
+from collections import OrderedDict
+
 import numpy as np
 
 from rc2016.games.rcra import blender_export as bexp, surface as rsurface
@@ -40,10 +44,65 @@ def _graph(source, material_key):
     return source.asset_data(graph_key)
 
 
+def _code_sha256():
+    """The sources a translated receipt depends on: the Rift Apart reader and translation, the SM5 translator and the viewer
+    emitter. Any change to them invalidates every cached translation."""
+    from pathlib import Path
+    package = Path(__file__).resolve().parents[2]
+    files = sorted((package / 'games' / 'rcra').glob('*.py')) + [package / 'shaders' / 'sm5.py', package / 'shaders' / 'dxbc.py',
+                                                                 package / 'viewer' / 'rcra_glsl.py']
+    try:
+        return hashlib.sha256(b''.join(f.name.encode() + f.read_bytes() for f in files)).hexdigest()
+    except OSError:   # frozen executable without sources: no disk cache
+        return None
+
+
+CODE_SHA256 = _code_sha256()
+
+
 def translate(source, material_key):
-    """(surface recipe or None, forward recipe or None, blend, limitations, textures {binding: path})."""
-    from rc2016.games.rcra.material import material_blend
+    """(surface recipe or None, forward recipe or None, blend, limitations, textures {binding: path}), kept across sessions in
+    the source's translation disk cache (keyed by the material and graph bytes and CODE_SHA256) when it has one."""
     graph, data = _graph(source, material_key), source.asset_data(material_key)
+    disk = getattr(source, 'translation_disk_cache', None)
+    key = disk.key(bytes(data), [bytes(graph)], 'rcra-viewer:%s' % CODE_SHA256) if disk is not None and CODE_SHA256 else None
+    stored = _floats(disk.get(key), decode=True) if key else None
+    if stored is not None:
+        if 'error' in stored:
+            raise NotTranslated(stored['error'])
+        return stored['surface'], stored['forward'], stored['blend'], stored['limitations'], stored['textures']
+    try:
+        out = _translate(graph, data)
+    except NotTranslated as error:
+        if key:
+            disk.put(key, dict(error=str(error)))
+        raise
+    if key:
+        disk.put(key, _floats(dict(zip(('surface', 'forward', 'blend', 'limitations', 'textures'), out))))
+    return out
+
+
+NON_FINITE = '__nonfinite__'
+
+
+def _floats(value, decode=False):
+    """``value`` with each inf or NaN float as {NON_FINITE: 'inf' | '-inf' | 'nan'} (recipes keep D3D's inf and NaN
+    constants; the cache stores strict JSON), or back with ``decode``."""
+    if not decode and isinstance(value, float) and not math.isfinite(value):
+        return {NON_FINITE: repr(value)}
+    if isinstance(value, dict):
+        if decode and len(value) == 1 and NON_FINITE in value:
+            return float(value[NON_FINITE])
+        return {k: _floats(v, decode) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_floats(v, decode) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_floats(v, decode) for v in value)
+    return value
+
+
+def _translate(graph, data):
+    from rc2016.games.rcra.material import material_blend
     blend = material_blend(data)
     results, errors = {}, {}
     for name, fn in (('forward', rsurface.forward), ('surface', rsurface.surface)) if blend != 'opaque' else \
@@ -109,16 +168,58 @@ def _float(data, path, **extra):
                 gl_float=True, pixels=np.ascontiguousarray(data, '<f4').tobytes(), srgb=False, **extra)
 
 
-def _atlas(texture, path):
+ATLAS_CACHE_BYTES = 256 << 20   # atlases kept per source: materials share their texture arrays
+
+
+def _atlas(texture, path, source=None):
+    """_build_atlas, memoised on ``source`` (least recently used out past ATLAS_CACHE_BYTES)."""
+    if source is None:
+        return _build_atlas(texture, path)
+    memo = source.__dict__.setdefault('_rcra_viewer_atlases', OrderedDict())
+    key = (path, texture['width'], texture['height'], texture['format'], len(texture.get('slices', [texture['pixels']])))
+    if key in memo:
+        memo.move_to_end(key)
+        return memo[key]
+    memo[key] = _build_atlas(texture, path)
+    total = sum(len(out['pixels']) for out, _grid in memo.values())
+    while len(memo) > 1 and total > ATLAS_CACHE_BYTES:
+        _key, (out, _grid) = memo.popitem(last=False)
+        total -= len(out['pixels'])
+    return memo[key]
+
+
+def _texel_bytes(texture, index):
+    """Uint8 (height, width, 4) of an 8-bit slice: bexp.texel_array's values times 255, read without the float round trip
+    (missing channels 0, alpha 255; luminance + alpha as red + alpha; no blue for R8G8 and BC5)."""
+    from rc2016.viewer.textures import to_image
+    width, height, fmt = texture['width'], texture['height'], texture['format']
+    image = to_image(texture, index)
+    channels = {'L': 1, 'LA': 2, 'RGB': 3, 'RGBA': 4}.get(image.mode)
+    if channels is None:
+        image, channels = image.convert('RGBA'), 4
+    data = np.asarray(image, dtype=np.uint8).reshape(height, width, channels)
+    out = np.zeros((height, width, 4), np.uint8)
+    out[..., 3] = 255
+    if image.mode == 'LA':
+        out[..., 0], out[..., 3] = data[..., 0], data[..., 1]
+        return out
+    out[..., :channels] = data[..., :4]
+    if fmt == 49 or (channels == 3 and fmt in (83, 84)):
+        out[..., 2] = 0
+    return out
+
+
+def _build_atlas(texture, path):
     """A padded atlas texture dict of every slice of ``texture`` (RGBA8, or float for float formats), and its grid."""
     count = len(texture.get('slices', [texture['pixels']]))
     columns = max(1, int(np.ceil(np.sqrt(count))))
-    atlas = bexp.volume_atlas([bexp.texel_array(texture, k) for k in range(count)], columns)
     if texture['format'] in bexp.FLOAT_FORMATS:
+        atlas = bexp.volume_atlas([bexp.texel_array(texture, k) for k in range(count)], columns)
         out = _float(atlas, path + '#atlas', no_mipmaps=True)
     else:
         srgb = bool(texture.get('srgb'))
-        pixels = np.round(np.clip(atlas, 0.0, 1.0) * 255.0).astype(np.uint8).tobytes()
+        atlas = bexp.volume_atlas([_texel_bytes(texture, k) for k in range(count)], columns)
+        pixels = atlas.tobytes()
         out = dict(path=path + '#atlas', width=int(atlas.shape[1]), height=int(atlas.shape[0]),
                    format=RGBA8_SRGB if srgb else RGBA8, gl_format=None, gl_pixel_format=GL_RGBA, pixels=pixels, srgb=srgb,
                    no_mipmaps=True)
@@ -164,7 +265,7 @@ def material_receipt(source, material_key, hd=False):
             if CUBE_LIMITATION not in limitations:
                 limitations.append(CUBE_LIMITATION)
         elif index in (bexp.ALL_SLICES, bexp.VOLUME):
-            textures[binding], grid = _atlas(texture, path)
+            textures[binding], grid = _atlas(texture, path, source)
             layouts[binding] = dict(grid, kind='volume' if index == bexp.VOLUME else 'array')
         else:
             textures[binding] = _slice(texture, path, index)

@@ -439,7 +439,10 @@ def run(args) -> int:
     loader = SourcePreviewLoader()
     archive = loader._ensure_archive(args.source)
     archive.verify_repeats = False   # hash the first copy only; repeats are identical in a consistent install
-    models = [(entry['path'], model_id) for model_id, entry in archive.entries.items() if entry['type'] == 'model']
+    if hasattr(archive, 'ids_of_type'):   # a typed index (Rift Apart): no entry dict for every asset of the install
+        models = [(archive.entries[key]['path'], key) for key in archive.ids_of_type('model')]
+    else:
+        models = [(entry['path'], model_id) for model_id, entry in archive.entries.items() if entry['type'] == 'model']
     ids = select_ids(args, models)
     total = len(ids)
     root = tk.Tk()

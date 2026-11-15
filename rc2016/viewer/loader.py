@@ -287,6 +287,8 @@ class SourcePreviewLoader:
         """Every Scaleform/Flash UI file in the archive, sorted by path."""
         with self.lock:
             archive=self._ensure_archive(source_root)
+        if hasattr(archive,'ids_of_type'):   # a typed index (Rift Apart): no entry dict for every asset of the install
+            return sorted({archive.entries[k]['path'] for kind in ('gfx','swf') for k in archive.ids_of_type(kind)})
         return sorted({e['path'] for e in archive.entries.values() if e['type'] in ('gfx','swf')})
 
     def _gfx_bytes(self, path):

@@ -43,6 +43,29 @@ class TexelTests(unittest.TestCase):
         floats = dict(format=16, width=1, height=1, pixels=np.array([0.25, -0.5], '<f4').tobytes())
         np.testing.assert_allclose(blender_export.texel_array(floats)[0, 0], [0.25, -0.5, 0, 1])
 
+    def test_byte_atlas_is_the_float_atlas_rounded(self):
+        """The viewer's 8-bit atlas, built in bytes, equals the float path it replaced (texel_array x 255, rounded)."""
+        from rc2016.games.rcra import viewer_materials
+        rng = np.random.default_rng(1)
+        for fmt, size in ((49, 2), (28, 4)):   # R8G8 (no blue stored) and R8G8B8A8
+            slices = [rng.integers(0, 256, 3 * 2 * size, dtype=np.uint8).tobytes() for _ in range(3)]
+            texture = dict(format=fmt, width=3, height=2, pixels=slices[0], slices=slices)
+            out, grid = viewer_materials._build_atlas(texture, 't/a')
+            float_atlas = blender_export.volume_atlas([blender_export.texel_array(texture, k) for k in range(3)], grid['columns'])
+            self.assertEqual(out['pixels'], np.round(np.clip(float_atlas, 0, 1) * 255).astype(np.uint8).tobytes())
+            self.assertEqual((out['width'], out['height']), (float_atlas.shape[1], float_atlas.shape[0]))
+
+    def test_cached_translation_keeps_infinite_and_nan_constants(self):
+        from rc2016.games.rcra import viewer_materials
+        value = dict(nodes=[dict(op='const', value=float('inf')), dict(op='const', value=float('-inf')),
+                            dict(op='const', value=float('nan')), dict(op='const', value=0.5)], t=('a', 1.0))
+        stored = viewer_materials._floats(value)
+        import json
+        back = viewer_materials._floats(json.loads(json.dumps(stored, allow_nan=False)), decode=True)
+        self.assertEqual([n['value'] for n in back['nodes']][:2], [float('inf'), float('-inf')])
+        self.assertTrue(math.isnan(back['nodes'][2]['value']))
+        self.assertEqual(back['nodes'][3]['value'], 0.5)
+
     def test_slices(self):
         nodes = [dict(op='const', type='f', value=1.0), dict(op='input', type='f', name='TEXCOORD.x'),
                  dict(op='sample', binding='textureUnit5', args=[1, 1, 0]), dict(op='sample', binding='textureUnit6', args=[1, 1, 1])]

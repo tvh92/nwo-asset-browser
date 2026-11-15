@@ -107,10 +107,11 @@ def write_unit_texture(source, path, folder, index=0, cache=None):
 
 
 def volume_atlas(slices, columns):
-    """(rows, cols, 4) atlas of equal (h, w, 4) slices, each tile (h + 2, w + 2) with a wrapped one-texel border."""
+    """(rows, cols, 4) atlas of equal (h, w, 4) slices (in their dtype), each tile (h + 2, w + 2) with a wrapped one-texel
+    border."""
     h, w = slices[0].shape[:2]
     rows = -(-len(slices) // columns)
-    atlas = np.zeros((rows * (h + 2), columns * (w + 2), 4), np.float32)
+    atlas = np.zeros((rows * (h + 2), columns * (w + 2), 4), slices[0].dtype)
     for k, data in enumerate(slices):
         r, c = divmod(k, columns)
         atlas[r * (h + 2):(r + 1) * (h + 2), c * (w + 2):(c + 1) * (w + 2)] = np.pad(data, ((1, 1), (1, 1), (0, 0)), 'wrap')
