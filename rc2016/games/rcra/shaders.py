@@ -58,12 +58,16 @@ NEUTRAL_RECORDS = {'g_MaterialView': {'m_LodDist': 0.0}, 'g_ModelSubsetView': {'
 #   it (lighting class, per-object state) is 0.
 # - Engine textures and buffers: the stored view depth at the far clip (no soft depth fade). The lighting inputs (light
 #   grid and lists, shadow atlas, gobos, probes, SSR, AO, the BRDF lookup) read 0, as the light sources they belong to are
-#   zero. Programs that read scene colour, the G-buffer or per-object buffers stay unsupported.
+#   zero. G-buffer writers that read them (soft-faded effects, a default probe in the emission) get the same values. Programs that read scene colour, the G-buffer or per-object buffers stay unsupported.
 FORWARD_FAR_CLIP = 1000.0
 FORWARD_LIGHTING = ('g_LightGridLookup', 'g_LightLookupView', 'g_LightZBinView', 'g_LightGridData', 'g_LightVolumes',
                     'g_Lights', 'g_ShadowAtlas', 'g_GoboAtlas', 'g_EnvProbeEnvs', 'g_EnvProbeArray', 'g_EnvProbeDefault',
                     'g_SSRFinalTex', 'g_AoSsrBuffer', 'g_BrdfLookup', 'g_RayTracedShadows')
 FORWARD_RESOURCES = dict({name: 0.0 for name in FORWARD_LIGHTING}, g_ViewDepthBuffer=FORWARD_FAR_CLIP)
+# - The scene's G-buffer (screen effects, eye normal smoothing, decals read it around the pixel): cleared, every word 0,
+#   as the empty scene the far-clip depth stands for; its size is the review viewport's (resinfo). Not decoded.
+SCENE_GBUFFER = {'g_GBufNormalSpec': 0}
+SCENE_SIZE = (1920, 1080, 1, 1)
 # - View: the programs rebuild the view-space position from SV_POSITION (screen xy, view depth w) and turn it into world
 #   space with m_ViewToWorldMat. With these values the view-space position is SV_POSITION.(x, y, w) and view space has the
 #   world's axes, so a renderer supplies SV_POSITION.xyw as the world offset from the camera to the point (input

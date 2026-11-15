@@ -86,9 +86,13 @@ class _Bindings(rshaders.NeutralEngine):
             if layout is not None and layout.variables and layout.variables[0].members:
                 self.records[buffer] = {at: members[name] for name, at, _m in layout.variables[0].members if name in members}
         self.record_read = False
+        self.engine_read = set()
 
     def texture_size(self, binding):
         """The bound material texture's size (``texture_sizes(path)``), for the programs that query it (resinfo)."""
+        if binding in rshaders.SCENE_GBUFFER:
+            self.engine_read.add(binding)
+            return rshaders.SCENE_SIZE
         if binding not in self.units or self.texture_sizes is None:
             return None
         try:
@@ -102,6 +106,14 @@ class _Bindings(rshaders.NeutralEngine):
     def resource(self, graph, op, binding, args):
         if binding == rshaders.VOLUME_FLAGS and op == 'ld':
             return [graph.const('i', 0)] * 4
+        if binding in rshaders.SCENE_GBUFFER and op == 'ld':
+            self.engine_read.add(binding)
+            return [graph.const('i', rshaders.SCENE_GBUFFER[binding])] * 4
+        if binding in rshaders.FORWARD_RESOURCES:   # an integer read (ld_structured) takes the same value's bits
+            self.engine_read.add(binding)
+            value = rshaders.FORWARD_RESOURCES[binding]
+            kind = 'f' if op.startswith('sample') or binding == 'g_ViewDepthBuffer' else 'i'
+            return [graph.const(kind, value if kind == 'f' else int(value))] * 4
         if binding in self.records and op == 'ld_structured':
             offset = graph.value(args[4]) if len(args) > 4 else None
             if offset is None or offset not in self.records[binding]:
@@ -146,6 +158,9 @@ SIZE_NOTE = ('Texture sizes the program queries (%s) are those of the full-resol
              'array sizes and depths do not depend on streaming.')
 OBJECT_NOTE = (' Per-object values are a plain object: identity transform, alpha 1, white object colour, custom values, '
                'creation time and bias 0.')
+ENGINE_NOTE = (' Engine textures read at the profile values: %s (stored scene depth at the far clip, so no soft depth fade; '
+               'the scene G-buffer cleared to 0 at the review viewport size; light sources and probes 0).')
+SCENE_GBUFFER_NOTE = ' The scene G-buffer reads 0 (cleared: the empty scene of the far-clip depth), at the review viewport size.'
 RECORD_NOTE = ' No material LOD distance is set (material and subset records): full detail.'
 FORWARD_FLAGS_NAME = 'MatDrawCB.m_RenderFlags'
 
@@ -179,10 +194,6 @@ class _ForwardBindings(_Bindings):
         if binding == BACKGROUND_BUFFER and op.startswith('sample'):   # the scene behind: symbolic, split out afterwards
             self.background_read = True
             return [graph.input('BACKGROUND.' + c, 'f') for c in 'rgba']
-        if binding in rshaders.FORWARD_RESOURCES:   # an integer read (ld_structured) takes the same value's bits
-            value = rshaders.FORWARD_RESOURCES[binding]
-            kind = 'f' if op.startswith('sample') or binding == 'g_ViewDepthBuffer' else 'i'
-            return [graph.const(kind, value if kind == 'f' else int(value))] * 4
         return super().resource(graph, op, binding, args)
 
 
@@ -320,7 +331,8 @@ class _Unpack:
         return self.g.const('b', False)
 
     def emission(self, i):
-        """E of mul(log2(add(min(E, 31), 1)), 0.2), pushing through selects; None when not that form."""
+        """E of mul(log2(add(min(E, 31), 1)), 0.2), or the decoded clamp(Y, 1, 32) - 1 of another mul(log2(Y), 0.2), pushing
+        through selects; None when not that form."""
         g = self.g
         n = self.node(i)
         if n['op'] == 'select':
@@ -337,12 +349,15 @@ class _Unpack:
         if lg['op'] != 'log2':
             return None
         ad = self.node(lg['args'][0])
-        if ad['op'] != 'add' or self.value(ad['args'][1]) != 1.0:
-            return None
-        mn = self.node(ad['args'][0])
-        if mn['op'] != 'min' or self.value(mn['args'][1]) != 31.0:
-            return None
-        return mn['args'][0]
+        if ad['op'] == 'add' and self.value(ad['args'][1]) == 1.0:
+            mn = self.node(ad['args'][0])
+            if mn['op'] == 'min' and self.value(mn['args'][1]) == 31.0:
+                return mn['args'][0]
+        # The compiler folds the encoding (min(E, 31) dropped when E is bounded, the 1 merged into other constants): the
+        # deferred apply decodes 2^(5a) - 1 of the target's [0, 1] alpha, which is clamp(Y, 1, 32) - 1 of a = 0.2 log2 Y.
+        g = self.g
+        y = g.op('min', g.op('max', lg['args'][0], g.const('f', 1.0)), g.const('f', 32.0))
+        return g.op('add', y, g.const('f', -1.0))
 
 
 def _rounded(g, x):
@@ -425,7 +440,8 @@ def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes
         terms[name] = g.op('mul', stored, stored)
     terms['gloss'] = _rounded(g, g.op('sat', gloss))
     limitations = ['Per-draw values are the neutral draw: no dissolve, opaque, no render flags (lighting class 0), '
-                   'no flag volumes, shader time 0.' + OBJECT_NOTE * bindings.object_read + RECORD_NOTE * bindings.record_read, 'The 12-bit normal and the 8-bit albedo, occlusion and emission are used before the '
+                   'no flag volumes, shader time 0.' + OBJECT_NOTE * bindings.object_read + RECORD_NOTE * bindings.record_read
+                   + (ENGINE_NOTE % ', '.join(sorted(bindings.engine_read)) if bindings.engine_read else ''), 'The 12-bit normal and the 8-bit albedo, occlusion and emission are used before the '
                    "G-buffer's rounding; F0 and gloss keep it."]
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Surface')
 
@@ -508,8 +524,14 @@ def _enumerate_cases(g, terms):
             replace[i] = build(0, {})
         except (ValueError, OverflowError, ZeroDivisionError):
             continue
+    return _substitute(g, terms, replace)
+
+
+def _substitute(g, terms, replace):
+    """``terms`` with the nodes in ``replace`` ({node: new node}) swapped in; consumers are rebuilt with their op and meta."""
     if not replace:
         return terms
+    roots = list(terms.values())
     order, seen = [], set()
     for r in roots:   # post-order without recursion: unrolled loops leave deep chains
         stack = [(r, False)]
@@ -537,16 +559,200 @@ def _enumerate_cases(g, terms):
     return {name: new[i] for name, i in terms.items()}
 
 
+INT_FLOAT_LIMIT = 2.0 ** 24
+INT_FLOAT_ROUNDS = 12   # each round rewrites one level of nesting (a case index tested inside another case's test)
+INT_FLOAT_NOTE = ('Integer arithmetic on values derived from floats (cell indices, hashes) is carried in float: exact while '
+                  'every intermediate value stays within +-2^24, as texture coordinates and positions do.')
+PACKED_NOTE = ('Bit fields the program packs into a word and reads back are each taken as their own value: exact while '
+               'every field fits below the next field of the word, as the packing scales are set for.')
+
+
+def _integers_in_float(g, terms):
+    """``terms`` with each topmost non-portable integer expression of float values, constants and conditions rewritten as
+    float arithmetic on the same integers (exact below INT_FLOAT_LIMIT in magnitude); (terms, rewritten, packed), packed
+    when a field of a word the program packed itself was read back (PACKED_NOTE)."""
+    memo, folded = {}, {}
+    packed = [False]
+
+    def mod(a, n):   # floored modulo by a power of two, as two's-complement masking gives
+        q = g.op('round_ni', g.op('mul', a, g.const('f', 1.0 / n)))
+        return g.op('add', a, g.op('mul', q, g.const('f', -float(n))))
+
+    def power(v):
+        return v is not None and v > 0 and v & (v - 1) == 0
+
+    def fold(i, fn):   # fn over each case of a select tree of integer constants, as a float select tree; else None
+        key = (i, fn)
+        if key not in folded:
+            n = g.nodes[i]
+            out = None
+            if n['op'] == 'const' and n['type'] == 'i':
+                out = g.const('f', float(fn(n['value'] & 0xFFFFFFFF)))
+            elif n['op'] == 'select' and n['type'] == 'i':
+                a, b = fold(n['args'][1], fn), fold(n['args'][2], fn)
+                out = None if a is None or b is None else g.select(n['args'][0], a, b)
+            folded[key] = out
+        return folded[key]
+
+    def fields(i, out):   # the parts of an or-tree word: (shift, source, width or None), constant bits apart
+        n = g.nodes[i]
+        k = [g.value(a) for a in n['args']]
+        if n['op'] == 'or':
+            for a in n['args']:
+                fields(a, out)
+        elif n['op'] == 'const' and n['type'] == 'i':
+            out['bits'] |= n['value'] & 0xFFFFFFFF
+        elif n['op'] == 'ishl' and k[1] is not None:
+            out['parts'].append((k[1] & 31, n['args'][0], None))
+        elif n['op'] == 'bfi' and None not in k[:2] and k[3] == 0:
+            out['parts'].append((k[1] & 31, n['args'][2], k[0] & 31))
+        else:
+            out['parts'].append((0, i, None))
+        return out
+
+    def bits(i, offset, width):   # bits [offset, offset + width) of one integer: floor(x / 2^offset) mod 2^width, exact
+        if offset + width > 32 or width > 24:
+            return None
+        a = f(i)
+        if a is None:
+            return None
+        if offset:
+            a = g.op('round_ni', g.op('mul', a, g.const('f', 1.0 / 2 ** offset)))
+        return mod(a, 2 ** width)
+
+    def extract(word, offset, width):   # bits [offset, offset + width) of a word the program packed (or-tree, bfi)
+        n = g.nodes[word]
+        k = [g.value(a) for a in n['args']]
+        if n['op'] == 'bfi' and None not in k[:2]:
+            w, o = k[0] & 31, k[1] & 31
+            if offset + width <= o or offset >= o + w:   # outside the inserted field: the base word's bits
+                return extract(n['args'][3], offset, width)
+            if o <= offset and offset + width <= o + w:
+                return bits(n['args'][2], offset - o, width)
+            return None
+        if n['op'] != 'or':
+            return bits(word, offset, width)
+        parts = fields(word, dict(bits=0, parts=[]))
+        shifts = sorted(s for s, _x, _w in parts['parts'])
+        if len(set(shifts)) != len(shifts):
+            return None
+        at = [p for p in parts['parts'] if p[0] == offset]
+        if any(offset < s < offset + width for s in shifts) or len(at) > 1:
+            return None
+        constant = parts['bits'] >> offset & ((1 << width) - 1)
+        if not at:
+            return g.const('f', float(constant))
+        shift, source, slot = at[0]
+        above = [s for s in shifts if s > offset] + [32]
+        size = min(width, above[0] - offset, slot or 32)
+        if constant & ((1 << size) - 1):
+            return None
+        a = f(source)
+        if a is None:
+            return None
+        packed[0] = True
+        a = mod(a, 2 ** size)
+        return a if not constant else g.op('add', a, g.const('f', float(constant)))
+
+    def f(i):
+        if i in memo:
+            return memo[i]
+        n = g.nodes[i]
+        op, args = n['op'], n['args']
+        k = [g.value(a) for a in args]
+        out = None
+        if op == 'const' and n['type'] == 'i':
+            out = g.const('f', float(sm5._signed(n['value'])))
+        elif op == 'select' and n['type'] == 'i':
+            a, b = f(args[1]), f(args[2])
+            out = None if a is None or b is None else g.select(args[0], a, b)
+        elif op == 'ftoi':
+            out = g.op('round_z', args[0])
+        elif op == 'ftou':
+            out = g.op('round_z', g.op('max', args[0], g.const('f', 0.0)))
+        elif op == 'b2i':
+            out = g.select(args[0], g.const('f', -1.0), g.const('f', 0.0))
+        elif op in ('iadd', 'imul', 'imin', 'imax', 'ineg'):
+            a = [f(x) for x in args]
+            if None not in a:
+                out = g.op({'iadd': 'add', 'imul': 'mul', 'imin': 'min', 'imax': 'max', 'ineg': 'neg'}[op], *a)
+        elif op == 'urem' and k[1]:
+            out = fold(args[0], lambda v, m=k[1]: v % m)
+            if out is None and power(k[1]):
+                a = f(args[0])
+                out = None if a is None else mod(a, k[1])
+        elif op == 'and' and k[1] is not None and power(k[1] + 1):
+            out = extract(args[0], 0, (k[1] + 1).bit_length() - 1)
+            if out is None:
+                a = f(args[0])
+                out = None if a is None else mod(a, k[1] + 1)
+        elif op == 'ubfe' and None not in k[:2]:
+            out = extract(args[2], k[1] & 31, k[0] & 31)
+        elif op == 'ushr' and k[1] is not None:
+            out = extract(args[0], k[1] & 31, 32 - (k[1] & 31))
+        elif op in ('ishl', 'ishr') and k[1] is not None:
+            a = f(args[0])
+            scale = g.const('f', float(2 ** (k[1] & 31)))
+            if a is not None:
+                out = g.op('mul', a, scale) if op == 'ishl' else g.op('round_ni', g.op('div', a, scale))
+        memo[i] = out
+        return out
+
+    def top(i):
+        n = g.nodes[i]
+        op, args = n['op'], n['args']
+        if op in ('itof', 'utof'):
+            return f(args[0])
+        if op in ('ieq', 'ine', 'ilt', 'ige'):
+            a, b = f(args[0]), f(args[1])
+            if a is None or b is None:
+                return None
+            return g.op({'ieq': 'eq', 'ine': 'ne', 'ilt': 'lt', 'ige': 'ge'}[op], a, b)
+        return None
+
+    roots = list(terms.values())
+    reach = g.reachable(roots)
+    replace = {}
+    for i in sorted(reach):
+        if g.nodes[i]['op'] in PORTABLE_OPS:
+            continue
+        try:
+            new = top(i)
+        except RecursionError:
+            new = None
+        if new is not None:
+            replace[i] = new
+    return _substitute(g, terms, replace), bool(replace), packed[0]
+
+
 def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, what):
     """The result dict, after checking that every term is a portable float expression of geometry and material textures."""
     roots = list(terms.values())
     reach = g.reachable(roots)
     bad = sorted({g.nodes[i]['op'] for i in reach} - PORTABLE_OPS)
+    in_float = in_packed = False
     if bad:
         terms = _enumerate_cases(g, terms)
         roots = list(terms.values())
         reach = g.reachable(roots)
         bad = sorted({g.nodes[i]['op'] for i in reach} - PORTABLE_OPS)
+    if bad:
+        candidate, in_float = terms, False
+        for _round in range(INT_FLOAT_ROUNDS):   # replacements may hold other non-portable nodes (a condition, a cast)
+            candidate, changed, packed = _integers_in_float(g, candidate)
+            in_float = in_float or changed
+            in_packed = in_packed or packed
+            if not changed:
+                break
+        if in_float:
+            roots = list(candidate.values())
+            reach = g.reachable(roots)
+            if not {g.nodes[i]['op'] for i in reach} - PORTABLE_OPS:
+                terms, bad = candidate, []
+            else:
+                in_float = in_packed = False
+                roots = list(terms.values())
+                reach = g.reachable(roots)
     if bad:
         raise Unsupported('Non-portable operations remain: ' + ', '.join(bad))
     if g.unknowns(roots):
@@ -574,7 +780,7 @@ def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, wh
             raise Unsupported('%s loads from %s' % (what, n['binding']))
     inputs = sorted({g.nodes[i]['name'] for i in reach if g.nodes[i]['op'] == 'input'})
     engine = sorted(bindings.review)
-    limitations = list(limitations)
+    limitations = list(limitations) + [INT_FLOAT_NOTE] * in_float + [PACKED_NOTE] * in_packed
     if cubes:
         limitations.append(CUBE_NOTE % ', '.join(sorted(cubes)) + (CUBE_LOD_NOTE % ', '.join(sorted(cube_opcodes))
                                                                    if cube_opcodes else ''))
@@ -696,7 +902,8 @@ def forward(graph_data, material_data, texture_sizes=None):
         "Draw: render flags hold only the material's lit bit (%s), no dissolve, no particle values, no flag volumes, "
         'shader time 0; stored scene depth at the far clip (no soft depth fade); view space with the world axes.'
         % ('lit' if flags else 'unlit: lighting term 1') + OBJECT_NOTE * bindings.object_read
-        + RECORD_NOTE * bindings.record_read]
+        + RECORD_NOTE * bindings.record_read
+        + (SCENE_GBUFFER_NOTE if set(rshaders.SCENE_GBUFFER) & bindings.engine_read else '')]
     if bindings.background_read:
         limitations.append('The program samples the scene behind it (%s); the colour is affine in it, so it is split into '
                            'an emission and a background tint, and the sample\'s screen-space offset (distortion, '

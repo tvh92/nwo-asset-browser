@@ -97,6 +97,55 @@ class CaseTests(unittest.TestCase):
         terms = {'colour': g.op('itof', g.op('iadd', n, g.const('i', 1)))}
         self.assertEqual(rsurface._enumerate_cases(g, terms), terms)
 
+    def _in_float(self, g, terms):
+        out = dict(terms)
+        packed = False
+        for _round in range(rsurface.INT_FLOAT_ROUNDS):
+            out, changed, used = rsurface._integers_in_float(g, out)
+            packed = packed or used
+            if not changed:
+                break
+        self.assertFalse({g.nodes[i]['op'] for i in g.reachable(list(out.values()))} - rsurface.PORTABLE_OPS)
+        return out, packed
+
+    def test_remainder_of_constant_cases_folds(self):
+        """urem by a non-power of two of a select tree of constants (a cell index tested against each case) folds exactly."""
+        g = sm5.Graph()
+        x = g.input('TEXCOORD.x')
+        index = g.select(g.op('lt', x, g.const('f', 0.3)), g.const('i', 180),
+                         g.select(g.op('lt', x, g.const('f', 0.6)), g.const('i', 156), g.const('i', 1001)))
+        cell = g.op('urem', index, g.const('i', 12))
+        colour = g.select(g.op('ieq', cell, g.const('i', 0)), g.const('f', 1.0),
+                          g.op('itof', g.op('iadd', cell, g.const('i', 1))))
+        out, packed = self._in_float(g, {'colour': colour})
+        self.assertFalse(packed)
+        for u in (0.1, 0.5, 0.9):
+            self.assertEqual(sm5.evaluate(g, [out['colour']], {'TEXCOORD.x': u})[out['colour']],
+                             sm5.evaluate(g, [colour], {'TEXCOORD.x': u})[colour], u)
+
+    def test_fields_packed_and_read_back_are_their_values(self):
+        """A word packed from quantised floats (shifted fields, a bfi flag) and read back by and, ubfe and ushr."""
+        g = sm5.Graph()
+        x, y, z = g.input('TEXCOORD.x'), g.input('TEXCOORD.y'), g.input('TEXCOORD.z')
+        q = lambda v, s, o: g.op('ftou', g.op('add', g.op('mul', v, g.const('f', s)), g.const('f', o)))  # noqa: E731
+        word = g.op('or', g.op('ishl', q(g.op('sat', z), 127.0, 0.5), g.const('i', 25)),
+                    g.op('or', g.op('bfi', g.const('i', 1), g.const('i', 18),
+                                    g.op('b2i', g.op('lt', x, g.const('f', 0.0))), g.const('i', 0)),
+                         g.op('or', g.op('ishl', q(y, 722.66, 256.0), g.const('i', 9)), q(x, 722.66, 256.0))))
+        low = g.op('utof', g.op('and', word, g.const('i', 511)))
+        mid = g.op('utof', g.op('ubfe', g.const('i', 9), g.const('i', 9), word))
+        top = g.op('utof', g.op('ushr', word, g.const('i', 25)))
+        flag = g.select(g.op('ine', g.op('ubfe', g.const('i', 1), g.const('i', 18), word), g.const('i', 0)),
+                        g.const('f', 1.0), g.const('f', 0.0))
+        terms = {'low': low, 'mid': mid, 'top': top, 'flag': flag}
+        out, packed = self._in_float(g, terms)
+        self.assertTrue(packed)
+        for u, v, w in ((-0.3, 0.2, 0.5), (0.35, -0.35, 1.2), (0.0, 0.1, -0.4)):
+            inputs = {'TEXCOORD.x': u, 'TEXCOORD.y': v, 'TEXCOORD.z': w}
+            got = sm5.evaluate(g, list(out.values()), inputs)
+            want = sm5.evaluate(g, list(terms.values()), inputs)
+            self.assertEqual({k: got[out[k]] for k in out}, {k: want[terms[k]] for k in terms}, (u, v, w))
+
 
 class VolumeTests(unittest.TestCase):
     def test_atlas_tiles_wrap(self):

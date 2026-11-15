@@ -49,6 +49,9 @@ BLEND_LIMITATIONS = {
     'modulate': 'Modulate: the background multiplied by the colour (lerped to white by alpha), the standard factors for that '
                 'mode; the pipeline\'s blend state is not in the files.'}
 MAX_SLICES = 32
+# Recipes above this many operations are not built: a table lookup unrolled into selects (a 512-entry noise permutation
+# table, about 21,000 operations) takes Blender over 15 minutes to build and compile. The largest other recipe is 3,710.
+MAX_RECIPE_NODES = 10000
 ALL_SLICES = 'all'
 VOLUME = 'volume'
 CUBE = 'cube'   # a layout is (CUBE, index of the cube in the array)
@@ -349,6 +352,12 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
     if 'recipe' not in results and 'forward' not in results:
         return dict(error=errors.get('recipe') or errors.get('forward'), graph=graph_path, blend=blend)
     recipes = {name: rsurface.export_recipe(result) for name, result in results.items()}
+    for name in [n for n, r in recipes.items() if len(r['nodes']) > MAX_RECIPE_NODES]:
+        errors[name] = 'Unsupported: %d operations, over the Blender limit of %d' % (len(recipes[name]['nodes']),
+                                                                                     MAX_RECIPE_NODES)
+        del results[name], recipes[name]
+    if not recipes:
+        return dict(error=errors.get('recipe') or errors.get('forward'), graph=graph_path, blend=blend)
     if blend == 'modulate' and 'forward' in recipes and _reads_background(recipes['forward']):
         errors['forward'] = 'Unsupported: a modulate material that passes the scene behind through is not linear in it'
         del results['forward'], recipes['forward']

@@ -53,6 +53,7 @@ RECIPE_PROPERTY = 'rc_rcra_recipe_sha256'
 FORWARD_PREFIX = 'RC RA forward '
 FORWARD_PROPERTY = 'rc_rcra_forward_sha256'
 BLEND_MODES = ('opaque', 'additive', 'blended', 'modulate')
+LEAF_OPS = ('const', 'input', 'channel', 'ddx', 'ddy')   # recipe nodes _Emitter.value builds without its arguments
 MATH = {'add': 'ADD', 'mul': 'MULTIPLY', 'div': 'DIVIDE', 'min': 'MINIMUM', 'max': 'MAXIMUM', 'abs': 'ABSOLUTE',
         'sqrt': 'SQRT', 'rsq': 'INVERSE_SQRT', 'frc': 'FRACT', 'round_ne': 'ROUND', 'round_ni': 'FLOOR',
         'round_pi': 'CEIL', 'round_z': 'TRUNC', 'sin': 'SINE', 'cos': 'COSINE', 'lt': 'LESS_THAN'}
@@ -176,6 +177,24 @@ class _Emitter:
     def value(self, index):
         if index in self.memo:
             return self.memo[index]
+        nodes = self.recipe['nodes']
+        # Operation arguments first, in post-order without recursion: folded case chains run thousands of selects deep.
+        stack, order = [(index, False)], []
+        while stack:
+            i, done = stack.pop()
+            if done:
+                order.append(i)
+            elif i not in self.memo and nodes[i]['op'] not in LEAF_OPS:
+                stack.append((i, True))
+                stack.extend((x, False) for x in nodes[i]['args'])
+        for i in order:
+            if i not in self.memo:
+                self._value(i)
+        return self._value(index)
+
+    def _value(self, index):
+        if index in self.memo:
+            return self.memo[index]
         n = self.recipe['nodes'][index]
         op = n['op']
         if op == 'const':
@@ -187,7 +206,7 @@ class _Emitter:
         elif op in ('ddx', 'ddy'):
             v = 0.0   # derivatives of a constant-rate surface; the game's screen-space derivative is not available
         else:
-            a = [self.value(x) for x in n['args']]
+            a = [self._value(x) for x in n['args']]
             v = self.operation(op, a)
         self.memo[index] = v
         return v
