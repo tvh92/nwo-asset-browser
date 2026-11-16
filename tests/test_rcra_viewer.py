@@ -105,6 +105,15 @@ class EmitterTests(unittest.TestCase):
         self.assertIn('vec3 rcraColour = vec3(rcraInf, rcraNan,', source)
         self.assertNotIn('uRcraZero', rcra_glsl.fragment_source(_receipt('blended'))['source'])
 
+    def test_check_program_writes_each_term_group(self):
+        from rc2016.viewer import rcra_check
+        source, passes = rcra_check.fragment_source(_receipt('blended'), dict.fromkeys(
+            ('VIEW.x', 'VIEW.y', 'VIEW.z', 'CAMERA.x', 'CAMERA.y', 'CAMERA.z'), 0.5))
+        self.assertEqual([g for g, _t in passes], ['albedo', 'f0', 'scalars', 'normal', 'clip', 'forward_colour',
+                                                   'forward_alpha', 'forward_background'])
+        self.assertIn('if (uGroup == 0) { gl_FragColor = vec4(g3, g3, g3, 0.0); return; }', source)
+        self.assertNotIn('rcraDiffuse', source)
+
     def test_array_index_clamps_to_the_slices(self):
         from rc2016.games.rcra import blender_export
         texture = dict(pixels=b'a', slices=[b'a', b'b'])
@@ -383,6 +392,27 @@ class ViewportDrawTests(unittest.TestCase):
             self.assertEqual(receipt['blend'], 'opaque')
             self.assertIn('g_BaseMap', receipt['layouts'])
         self._link('material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material', check)
+
+    def test_viewer_program_matches_its_recipe(self):
+        """rcra_check: jn_glass_01_opaque (parallax loop) and the laser tube (cube map) drawn by the viewer's emitted terms
+        match the recipes evaluated on the uploaded texels."""
+        from rc2016.games.rcra.source import RcraSource
+        from rc2016.viewer import rcra_check
+        with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
+            source = RcraSource(GAME, os.path.join(appdata, 'out'))
+            try:
+                checker = rcra_check.Checker(9)
+            except RuntimeError as error:
+                self.skipTest(str(error))
+            try:
+                for path in ('materials/jn_glass_01/jn_glass_01_opaque.material', CUBE):
+                    report = rcra_check.check(checker, source, path)
+                    self.assertTrue(report)
+                    for group, values in report.items():
+                        self.assertEqual(values.get('over'), 0, (path, group, values))
+            finally:
+                checker.close()
+                source.close()
 
     def test_lit_background_material_links(self):
         def check(_view, receipt, _textures):
