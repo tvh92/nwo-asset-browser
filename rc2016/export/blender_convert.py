@@ -52,9 +52,11 @@ for action in actions:
 
 if args.materials:
     import json
-    from rc2016.export.rcra_blender import apply_recipe
+    from rc2016.export.rcra_blender import TANGENT_FRAME, apply_recipe, store_tangent_frame
     entries = json.loads(Path(args.materials).read_text(encoding='utf-8'))['materials']
     users = {}
+    for mesh in bpy.data.meshes:   # the decoded tangent as coordinates in the UV0 frame, before any material reads it
+        store_tangent_frame(mesh)
     for obj in bpy.data.objects:
         if obj.type == 'MESH':
             for slot in obj.material_slots:
@@ -67,7 +69,7 @@ if args.materials:
         mesh = users.get(name)
         uv_maps = [layer.name for layer in mesh.uv_layers] if mesh is not None else []
         colour = mesh.color_attributes[0].name if mesh is not None and len(mesh.color_attributes) else None
-        apply_recipe(material, entry, uv_maps, colour)
+        apply_recipe(material, entry, uv_maps, colour, tangent=mesh is not None and TANGENT_FRAME in mesh.attributes)
         print('TRANSLATED', name, flush=True)
 
 if args.fbx:

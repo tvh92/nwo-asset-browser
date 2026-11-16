@@ -146,6 +146,42 @@ class EmitterTests(unittest.TestCase):
         self.assertIn('vRcraColour = aRcraColour * aRcraColour;', vertex)   # the engine squares before interpolation
 
 
+    def test_tangent_inputs_read_the_vertex_stream(self):
+        tangent = [dict(op='input', type='f', name='TEXCOORD3.' + c, args=[]) for c in 'xw']
+        recipe = _recipe(dict(SURFACE, **{'normal.x': 7, 'gloss': 8}), extra=tangent)
+        layouts = {'textureUnit5': dict(kind='slice')}
+        receipt = dict(kind='rcra', blend='opaque', surface=recipe, forward=None, layouts=layouts,
+                       translation_sha256=rcra_glsl.receipt_sha256(recipe, None, 'opaque', layouts))
+        source = rcra_glsl.fragment_source(receipt)['source']
+        # The stored TEXCOORD3.w where the mesh has a tangent stream, the UV-derivative side only without one.
+        self.assertIn('float rcraHandedness = dot(vTintWorldTan, vTintWorldTan) > 0.0 ? vTangentSign'
+                      ' : nativeFrameHandedness(rcraTangent);', source)
+        self.assertIn('vec3 rcraTangent = nativeVertexTangent();', source)
+        self.assertEqual([rcra_glsl.GEOMETRY['TEXCOORD3.' + c] for c in 'xyzw'],
+                         ['rcraTangent.x', 'rcraTangent.y', 'rcraTangent.z', 'rcraHandedness'])
+        self.assertNotIn('not decoded', rcra_glsl.LIMITATION)
+
+
+class TangentPayloadTests(unittest.TestCase):
+    """The loader passes the decoded tangent with Rift Apart's whole TEXCOORD3.w; R&C 2016 meshes keep their sign."""
+
+    def test_tangent_w_reaches_the_attribute(self):
+        import numpy as np
+        from rc2016.games.rcra import model as rm
+        from rc2016.viewer.loader import mesh_payload
+        from tests.test_rcra_model import build_model
+        for arrays in (True, False):
+            decoded = rm.decode_model('t', data=build_model(), as_arrays=arrays)
+            mesh = decoded['meshes'][0]
+            tangents = np.asarray(mesh_payload(decoded, 'Highest', 0)['tangents'], np.float64).reshape(-1, 4)
+            np.testing.assert_allclose(tangents[:, 3], mesh['tangent_w'])
+            np.testing.assert_allclose(tangents[:, :3], np.asarray(mesh['tangents'])[:, [0, 2, 1]] * [1, -1, 1])
+            for m in decoded['meshes']:
+                m.pop('tangent_w')   # a mesh with only a sign (R&C 2016) passes the sign
+            tangents = np.asarray(mesh_payload(decoded, 'Highest', 0)['tangents'], np.float64).reshape(-1, 4)
+            np.testing.assert_allclose(tangents[:, 3], mesh['tangent_signs'])
+
+
 class VertexColourPayloadTests(unittest.TestCase):
     """The loader passes a Rift Apart model's colour bytes on (loader._vertex_colours); R&C 2016 payloads do not change."""
 
@@ -389,6 +425,56 @@ class ViewportDrawTests(unittest.TestCase):
                 self.assertIn((RCRA_COLOUR_ATTRIBUTE, 4, view.GL_UNSIGNED_BYTE, 1, 0), pointers)   # normalized bytes
                 view._rcra_colour = None
                 self.assertNotEqual(coloured, _frame(view))
+            finally:
+                root.destroy()
+
+
+    def test_swarmer_draws_its_decoded_tangents(self):
+        """The swarmer's translated materials read TEXCOORD3; its payload carries the decoded tangent with TEXCOORD3.w,
+        uploaded as the tangent attribute, and the frame changes when the tangent is turned a quarter turn about the
+        normal."""
+        import numpy as np
+        from rc2016.viewer.shading import TANGENT_ATTRIBUTE
+        with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
+            import tkinter as tk
+            from rc2016.viewer.loader import SourcePreviewLoader
+            from rc2016.viewer.viewport import ModelViewport
+            loader = SourcePreviewLoader()
+            archive = loader._ensure_archive(GAME)
+            key = next(k for k in archive.resolve(SWARMER) if archive.entries[k]['type'] == 'model')
+            payload = loader.load(GAME, key, SWARMER, output_root=os.path.join(appdata, 'out'))
+            tangents = np.asarray(payload['tangents'], np.float64).reshape(-1, 4)
+            self.assertEqual(len(tangents), len(payload['vertices']))
+            np.testing.assert_allclose(np.linalg.norm(tangents[:, :3], axis=1), 1.0, atol=1e-6)
+            self.assertTrue(np.all(np.abs(tangents[:, 3]) >= 1.0))   # sign / (e / 31)^2, e <= 31
+            reads = [e for e in payload['textures'].values() if e.get('native_translation')
+                     and any(n['op'] == 'input' and n['name'].startswith('TEXCOORD3.')
+                             for n in (e['native_translation']['surface'] or {}).get('nodes', []))]
+            self.assertTrue(reads)
+            root = tk.Tk()
+            try:
+                root.geometry('240x240')
+                view = ModelViewport(root)
+                view.pack(fill='both', expand=True)
+                root.update()
+                if view._context_error or view._shading is None:
+                    self.skipTest(view._context_error or 'no shading context')
+                pointers = []
+                real_pointer = view._shading.glVertexAttribPointer
+                view._shading.glVertexAttribPointer = lambda *a: pointers.append(a[:2]) or real_pointer(*a)
+                view.set_mode('Shaded')
+                view.set_mesh(payload)
+                decoded = _frame(view)
+                self.assertIsNone(view.shading_error)
+                self.assertIn((TANGENT_ATTRIBUTE, 4), pointers)
+                from rc2016.viewer.viewport import prepare_viewport
+                turned = tangents.copy()
+                turned[:, :3] = np.cross(np.asarray(payload['normals'], np.float64), tangents[:, :3])
+                variant = {k: v for k, v in payload.items() if k != '_prepared_viewport'}
+                variant['tangents'] = turned
+                variant['_prepared_viewport'] = prepare_viewport(variant)
+                view.set_mesh(variant)
+                self.assertNotEqual(decoded, _frame(view))
             finally:
                 root.destroy()
 

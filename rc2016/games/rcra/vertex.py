@@ -189,17 +189,19 @@ class _VertexBindings(sm5.Bindings):
 def _outputs(shader):
     registers = {e.semantic: e.register for e in shader.outputs}
     return {'position': registers.get('SV_POSITION'), 'normal': registers.get('TEXCOORD2'),
-            'uv0': registers.get('TEXCOORD'), 'uv1': registers.get('TEXCOORD1'), 'colour': registers.get('TEXCOORD4')}
+            'uv0': registers.get('TEXCOORD'), 'uv1': registers.get('TEXCOORD1'), 'colour': registers.get('TEXCOORD4'),
+            'tangent': registers.get('TEXCOORD3')}
 
 
-TERMS = (('position', 'xyzw'), ('normal', 'xyz'), ('uv0', 'xy'), ('uv1', 'xy'), ('colour', 'xyzw'))
+TERMS = (('position', 'xyzw'), ('normal', 'xyz'), ('uv0', 'xy'), ('uv1', 'xy'), ('colour', 'xyzw'), ('tangent', 'xyzw'))
+TANGENT_TERMS = tuple('tangent.' + c for c in 'xyzw')
 
 
 def translate(graph_data, material_data, layout, slot=SLOT, texture_sizes=None, view=REVIEW_VIEW, values=None):
     """The vertex program of ``slot`` translated for one material and model layout (``model_layout``) under ``view``, with
     ``values`` {engine constant name: float} in place of 0: {'graph', 'terms' {name: node}, 'units' {binding: texture path}
     the terms read, 'unbound' [bindings], 'engine' [constants bound to 0], 'shader'}. Raises Unsupported when the position
-    or normal does not translate."""
+    or normal does not translate. The tangent terms (TEXCOORD3) are left out when they depend on an unknown value."""
     from rc2016.games.rcra.material import draw_flags
     shader = rshaders.pass_shader(graph_data, slot)
     units = rshaders.material_units(graph_data, material_data)
@@ -224,6 +226,12 @@ def translate(graph_data, material_data, layout, slot=SLOT, texture_sizes=None, 
     unknown = g.unknowns(needed)
     if unknown or bindings.errors:
         raise Unsupported('; '.join(bindings.errors + unknown))
+    tangent = [terms.get(name) for name in TANGENT_TERMS]
+    if None in tangent or g.unknowns(tangent):
+        for name in TANGENT_TERMS:
+            terms.pop(name, None)
+    else:
+        needed += tangent
     reads = {g.nodes[i]['binding'] for i in g.reachable(needed) if g.nodes[i]['op'] in ('sample', 'load')}
     return dict(graph=g, terms=terms, units={b: units[b] for b in sorted(reads) if b in units},
                 unbound=sorted(reads - set(units)), engine=sorted(bindings.engine), shader=shader)
@@ -544,10 +552,12 @@ def unit_normals(out, fallback):
     return np.where(length > 1e-12, normal / np.maximum(length, 1e-12), np.asarray(fallback, np.float64))
 
 
-def at_rest(pair, inputs, reader, rows, offset, normals):
+def at_rest(pair, inputs, reader, rows, offset, normals, with_tangents=False):
     """(positions, normals) of the vertices ``rows`` (indices into the whole vertex buffer) at rest, positions in the
     decoder's frame (plus its offset); None when where they go depends on the view (screen-space effects, camera-facing
-    geometry: no at-rest shape). ``normals``: the stored normals, kept where the program writes a zero normal."""
+    geometry: no at-rest shape). ``normals``: the stored normals, kept where the program writes a zero normal.
+    ``with_tangents`` adds the program's tangent (TEXCOORD3.xyz) and TEXCOORD3.w, or (None, None) when the recipe has no
+    tangent terms."""
     local = {k: (v[rows] if np.ndim(v) else v) for k, v in inputs.items()}
     local[VERTEX_ID] = rows
     rest, check = run(pair['rest'], local, reader, len(rows)), run(pair['view'], local, reader, len(rows))
@@ -561,7 +571,18 @@ def at_rest(pair, inputs, reader, rows, offset, normals):
     if (np.max(np.abs(positions - other), initial=0.0) > 1e-4 * span
             or np.max(np.abs(normal - unit_normals(check, normals)), initial=0.0) > 1e-3):
         return None
-    return positions + offset, normal
+    if not with_tangents:
+        return positions + offset, normal
+    tangent = w = None
+    if all(name in rest for name in TANGENT_TERMS):
+        tangent = np.stack([rest['tangent.' + c] for c in 'xyz'], 1).astype(np.float64)
+        w = np.asarray(rest['tangent.w'], np.float64)
+        if not (np.all(np.isfinite(tangent)) and not np.any(np.isnan(w))):
+            tangent = w = None
+        else:   # e = 0 is the engine's infinity: the largest float32 stands in, as in model.unpack_tangents
+            limit = float(np.finfo(np.float32).max)
+            w = np.clip(w, -limit, limit)
+    return positions + offset, normal, tangent, w
 
 
 def moved(positions, normals, stored_positions, stored_normals):
@@ -580,11 +601,22 @@ ERROR_NOTE = 'Vertex program (pass slot %d) not applied (%s): the stored vertice
 SKINNED_NOTE = (' The mesh is skinned: the at-rest offset is added to the bind pose, so joints carry it; the game adds it '
                 'after skinning, in object space.')
 STORED_SHAPE = 'stored vertices'   # rc2016.export.models.STORED_SHAPE
+STORED_TANGENT_NOTE = (' Its tangent output does not translate, so the stored tangent is drawn with the moved normal.')
 
 
 def _assign(mesh, key, values):
     array = np.asarray(values, np.float64)
     mesh[key] = array if isinstance(mesh[key], np.ndarray) else list(map(tuple, array.tolist()))
+
+
+def _set_tangents(mesh, tangents, w):
+    """The program's TEXCOORD3 as the mesh's tangent stream (rc2016.games.rcra.model fields tangents, tangent_signs,
+    tangent_w)."""
+    signs = np.where(w < 0, -1.0, 1.0)
+    arrays = isinstance(mesh.get('positions'), np.ndarray)
+    mesh['tangents'] = tangents if arrays else list(map(tuple, tangents.tolist()))
+    mesh['tangent_signs'] = signs if arrays else signs.tolist()
+    mesh['tangent_w'] = w if arrays else w.tolist()
 
 
 def _material_meshes(source, decoded):
@@ -619,7 +651,7 @@ def _group_states(source, key, graph, meshes, layout, inputs, offset):
     spans = [np.arange(m['first_vertex'], m['first_vertex'] + m['vertex_count'], dtype=np.int64) for m in meshes]
     stored = np.concatenate([np.asarray(m['normals'], np.float64).reshape(-1, 3) for m in meshes])
     try:
-        result = at_rest(pair, inputs, reader, np.concatenate(spans), offset, stored)
+        result = at_rest(pair, inputs, reader, np.concatenate(spans), offset, stored, with_tangents=True)
     except (Unsupported, sm5.Unknown, ValueError, KeyError, OSError) as error:
         return {id(m): ('error', ERROR_NOTE % (SLOT, error)) for m in meshes}
     if result is None:
@@ -628,7 +660,7 @@ def _group_states(source, key, graph, meshes, layout, inputs, offset):
         ' ' + n for n in pair['rest'].get('limitations', []))
     states, at = {}, 0
     for mesh, span in zip(meshes, spans):
-        positions, normals = (r[at:at + len(span)] for r in result)
+        positions, normals, tangents, w = (r[at:at + len(span)] if r is not None else None for r in result)
         at += len(span)
         if not moved(positions, normals, mesh['positions'], mesh['normals']):
             states[id(mesh)] = ('still', None)
@@ -637,9 +669,12 @@ def _group_states(source, key, graph, meshes, layout, inputs, offset):
         mesh['stored_positions'], mesh['stored_normals'] = mesh['positions'], mesh['normals']
         _assign(mesh, 'positions', positions)
         _assign(mesh, 'normals', normals)
+        if tangents is not None:
+            _set_tangents(mesh, tangents, w)
         mesh['vertex_offset'] = float(np.max(np.linalg.norm(positions - old, axis=1), initial=0.0))
         states[id(mesh)] = ('moved', MOVED_NOTE % (SLOT, STORED_SHAPE) + extra
-                            + (SKINNED_NOTE if mesh.get('skinned') else ''))
+                            + (SKINNED_NOTE if mesh.get('skinned') else '')
+                            + (STORED_TANGENT_NOTE if tangents is None and mesh.get('tangents') is not None else ''))
     return states
 
 

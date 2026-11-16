@@ -450,8 +450,8 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
         limitations += results['recipe']['limitations']
     limitations += [CUBE_LIMITATION % binding for binding, row in sorted(images.items()) if 'cube' in row]
     limitations += [
-        'Tangent frame from Blender\'s UV0 tangent space (the stored vertex tangent is not decoded); bitangent along the '
-        "game's -v, as in the viewer.",
+        'Tangent frame: the decoded vertex tangent and TEXCOORD3.w, carried as coordinates in Blender\'s UV0 tangent '
+        'frame so they turn with the armature; the draw is unmirrored (render flag 0x10000 clear).',
         'Texture filtering is Blender\'s linear repeat; the game\'s sampler states are not in the program.']
     entry = dict(graph=graph_path, blend=blend if 'forward' in results else 'opaque', game_blend=blend, images=images,
                  limitations=limitations)

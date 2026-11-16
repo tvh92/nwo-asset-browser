@@ -7,8 +7,11 @@ the viewer runs the game's own arithmetic, as the Blender emitter does (rc2016/e
 Inputs, in the viewer's varyings:
 - TEXCOORD.xy / TEXCOORD1.xy: vUV / vUV1, game UVs (the viewer uploads V unflipped and image rows top first).
 - TEXCOORD2.xyz: the world normal vTintWorldNrm (native Y-up), not turned on back faces, as the game's interpolant.
-- TEXCOORD3.xyz and .w: the vertex tangent frame of native_glsl.FRAME_HELPERS (the UV-derivative frame while the Rift Apart
-  tangent stream is not decoded), bitangent along the game's -v as in the Blender export.
+- TEXCOORD3.xyz and .w: the decoded vertex tangent (rc2016.games.rcra.model.unpack_tangents, the engine model vertex
+  program's decode) as vTintWorldTan, skinned with the vertex, and the whole stored TEXCOORD3.w (vTangentSign: the
+  bitangent sign over a squared scale), both interpolated as the game's interpolant. The draw's render flag 0x10000, which
+  negates the sign, is clear (an unmirrored draw). A mesh without a tangent stream gets the UV-derivative frame of
+  native_glsl.FRAME_HELPERS, bitangent along the game's -v, the orientation the stored tangents have.
 - TEXCOORD4: vRcraColour, the vertex colour squared per channel in the vertex stage, as the engine model vertex program
   does (``mul r13, r14, r14`` after its typed load of g_MainColorVBView). vertex_source(), the materials' vertex program,
   reads the model's colour section as normalized bytes in R, G, B, A order (attribute aRcraColour at
@@ -49,7 +52,7 @@ GEOMETRY = {'TEXCOORD.x': 'vUV.x', 'TEXCOORD.y': 'vUV.y', 'TEXCOORD1.x': 'vUV1.x
             'BACKGROUND.r': 'rcraScene.r', 'BACKGROUND.g': 'rcraScene.g', 'BACKGROUND.b': 'rcraScene.b',
             'BACKGROUND.a': 'rcraScene.a'}
 SCENE_UNIFORMS = ('uSceneColour', 'uHasSceneColour', 'uSceneDepth', 'uHasSceneDepth', 'uSceneDepthInfo')
-LIMITATION = ('Viewer: the tangent frame comes from UV derivatives (the stored tangent is not decoded); vertex colour is the '
+LIMITATION = ('Viewer: the draw is unmirrored (render flag 0x10000 clear); vertex colour is the '
               'model\'s colour section squared, as the engine squares it, with its bytes read in R, G, B, A order (the '
               'game\'s view format is not read), 1 without one, and no per-object paint; the review rig and environment '
               'stand in for the game\'s lights.')
@@ -238,7 +241,8 @@ def _prefix():
 
 def _frame_lines():
     return ['    vec3 rcraTangent = nativeVertexTangent();',
-            '    float rcraHandedness = nativeFrameHandedness(rcraTangent);',
+            '    float rcraHandedness = dot(vTintWorldTan, vTintWorldTan) > 0.0 ? vTangentSign'
+            ' : nativeFrameHandedness(rcraTangent);',
             '    vec3 rcraCamera = vTintWorldPos - vTintViewOffset;']
 
 

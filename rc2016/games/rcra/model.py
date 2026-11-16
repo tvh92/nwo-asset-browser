@@ -8,8 +8,10 @@ on the installed files (docs/rift-apart.md):
   0x283D0383 built  f32 position offset at +0x1C, f32 position scale at +0x2C (1/4096 seen),
                     u32 at +0x30 whose low 4 bits give the UV scale (1 << n) / 16384
   0xA98BE69B        16-byte vertex: int16 x, y, z, w | u32 packed normal | int16 u, v
-                    The normal is ALERT's two-angle form (10-bit x, 10-bit y, sign at bit 31);
-                    w is not decoded (not a +-1 handedness: it spans the int16 range)
+                    The normal is ALERT's two-angle form (10-bit x, 10-bit y, sign at bit 31). The
+                    tangent is a second two-angle pair: x from the normal word's bits 20-29, y from
+                    |w| bits 0-9, z's sign at bit 30. The bitangent sign is the sign of w; |w| bits
+                    10-14 scale the interpolant (unpack_tangents, from the engine model vertex program)
   0x0859863D        u16 indices; mesh flag 0x10 makes them relative to the mesh's first vertex
   0x78D9CBDE        64-byte mesh record: +4 u64 id, +20 u32 first vertex, first index, index
                     count, vertex count, +36 u16 flags, material slot, first skin batch, batch count,
@@ -58,6 +60,7 @@ MESH_STRIDE = 64
 VERTEX = np.dtype([('xyzw', '<i2', 4), ('normal', '<u4'), ('uv', '<i2', 2)])
 DECODED = {BUILT, VERTICES, INDEXES, MESHES, LOOK, MATERIALS, UV1, COLORS, JOINTS, SKIN_BATCHES, SKIN_DATA, SKIN_REMAP}
 SCHEMA = 'rcra-pc-model-v1'
+FLOAT32_MAX = float(np.finfo(np.float32).max)
 
 
 class UnsupportedModelError(ValueError):
@@ -86,6 +89,33 @@ def unpack_normals(words):
     vectors = np.stack((nx * w, ny * w, nz), axis=1)
     length = np.linalg.norm(vectors, axis=1, keepdims=True)
     return np.where(length > 1e-12, vectors / np.maximum(length, 1e-12), np.array([0.0, 0.0, 1.0]))
+
+
+def unpack_tangents(w, words):
+    """(tangents (n, 3), bitangent signs (n,) of +-1, TEXCOORD3.w (n,)) from the int16 position w and the packed normal word, as the
+    engine model vertex program decodes TEXCOORD3 (RiftApart.exe, translated with rc2016.shaders.sm5):
+
+    - a second two-angle pair, a = (|w| & 0x3FF) and b = the normal word's bits 20-29, each 0.0027648 field - 1.4142;
+      q = a^2 + b^2, tangent = (b s, a s, +-|1 - q/2|) with s = sqrt(1 - q/4); z is positive when bit 30 is set;
+    - TEXCOORD3.w = sign(w) / (e / 31)^2 with e = (|w| >> 10) & 31 (w = 0 counts as positive); the draw's render flag
+      0x10000 would negate it. The pixel programs read its sign (w < 0); one forward program also reads |w|. e = 0
+      (the engine's infinity) does not occur in the checked models; the largest float32 stands in for it.
+
+    The program does not normalise; the pair is a unit vector while q <= 4 (s is clamped at 0 beyond)."""
+    w = np.asarray(w, np.int64)
+    words = np.asarray(words, np.uint32).astype(np.int64)
+    magnitude = np.abs(w)
+    a = (magnitude & 0x3FF) * 0.00276483595 - math.sqrt(2)
+    b = ((words >> 20) & 0x3FF) * 0.00276483595 - math.sqrt(2)
+    q = a * a + b * b
+    s = np.sqrt(np.clip(1.0 - 0.25 * q, 0.0, None))
+    z = np.abs(1.0 - 0.5 * q)
+    z = np.where((words >> 30) & 1, z, -z)
+    signs = np.where(w >= 0, 1.0, -1.0)
+    e = ((magnitude >> 10) & 31) / 31.0
+    with np.errstate(divide='ignore'):
+        scale = np.where(e > 0, 1.0 / np.maximum(e * e, 1e-30), FLOAT32_MAX)
+    return np.stack((b * s, a * s, z), axis=1), signs, signs * scale
 
 
 def _looks(raw, mesh_count):
@@ -252,6 +282,7 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
     records = np.frombuffer(vertices_raw, VERTEX)
     positions = records['xyzw'][:, :3].astype(np.float64) * scale + offset
     normals = unpack_normals(records['normal'])
+    tangents, tangent_signs, tangent_w = unpack_tangents(records['xyzw'][:, 3], records['normal'])
     uv = records['uv'].astype(np.float64) * uv_scale
     uvs = np.stack((uv[:, 0], 1.0 - uv[:, 1]), axis=1)      # V flipped like the 2016 decoder (Blender convention)
     uv1 = None
@@ -285,8 +316,10 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
     colors_out = _tuples(colors) if colors is not None else None
     if not as_arrays:
         positions_out, normals_out, uvs_out = _tuples(positions), _tuples(normals), _tuples(uvs)
+        tangents_out, signs_out, w_out = _tuples(tangents), tangent_signs.tolist(), tangent_w.tolist()
     else:
         positions_out, normals_out, uvs_out = positions, normals, uvs
+        tangents_out, signs_out, w_out = tangents, tangent_signs, tangent_w
     result = []
     for mesh_index in selected:
         at = mesh_index * MESH_STRIDE
@@ -322,7 +355,7 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
             positions=positions_out[window], normals=normals_out[window], uv0=uvs_out[window],
             uv1=uv1_out[window] if uv1_out is not None else None,
             colors=colors_out[window] if colors_out is not None else None,
-            tangents=None, tangent_signs=None, packed_normals=None, raw_vectors=None, uv0_secondary_packed=None,
+            tangents=tangents_out[window], tangent_signs=signs_out[window], tangent_w=w_out[window], packed_normals=None, raw_vectors=None, uv0_secondary_packed=None,
             static_vector_eligible=False, weights=weights if weights is not None else [None] * local_count,
             unweighted_vertices=0 if weights is not None else local_count,
             skinned=weights is not None, material=materials[material_index] if material_index < len(materials) else None,
@@ -339,7 +372,8 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
                           position_offset=offset.tolist(), uv_scale=uv_scale,
                           uv0_decode='int16 * uv scale; V flipped for the Blender convention like the 2016 decoder'),
         packed_normal='ALERT two-angle form: 10-bit x and y, z from the remainder, sign at bit 31 (face-normal checked)',
-        tangent='not decoded: the vertex w word is not yet interpreted',
+        tangent=('engine model vertex program: two-angle pair of |w| bits 0-9 and normal bits 20-29, z sign at bit 30; '
+                 'bitangent sign = sign of w'),
         skin='0xC61B1FF5/0xDCA379A2 skin batches: 16-vertex groups of 1 to 8 (joint, weight) influences',
         vertex_count=vertex_count, index_count=len(index_words), mesh_record_count=mesh_count,
         selected_mesh_count=len(result), selected_mesh_indices=selected, import_lod=lod, import_look=look,

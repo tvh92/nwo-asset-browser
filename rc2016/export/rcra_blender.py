@@ -8,9 +8,14 @@ Inputs the recipe reads, in Blender:
 - ``TEXCOORD.xy`` (UV0) and ``TEXCOORD1.xy`` (UV1): the mesh's first and second UV maps, with game v = 1 - Blender v.
   Each texture lookup flips back (images are stored top row first and Blender reads them bottom row first).
 - ``TEXCOORD2.xyz`` (world normal): Geometry Normal, un-flipped on back faces as the game's interpolant is.
-- ``TEXCOORD3.xyz`` and ``.w`` (tangent and bitangent sign): Blender's UV0 tangent space (MikkTSpace). The bitangent
-  follows Blender's +v, which is the game's -v, the orientation the viewer uses. The game's stored vertex tangent is not
-  decoded yet, so this is labelled on every material.
+- ``TEXCOORD3.xyz`` and ``.w`` (tangent and TEXCOORD3.w): the decoded vertex tangent and its w
+  (rc2016.games.rcra.model.unpack_tangents), exported as the glTF point attribute TANGENT_ATTRIBUTE (native xyz, w).
+  ``store_tangent_frame`` rewrites it after import as the tangent's coordinates (a, b, c) in Blender's UV0 tangent frame
+  at each corner, T = a t + b (n x t) + c n with t the MikkTSpace tangent and n the corner normal, and w; the
+  out-of-surface part c is kept, since the game's tangent is not orthogonalised against its normal. The material rebuilds
+  T from the Normal Map node's tangent and the geometry normal, so it turns with the armature as both do. A mesh without
+  the attribute gets Blender's UV0 frame itself, bitangent along Blender's +v (the game's -v, the orientation of the stored
+  tangents), labelled.
 - ``TEXCOORD4`` (vertex colour): the mesh's first colour attribute, else 1.
 - ``SV_IsFrontFace``: not Geometry Backfacing.
 - ``VIEW.xyz`` and ``CAMERA.xyz`` (forward recipes): the offset from the camera to the shaded point, -Incoming x View
@@ -55,6 +60,11 @@ RECIPE_PROPERTY = 'rc_rcra_recipe_sha256'
 FORWARD_PREFIX = 'RC RA forward '
 FORWARD_PROPERTY = 'rc_rcra_forward_sha256'
 BLEND_MODES = ('opaque', 'additive', 'blended', 'modulate')
+TANGENT_ATTRIBUTE = '_RCRA_TANGENT'    # rc2016.export.models: point domain, native tangent xyz and TEXCOORD3.w
+TANGENT_FRAME = 'rcra_tangent_frame'   # corner domain: the tangent's coordinates in the UV0 tangent frame
+TANGENT_W_ATTRIBUTE = 'rcra_tangent_w'   # point domain: TEXCOORD3.w
+NO_TANGENT_NOTE = ('This mesh has no decoded tangent attribute: the tangent frame is Blender\'s UV0 tangent space and the '
+                   'bitangent sign its +v side (the game\'s -v).')
 # Blender's node creation slows as a tree grows (3,000 nodes in one tree take about 35 s, in groups of 100 about 0.6 s), so a
 # large recipe is emitted into chained part groups of at most PART_SIZE nodes; values cross parts through group sockets.
 PART_ABOVE = 400   # recipes with more operations are split
@@ -151,8 +161,10 @@ def build_brdf_group():
 # ----------------------------------------------------------------------------------------------- surface emitter
 
 class _Emitter:
-    def __init__(self, tree, recipe, images, uv_maps, colour_attribute, interpolation='Linear', fixed=None):
+    def __init__(self, tree, recipe, images, uv_maps, colour_attribute, interpolation='Linear', fixed=None,
+                 tangent=False):
         self.fixed = fixed or {}   # input name -> float, replacing the mesh/camera value (checks)
+        self.tangent = tangent     # the mesh carries TANGENT_FRAME and TANGENT_W_ATTRIBUTE
         self.root = self.tree = tree
         self.nodes, self.links = tree.nodes, tree.links
         self.parts, self.carried, self.sockets = {}, {}, 0
@@ -346,6 +358,8 @@ class _Emitter:
         self.link(facing, normal.inputs['Scale'])
         probes = {}
         for name, colour in (('tangent', (1.0, 0.5, 0.5, 1.0)), ('bitangent', (0.5, 1.0, 0.5, 1.0))):
+            if name == 'bitangent' and self.tangent:
+                continue
             probe = self.node('ShaderNodeNormalMap', space='TANGENT', uv_map=self.uv_maps[0] if self.uv_maps else '')
             probe.inputs['Color'].default_value = colour
             probe.inputs['Strength'].default_value = 1.0
@@ -353,11 +367,29 @@ class _Emitter:
         cross = self.node('ShaderNodeVectorMath', operation='CROSS_PRODUCT')
         self.link(normal.outputs[0], cross.inputs[0])
         self.link(probes['tangent'], cross.inputs[1])
-        dot = self.node('ShaderNodeVectorMath', operation='DOT_PRODUCT')
-        self.link(cross.outputs[0], dot.inputs[0])
-        self.link(probes['bitangent'], dot.inputs[1])
-        sign = self.math('MULTIPLY_ADD', self.math('LESS_THAN', dot.outputs['Value'], 0.0), -2.0, 1.0)
-        self.inputs['frame'] = dict(normal=self.game_vector(normal.outputs[0]), tangent=self.game_vector(probes['tangent']),
+        if self.tangent:   # T = a t + b (n x t) + c n from the stored coordinates (store_tangent_frame); w as stored
+            coords = self.node('ShaderNodeSeparateXYZ')
+            self.link(self.node('ShaderNodeAttribute', attribute_name=TANGENT_FRAME).outputs['Vector'], coords.inputs[0])
+            tangent = None
+            for k, axis in enumerate((probes['tangent'], cross.outputs[0], normal.outputs[0])):
+                part = self.node('ShaderNodeVectorMath', operation='SCALE')
+                self.link(axis, part.inputs[0])
+                self.link(coords.outputs[k], part.inputs['Scale'])
+                if tangent is None:
+                    tangent = part.outputs[0]
+                    continue
+                total = self.node('ShaderNodeVectorMath', operation='ADD')
+                self.link(tangent, total.inputs[0])
+                self.link(part.outputs[0], total.inputs[1])
+                tangent = total.outputs[0]
+            sign = self.node('ShaderNodeAttribute', attribute_name=TANGENT_W_ATTRIBUTE).outputs['Fac']
+        else:
+            dot = self.node('ShaderNodeVectorMath', operation='DOT_PRODUCT')
+            self.link(cross.outputs[0], dot.inputs[0])
+            self.link(probes['bitangent'], dot.inputs[1])
+            tangent = probes['tangent']
+            sign = self.math('MULTIPLY_ADD', self.math('LESS_THAN', dot.outputs['Value'], 0.0), -2.0, 1.0)
+        self.inputs['frame'] = dict(normal=self.game_vector(normal.outputs[0]), tangent=self.game_vector(tangent),
                                     sign=sign)
         return self.inputs['frame']
 
@@ -561,7 +593,7 @@ SURFACE_OUTPUTS = (('Albedo', 'NodeSocketColor'), ('F0', 'NodeSocketColor'), ('G
                    ('Alpha', 'NodeSocketFloat'))
 
 
-def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear', fixed=None):
+def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear', fixed=None, tangent=False):
     """A node group computing the recipe's surface terms (Albedo, F0, Gloss, Normal, Occlusion, Emission, Alpha)."""
     digest = recipe_sha256(recipe)
     name = SURFACE_PREFIX + digest[:16]
@@ -570,7 +602,7 @@ def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpol
     for socket, kind in SURFACE_OUTPUTS:
         _socket(group, socket, 'OUTPUT', kind)
     out = group.nodes.new('NodeGroupOutput')
-    em = _Emitter(group, recipe, images, uv_maps, colour_attribute, interpolation, fixed)
+    em = _Emitter(group, recipe, images, uv_maps, colour_attribute, interpolation, fixed, tangent)
     terms = {k: em.value(i) for k, i in recipe['terms'].items()}
 
     def combine(names, kind):
@@ -600,7 +632,7 @@ def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpol
 FORWARD_OUTPUTS = (('Colour', 'NodeSocketColor'), ('Alpha', 'NodeSocketFloat'), ('Background', 'NodeSocketColor'))
 
 
-def build_forward_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear', fixed=None):
+def build_forward_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear', fixed=None, tangent=False):
     """A node group computing a forward recipe's Colour (HDR), Alpha (with the program's discard applied) and Background
     tint."""
     digest = recipe_sha256(recipe)
@@ -609,7 +641,7 @@ def build_forward_group(recipe, images, uv_maps, colour_attribute=None, interpol
     for socket, kind in FORWARD_OUTPUTS:
         _socket(group, socket, 'OUTPUT', kind)
     out = group.nodes.new('NodeGroupOutput')
-    em = _Emitter(group, recipe, images, uv_maps, colour_attribute, interpolation, fixed)
+    em = _Emitter(group, recipe, images, uv_maps, colour_attribute, interpolation, fixed, tangent)
     terms = {k: em.value(i) for k, i in recipe['terms'].items()}
     colour = em.node('ShaderNodeCombineColor')
     for k, name in enumerate(('colour.r', 'colour.g', 'colour.b')):
@@ -683,10 +715,10 @@ def load_images(rows):
     return {binding: _load_row(row) for binding, row in rows.items()}
 
 
-def _surface_shader(tree, entry, images, uv_maps, colour_attribute, blended):
+def _surface_shader(tree, entry, images, uv_maps, colour_attribute, blended, tangent=False):
     """The surface group feeding the BRDF group; returns the shader socket (alpha clip applied when opaque)."""
     recipe = entry['recipe']
-    surface = build_surface_group(recipe, images, uv_maps, colour_attribute)
+    surface = build_surface_group(recipe, images, uv_maps, colour_attribute, tangent=tangent)
     s = tree.nodes.new('ShaderNodeGroup')
     s.node_tree, s.name, s.location = surface, 'Translated surface', (0, 0)
     b = tree.nodes.new('ShaderNodeGroup')
@@ -705,9 +737,9 @@ def _surface_shader(tree, entry, images, uv_maps, colour_attribute, blended):
     return b.outputs['Shader'], surface
 
 
-def _forward_shader(tree, entry, images, uv_maps, colour_attribute, lit):
+def _forward_shader(tree, entry, images, uv_maps, colour_attribute, lit, tangent=False):
     """The forward group composed over a Transparent BSDF by the entry's blend mode."""
-    group = build_forward_group(entry['forward'], images, uv_maps, colour_attribute)
+    group = build_forward_group(entry['forward'], images, uv_maps, colour_attribute, tangent=tangent)
     f = tree.nodes.new('ShaderNodeGroup')
     f.node_tree, f.name, f.location = group, 'Translated forward', (0, -400)
     nodes, links = tree.nodes, tree.links
@@ -759,11 +791,12 @@ def _forward_shader(tree, entry, images, uv_maps, colour_attribute, lit):
     return total.outputs[0], group
 
 
-def apply_recipe(material, entry, uv_maps, colour_attribute=None):
+def apply_recipe(material, entry, uv_maps, colour_attribute=None, tangent=False):
     """Replace ``material``'s nodes with the translated material.
 
     ``entry``: dict(blend, recipe (G-buffer surface), forward (blended materials), images {binding: row}, limitations).
-    An opaque entry needs ``recipe``; a blended one needs ``forward`` and uses ``recipe`` for its lit part when present."""
+    An opaque entry needs ``recipe``; a blended one needs ``forward`` and uses ``recipe`` for its lit part when present.
+    ``tangent``: the mesh carries the decoded tangent (``store_tangent_frame``); else the UV0 frame stands in, labelled."""
     mode = entry.get('blend', 'opaque')
     if mode not in BLEND_MODES:
         raise ValueError('Unknown blend mode ' + str(mode))
@@ -775,10 +808,10 @@ def apply_recipe(material, entry, uv_maps, colour_attribute=None):
     output.location = (1100, 0)
     shader, surface, forward = None, None, None
     if entry.get('recipe'):
-        shader, surface = _surface_shader(tree, entry, images, uv_maps, colour_attribute, mode != 'opaque')
+        shader, surface = _surface_shader(tree, entry, images, uv_maps, colour_attribute, mode != 'opaque', tangent)
     if mode != 'opaque':
         shader, forward = _forward_shader(tree, entry, images, uv_maps, colour_attribute,
-                                          shader if mode == 'blended' else None)
+                                          shader if mode == 'blended' else None, tangent)
         if hasattr(material, 'surface_render_method'):   # EEVEE draws it sorted and blended
             material.surface_render_method = 'BLENDED'
     if shader is None:
@@ -790,8 +823,47 @@ def apply_recipe(material, entry, uv_maps, colour_attribute=None):
         elif prop in material:
             del material[prop]
     material['rc_rcra_blend'] = mode
-    material['rc_rcra_limitations'] = '\n'.join(entry.get('limitations', []))
+    material['rc_rcra_limitations'] = '\n'.join(entry.get('limitations', []) + ([] if tangent else [NO_TANGENT_NOTE]))
+    material['rc_rcra_tangent'] = bool(tangent)
     return material
+
+
+def store_tangent_frame(mesh):
+    """Rewrite an imported mesh's decoded tangent (point attribute TANGENT_ATTRIBUTE: native xyz and TEXCOORD3.w, which
+    the glTF importer makes a float colour attribute) as its coordinates (a, b, c) in Blender's UV0 tangent frame at each
+    corner (corner attribute TANGENT_FRAME): T = a t + b (n x t) + c n, with t the MikkTSpace tangent of the first UV map
+    and n the corner normal; and w as the point attribute TANGENT_W_ATTRIBUTE. The source attribute is removed, so it is
+    not taken for the vertex colour. Returns False, leaving the mesh unchanged, when it has no decoded tangent or no UV
+    map."""
+    import numpy as np
+    source = mesh.attributes.get(TANGENT_ATTRIBUTE)
+    if source is None or source.domain != 'POINT' or not mesh.uv_layers or not len(mesh.loops):
+        return False
+    packed = np.empty(len(mesh.vertices) * 4, np.float32)
+    source.data.foreach_get('color' if source.data_type in ('FLOAT_COLOR', 'BYTE_COLOR') else 'vector', packed)
+    packed = packed.reshape(-1, 4)
+    native, w = packed[:, :3].astype(np.float64), packed[:, 3].copy()
+    tangent = np.stack((native[:, 0], -native[:, 2], native[:, 1]), 1)   # game (x, y, z) = Blender (x, z, -y)
+    mesh.calc_tangents(uvmap=mesh.uv_layers[0].name)
+    count = len(mesh.loops)
+    t, n = np.empty(count * 3, np.float32), np.empty(count * 3, np.float32)
+    vertex = np.empty(count, np.int32)
+    mesh.loops.foreach_get('tangent', t)
+    mesh.loops.foreach_get('normal', n)
+    mesh.loops.foreach_get('vertex_index', vertex)
+    mesh.free_tangents()
+    t, n = t.reshape(-1, 3).astype(np.float64), n.reshape(-1, 3).astype(np.float64)
+    # Solved in the basis the material rebuilds from, which is skewed where Blender's tangent is not orthogonal to the
+    # corner normal (degenerate UV triangles); least squares where it is singular (no UV tangent).
+    basis = np.stack((t, np.cross(n, t), n), 2)
+    coords = (np.linalg.pinv(basis) @ tangent[vertex][:, :, None])[:, :, 0].astype(np.float32)
+    for name in (TANGENT_FRAME, TANGENT_W_ATTRIBUTE):
+        if mesh.attributes.get(name) is not None:
+            mesh.attributes.remove(mesh.attributes[name])
+    mesh.attributes.new(TANGENT_FRAME, 'FLOAT_VECTOR', 'CORNER').data.foreach_set('vector', coords.ravel())
+    mesh.attributes.new(TANGENT_W_ATTRIBUTE, 'FLOAT', 'POINT').data.foreach_set('value', w)
+    mesh.attributes.remove(mesh.attributes[TANGENT_ATTRIBUTE])
+    return True
 
 
 def translated(material):

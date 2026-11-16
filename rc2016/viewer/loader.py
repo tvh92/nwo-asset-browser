@@ -42,6 +42,13 @@ def _static_raw_vectors(mesh, count):
     return vectors
 
 
+def _tangent_w(mesh):
+    """The tangent attribute's w: Rift Apart's whole TEXCOORD3.w (``tangent_w``, the bitangent sign over a squared scale,
+    whose magnitude one program reads), else the stored bitangent sign."""
+    w=mesh.get('tangent_w')
+    return w if w is not None else mesh.get('tangent_signs')
+
+
 def _vertex_colours(decoded, meshes):
     """{'vertex_colours': (n, 4) uint8 RGBA} for a Rift Apart model with a colour section, else {}: the stored bytes, which
     the translated materials (rcra_glsl) read as TEXCOORD4. Meshes without colours read 255 (1.0), the engine's value for a
@@ -63,7 +70,7 @@ def _mesh_payload_arrays(decoded, meshes, selected):
     for mesh in meshes:
         positions=np.asarray(mesh['positions'],dtype=np.float64).reshape(-1,3);count=len(positions)
         vertices.append(_basis_array(positions));normals.append(_basis_array(mesh['normals']))
-        tangent,signs=mesh.get('tangents'),mesh.get('tangent_signs')
+        tangent,signs=mesh.get('tangents'),_tangent_w(mesh)
         if tangent is not None and len(tangent)==count and signs is not None and len(signs)==count:
             # xyz in the display basis; w is the stored bitangent sign (position w), not a basis value.
             tangents.append(np.column_stack((_basis_array(tangent),np.asarray(signs,dtype=np.float64))))
@@ -153,9 +160,10 @@ def mesh_payload(decoded, lod='Highest', look=0):
         # presentation_basis inlined: these loops dominate large models.
         vertices.extend([(x,-z,y) for x,y,z in mesh['positions']])
         normals.extend([(x,-z,y) for x,y,z in mesh['normals']])
+        signs=_tangent_w(mesh)
         if mesh.get('tangents') is not None and len(mesh['tangents'])==len(mesh['positions']) \
-                and len(mesh.get('tangent_signs') or ())==len(mesh['positions']):
-            tangents.extend([(float(x),-float(z),float(y),float(h)) for (x,y,z),h in zip(mesh['tangents'],mesh['tangent_signs'])])
+                and len(signs if signs is not None else ())==len(mesh['positions']):
+            tangents.extend([(float(x),-float(z),float(y),float(h)) for (x,y,z),h in zip(mesh['tangents'],signs)])
         raw = _static_raw_vectors(mesh, len(mesh['positions']))
         if raw is None:
             raw_vector_eligible = False

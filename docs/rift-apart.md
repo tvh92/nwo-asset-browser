@@ -135,7 +135,7 @@ The export writes only what is decoded, through `rc2016/games/rcra_export.py`:
 | Section | Contents |
 | --- | --- |
 | `0x283D0383` built | f32 position offset at +0x1C; f32 position scale at +0x2C (1/4096 in every checked model); u32 at +0x30 whose low 4 bits give the UV scale `(1 << n) / 16384` |
-| `0xA98BE69B` | 16-byte vertex: int16 x, y, z, w; u32 packed normal; int16 u, v |
+| `0xA98BE69B` | 16-byte vertex: int16 x, y, z, w; u32 packed normal; int16 u, v. The tangent is split over w and the normal word ([Vertex decoding](#vertex-decoding)) |
 | `0x0859863D` | u16 indices. Mesh flag `0x10` makes them relative to the mesh's first vertex; without it they are global |
 | `0x78D9CBDE` | 64-byte mesh record (fields below) |
 | `0x06EB7EFC` | Looks: 8 (u16 first mesh, u16 count) LOD slots per look. The 2016 game uses 4 |
@@ -161,7 +161,23 @@ The export writes only what is decoded, through `rc2016/games/rcra_export.py`:
 - **Positions** are `int16 * scale + offset`.
 - **Normals** use ALERT's two-angle form: x and y come from two 10-bit fields, z from the remainder, and z's sign is bit 31. Across the corpus, decoded normals agree with face normals at a median dot product of 0.9995.
 - **UVs** are `int16 * uv scale`. V is flipped for the Blender convention, as the 2016 decoder does.
-- **The vertex w word is not decoded.** It spans the whole int16 range, so it is not a ±1 handedness. Tangents are therefore not available yet.
+- **Tangents** are a second two-angle pair, decoded as the engine model vertex program decodes `TEXCOORD3` (`model.unpack_tangents`):
+
+  | Field | Bits | Use |
+  | --- | --- | --- |
+  | a | `\|w\|` bits 0-9 | `0.0027648 a − 1.4142`, the tangent's y angle |
+  | b | normal word bits 20-29 | `0.0027648 b − 1.4142`, the tangent's x angle |
+  | z sign | normal word bit 30 | set: z positive |
+  | e | `\|w\|` bits 10-14 | scale of `TEXCOORD3.w` |
+  | sign | sign of w | the bitangent sign; w = 0 counts as positive |
+
+  With q = a² + b² and s = √(1 − q/4), the tangent is `(b s, a s, ±|1 − q/2|)`, a unit vector. `TEXCOORD3.w = sign(w) / (e/31)²`; draw render flag `0x10000` negates it. The decoder returns `tangents`, `tangent_signs` (±1) and `tangent_w` (the whole `TEXCOORD3.w`).
+- **Where the tangent decode comes from:** the engine model vertex programs in `RiftApart.exe`. These are the vertex programs that pull `g_MainVBNrmTanView`, write `TEXCOORD` to `TEXCOORD7` and bind only the model streams and per-draw views (two programs). Translated with `sm5.py` and run on Ratchet's vertex streams, their `TEXCOORD3` equals the decoder within 2 × 10⁻⁶ (`tests/test_rcra_model.py`). The material graphs' own vertex programs decode it the same way.
+- **How the pixel programs read it:** 530 G-buffer and 604 forward programs (of 1,474 each) read `TEXCOORD3.w`. All but one test only its sign (`w < 0`). One forward program (`world_space_uv_scrolling_sss`) also reads `|w|`. e = 0 would make w infinite; it does not occur in 4.6 million checked vertices, where e runs from 1 to 31.
+- **Checks on 300 models (6.9 million vertices):**
+  - The tangent follows UV0: its cosine with the area-weighted dP/du has a median of 0.999997 and is above 0.9 for 99.7 % of vertices.
+  - `h (N × T)` runs along −dP/dv (game v down) for 99.6 % of vertices, the orientation the UV-derivative frame used.
+  - The tangent is not orthogonalised against the stored normal: |T·N| > 0.05 on 22 % of vertices, and 10 % against the area-weighted face normal. The programs receive it as stored.
 - **Vertex programs** move some meshes at rest. Those meshes are drawn moved, and they keep their stored vertices ([Vertex programs](#vertex-programs)).
 
 ### Skin weights
@@ -475,7 +491,7 @@ The engine vertex program that feeds slots 1, 4 and 5 is in the exe (vertex pull
 | `TEXCOORD.zw` | Material and object values (dissolve, alpha) |
 | `TEXCOORD1.xy` | UV1 |
 | `TEXCOORD2.xyz`, `.w` | World normal; instance index + 0.25 |
-| `TEXCOORD3.xyz`, `.w` | World tangent; bitangent sign |
+| `TEXCOORD3.xyz`, `.w` | World tangent; `sign(w) / (e/31)²`, the bitangent sign over a scale ([Vertex decoding](#vertex-decoding)) |
 | `TEXCOORD4` | Vertex colour or paint, squared ([In the viewer](#in-the-viewer)) |
 | `TEXCOORD5` | Previous clip position (velocity) |
 
@@ -619,7 +635,7 @@ All 583 translate. Slots 3, 10, 13 and 17 place every vertex where slot 7 does, 
 **Limitations:**
 - Motion over time is not drawn.
 - On a skinned mesh, the at-rest offset is added to the bind pose, so its joints carry it; the game adds it after skinning, in object space.
-- The tangent output is not applied: the viewer and Blender build their own tangent frame.
+- A moved mesh takes the program's tangent output (`TEXCOORD3`) with its normal. Where that output does not translate, the stored tangent stays, and the note says so.
 
 ### Fur materials
 
@@ -692,7 +708,12 @@ The emitter reads its inputs from the mesh:
 
 - **UVs:** the first and second UV maps, with game `v = 1 − v_blender`; every texture lookup flips back.
 - **Normal:** Geometry Normal, un-flipped on back faces.
-- **Tangent frame:** Blender's UV0 tangent space. Its bitangent follows the game's `−v`, as in the viewer; the stored vertex tangent is not decoded yet.
+- **Tangent frame:** the decoded tangent and `TEXCOORD3.w`.
+  - **Export:** the glTF export writes them as one custom point attribute, `_RCRA_TANGENT` (native xyz, w). Blender's importer swaps the data of two custom attributes on one primitive when its set order differs from its list order, so there is only one. The importer makes a VEC4 a float colour attribute.
+  - **Conversion:** `rcra_blender.store_tangent_frame` turns the attribute into the tangent's coordinates (a, b, c) at each corner, `T = a t + b (n × t) + c n`, where t is Blender's UV0 tangent (MikkTSpace) and n is the corner normal. They are stored as the corner attribute `rcra_tangent_frame`, w as the point attribute `rcra_tangent_w`, and the colour attribute is removed. The coordinates are solved in that basis, so they also hold where Blender's tangent is not orthogonal to the normal (degenerate UV triangles), and they keep c, the part of the game's tangent along the normal.
+  - **Material:** rebuilds T from the Normal Map node's tangent and the geometry normal, so T turns with the armature as both do.
+  - **Without the attribute:** a mesh gets Blender's UV0 frame, with the bitangent sign on Blender's +v (the game's −v), labelled (`NO_TANGENT_NOTE`).
+  - **Draw state:** render flag 0x10000 is clear (unmirrored draw).
 - **Vertex colour:** the first colour attribute, else 1.
 - **Vertices:** where the material's vertex program places them at rest, with the stored vertices as the shape key `stored vertices` ([Vertex programs](#vertex-programs)).
 - **Vectors:** game `(x, y, z)` is Blender `(x, −z, y)`.
@@ -740,7 +761,7 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 | Part | Viewer |
 | --- | --- |
 | Vertices | Where the material's vertex program places them at rest, evaluated when the model is decoded ([Vertex programs](#vertex-programs)) |
-| Inputs | UV0 and UV1, the world normal, the UV-derivative tangent frame (`native_glsl.FRAME_HELPERS`), the vertex colour, front face, and the view from `vTintViewOffset` |
+| Inputs | UV0 and UV1, the world normal, the decoded tangent and the whole `TEXCOORD3.w` (attribute `aTangent`, skinned with the vertex, interpolated as the game's interpolant; render flag 0x10000 clear), the vertex colour, front face, and the view from `vTintViewOffset`. A mesh without a tangent stream gets the UV-derivative frame (`native_glsl.FRAME_HELPERS`). |
 | Textures | A sampled array slice as stored. Arrays with a run-time slice and 3D textures as the padded atlas of the Blender export, without mipmaps. A cube map as a GL cube map of its six stored faces (face k to `GL_TEXTURE_CUBE_MAP_POSITIVE_X + k`, rows top first), top mip, linear, seamless where the driver has it: D3D and GL share the face table, so `textureCube` along the game direction returns the D3D texel. Float data formats as `RGBA32F`. |
 | Lighting | The review rig with the Rift Apart BRDF: GGX α = (0.9725 − 0.7514 gloss)², Smith joint approximation, Schlick F90 = 1, Lambert, occlusion on ambient light only |
 | Blending | Forward materials draw in the float scene target, tested but not writing depth. A multiply pass scales what is behind by the background factor (blended: mix(1, B, α); additive: 1 + αB; modulate: the tint). B adds lit_background × the rig's diffuse light at the surface normal (`rcraDiffuse` with albedo 1 and no occlusion) for a material that lights the scene behind it. Then a colour pass adds the premultiplied colour, coverage blended over. A program in scene mode reads `BACKGROUND` from a copy of the frame taken before its batch (`_scene_copies`): scene-linear in the float scene target, display-referred otherwise. |
@@ -755,7 +776,12 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 
 The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes in R, G, B, A order. The translated materials' vertex program (`rcra_glsl.vertex_source`, attribute `aRcraColour`) squares it. The game sets the views' formats at run time, so this channel order is the reader's, not read from the game. A model without the section reads 1. Object paint and the paint stream are not drawn: the viewer takes render flag 0x8000 as set and 0x800 as clear.
 
-`tests/test_rcra_viewer.py` draws the swarmer through the model viewport (Windows, `RCRA_GAME`) and checks that the translated programs link and draw. It also draws a pressure button whose material reads `TEXCOORD4.x`, and checks that its colour bytes reach the program: the frame changes when they are replaced by 1.
+`tests/test_rcra_viewer.py` draws the swarmer through the model viewport (Windows, `RCRA_GAME`) and checks that the translated programs link and draw. It also draws a pressure button whose material reads `TEXCOORD4.x`, and checks that its colour bytes reach the program: the frame changes when they are replaced by 1. The swarmer's materials read `TEXCOORD3`: its decoded tangent is uploaded, and the frame changes when the tangent is turned a quarter turn about the normal.
+
+**Tangent checks.** On the swarmer, the decoded frame and the UV-derivative frame draw the same picture, apart from silhouette edges and the grille, where the per-pixel derivative frame is noisy. On the helper bot's `.blend`:
+- the stored coordinates rebuild the decoded tangent at every corner within 2.4 × 10⁻⁷;
+- a Cycles bake of the material's own `TEXCOORD3` agrees with it at a median of 4 × 10⁻⁴ (99.9 % within 0.01, its sign 99.98 %);
+- 17 corners (0.03 %) differ by more than 0.1. They are not traced: the stored coordinates rebuild the tangent there too, so the difference comes from the tangent Cycles computes at those corners.
 
 ### Not translated
 
@@ -777,6 +803,8 @@ python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --su
 
 - **Synthetic tests** build a small toc, dag and set of DSAR archives, a two-mesh model, texture and material assets, clips (plain and with a frame table) or skin batches (with a palette and a joint base).
 - **Real-install tests** read `RCRA_GAME` (the install folder) and skip when it is not set. They also compare bytes against ALERT's own TOC2 reader.
+
+`tests/test_rcra_model.py` also checks the tangent decode. Without game files it covers a round trip of the packed fields, the viewer payload (display basis, whole `TEXCOORD3.w`) and the glTF attribute. With `RCRA_GAME` it finds the engine model vertex programs in the exe and translates them, and checks their `TEXCOORD3` against the decoder on Ratchet, with and without render flag 0x10000. It also checks that the tangent follows Ratchet's UV frame.
 
 `tests/test_rcra_vertex.py` checks the vertex-program path. Without game files, it checks the vectorised evaluator against the translator's operations bit for bit, the view check, the stored vertices as a glTF morph target, and the notes in the loader. With `RCRA_GAME` it checks that the swarmer's vertex-animation texture moves every mesh, with each vertex where the translator's own evaluator puts it. It also checks that a dimensional glitch is view-dependent and that a balloon keeps its stored vertices.
 

@@ -24,6 +24,43 @@ def pack_normal(n):
     return qx | (qy << 10) | ((1 << 31) if z >= 0 else 0)
 
 
+def pack_tangent(t, sign=1, e=31):
+    """(int16 w, normal-word bits 20-30) of a unit tangent, inverse of model.unpack_tangents: |w| bits 0-9 the y angle,
+    bits 10-14 e; the word's bits 20-29 the x angle, bit 30 set for +z."""
+    x, y, z = t
+    k = math.sqrt(max(0.0, 2.0 / (1.0 + abs(z)))) if abs(z) < 1 else 1.0
+    qx = round((x * k + math.sqrt(2)) / 0.00276483595)
+    qy = round((y * k + math.sqrt(2)) / 0.00276483595)
+    magnitude = qy | (e << 10)
+    return (magnitude if sign > 0 else -magnitude), (qx << 20) | ((1 << 30) if z >= 0 else 0)
+
+
+def engine_vertex_programs(root):
+    """The engine model vertex programs in RiftApart.exe: vertex programs that pull g_MainVBNrmTanView, write TEXCOORD to
+    TEXCOORD7 and bind nothing beyond the model streams and per-draw views."""
+    from rc2016.shaders import dxbc
+    standard = {'g_MainPaintVBView', 'g_SkinVBNrmTanView', 'g_SkinVBPosView', 'g_SkinVBPosPrevView', 'g_MainVBPosView',
+                'g_MainVBNrmTanView', 'g_MainVBUV0View', 'g_MainVBUV1View', 'g_MainColorVBView', 'g_ModelSubsetView',
+                'g_MaterialView', 'g_SceneObjectView', 'g_DynamicObjectView', 'MatDrawCB', 'GlobalViewportCBuffer',
+                'GlobalWorldCBuffer', 'MultiCustomMaterialCB'}
+    data = Path(root, 'RiftApart.exe').read_bytes()
+    found, at = {}, data.find(b'g_MainVBNrmTanView')
+    while at >= 0:
+        start = data.rfind(dxbc.DXBC_MAGIC, max(0, at - (1 << 20)), at)
+        size = struct.unpack_from('<I', data, start + 24)[0] if start >= 0 else 0
+        if start not in found and start + size > at:
+            try:
+                shader = dxbc.shader(data[start:start + size])
+            except dxbc.DxbcError:
+                shader = None
+            if (shader is not None and shader.reflection is not None and shader.reflection.program_type == 0xFFFE
+                    and {b.name for b in shader.reflection.bindings} <= standard
+                    and {e.semantic for e in shader.outputs} >= {'TEXCOORD3', 'TEXCOORD7'}):
+                found[start] = shader
+        at = data.find(b'g_MainVBNrmTanView', at + 1)
+    return [found[k] for k in sorted(found)]
+
+
 def build_model(pad_uv1=True, flags=0x11):
     """Two meshes in two LODs: a quad (LOD 0) and a triangle (LOD 1), with UV1, colours and a joint."""
     positions = [(0, 0, 0), (4096, 0, 0), (4096, 4096, 0), (0, 4096, 0), (0, 0, 0), (2048, 0, 0), (0, 2048, 0)]
@@ -61,6 +98,56 @@ def build_model(pad_uv1=True, flags=0x11):
 
 
 class SyntheticModelTests(unittest.TestCase):
+    def test_export_carries_the_tangent_and_w(self):
+        """A Rift Apart mesh writes its tangent and TEXCOORD3.w as one glTF custom attribute (VEC4); a mesh without
+        tangent_w (R&C 2016) writes none."""
+        from rc2016.export import models
+        mesh = rm.decode_model('synthetic', data=build_model())['meshes'][0]   # the exporter's list mode
+        other = dict(mesh, tangent_w=None)
+        parts = [dict(name='a', material=None, arrays=models.mesh_arrays(mesh, 0)),
+                 dict(name='b', material=None, arrays=models.mesh_arrays(other, 0))]
+        exporter = models.ModelExporter.__new__(models.ModelExporter)
+        doc, blob = exporter._build_gltf('m', parts, {}, None, []).finish(embed=True)
+        first, second = doc['meshes'][0]['primitives']
+        self.assertNotIn(models.TANGENT_ATTRIBUTE, second['attributes'])
+        accessor = doc['accessors'][first['attributes'][models.TANGENT_ATTRIBUTE]]
+        self.assertEqual((accessor['type'], accessor['componentType'], accessor['count']), ('VEC4', 5126, 4))
+        view = doc['bufferViews'][accessor['bufferView']]
+        data = np.frombuffer(bytes(blob), np.float32, 16, view['byteOffset'] + accessor.get('byteOffset', 0)).reshape(4, 4)
+        np.testing.assert_allclose(data[:, :3], mesh['tangents'], rtol=1e-6)
+        np.testing.assert_allclose(data[:, 3], mesh['tangent_w'], rtol=1e-6)
+
+    def test_tangent_round_trip(self):
+        rng = np.random.default_rng(3)
+        vectors = rng.normal(size=(200, 3))
+        vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+        signs = rng.choice([-1, 1], 200)
+        scales = rng.integers(1, 32, 200)
+        packed = [pack_tangent(v, s, e) for v, s, e in zip(vectors, signs, scales)]
+        w = np.array([p[0] for p in packed])
+        words = np.array([p[1] for p in packed], np.uint32) | 0x3FF   # normal x field set: it must not leak in
+        tangents, got_signs, got_w = rm.unpack_tangents(w, words)
+        self.assertLess(float(np.abs(tangents - vectors).max()), 0.006)   # 10-bit angles
+        np.testing.assert_allclose(np.linalg.norm(tangents, axis=1), 1.0, atol=1e-12)
+        np.testing.assert_array_equal(got_signs, signs)
+        np.testing.assert_allclose(got_w, signs / (scales / 31.0) ** 2)
+        _t, zero_sign, _w = rm.unpack_tangents([0], [0])
+        self.assertEqual(zero_sign[0], 1.0)   # w = 0 counts as positive, as the program's ige(w, 0)
+
+    def test_decoded_tangents_reach_the_viewer_payload(self):
+        d = rm.decode_model('synthetic', data=build_model(), as_arrays=True)
+        m = d['meshes'][0]
+        expected, signs, w = rm.unpack_tangents(np.full(4, 7), np.full(4, pack_normal((0.0, 0.0, 1.0)), np.uint32))
+        np.testing.assert_allclose(m['tangents'], expected)
+        np.testing.assert_array_equal(m['tangent_signs'], signs)
+        payload = mesh_payload(d, 'Highest', 0)
+        tangents = np.asarray(payload['tangents'])
+        np.testing.assert_allclose(tangents[:4, :3], expected[:, [0, 2, 1]] * [1, -1, 1])   # display basis (x, -z, y)
+        np.testing.assert_allclose(tangents[:4, 3], w)   # the whole TEXCOORD3.w
+        lists = rm.decode_model('synthetic', data=build_model())['meshes'][0]
+        np.testing.assert_allclose(lists['tangents'], expected)
+        np.testing.assert_allclose(lists['tangent_w'], w)
+
     def test_geometry_scale_offset_and_uvs(self):
         d = rm.decode_model('test.model', data=build_model(), as_arrays=True)
         self.assertEqual(d['schema'], rm.SCHEMA)
@@ -143,6 +230,59 @@ class RealModelTests(unittest.TestCase):
             v = n[t[ok, 0]] + n[t[ok, 1]] + n[t[ok, 2]]
             dots.append((f * v / np.linalg.norm(v, axis=1)[:, None]).sum(1))
         self.assertGreater(float(np.median(np.concatenate(dots))), 0.99)
+
+    def test_tangent_matches_the_engine_vertex_program(self):
+        """The engine model vertex programs in the exe, translated and run on Ratchet's vertex streams, write
+        TEXCOORD3 = the decoder's tangent and TEXCOORD3.w; render flag 0x10000 negates w."""
+        from rc2016.games.rcra import vertex as rv
+        from rc2016.shaders import sm5
+        programs = engine_vertex_programs(GAME)
+        self.assertGreaterEqual(len(programs), 1)
+        key = self.source.resolve('characters/hero/hero_ratchet/hero_ratchet.model')[0]
+        data = self.source.asset_data(key)
+        inputs, _offset, count = rv.vertex_streams(data)
+        rows = np.arange(0, count, 37)
+        local = {k: v[rows] for k, v in inputs.items()}
+        local[rv.VERTEX_ID] = rows
+        dat1 = data[rm.HEADER:]
+        offset, size = rm.dat1_sections(dat1)[rm.VERTICES]
+        records = np.frombuffer(dat1[offset:offset + size], rm.VERTEX)[rows]
+        tangents, _signs, w = rm.unpack_tangents(records['xyzw'][:, 3], records['normal'])
+        layout = rv.model_layout(data)
+        for shader in programs:
+            for flags, flip in ((0, 1.0), (0x10000, -1.0)):
+                bindings = rv._VertexBindings((), shader.reflection, layout, flags)
+                translator = sm5.Translator(shader, bindings)
+                bindings.graph = translator.g
+                tr = translator.run()
+                register = {e.semantic: e.register for e in shader.outputs}['TEXCOORD3']
+                terms = {'tangent.' + c: tr.output(register, k) for k, c in enumerate('xyzw')}
+                recipe = rv.export(dict(graph=tr.graph, terms=terms, units={}, unbound=[]))
+                out = rv.run(recipe, local, None, len(rows))
+                got = np.stack([out['tangent.' + c] for c in 'xyz'], 1)
+                np.testing.assert_allclose(got, tangents, atol=2e-6)
+                np.testing.assert_allclose(out['tangent.w'], flip * w, rtol=1e-6)
+
+    def test_tangent_follows_the_uv_frame(self):
+        """The decoded tangent runs along dP/du, and h cross(N, T) along -dP/dv (game v down)."""
+        d = self.decode('characters/hero/hero_ratchet/hero_ratchet.model')
+        cos_u, side = [], []
+        for m in d['meshes'][:31]:
+            p, n, t, h = m['positions'], m['normals'], m['triangles'], m['tangent_signs']
+            uv = np.asarray(m['uv0']).copy()
+            uv[:, 1] = 1.0 - uv[:, 1]
+            e1, e2 = p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]]
+            d1, d2 = uv[t[:, 1]] - uv[t[:, 0]], uv[t[:, 2]] - uv[t[:, 0]]
+            det = d1[:, 0] * d2[:, 1] - d2[:, 0] * d1[:, 1]
+            ok = np.abs(det) > 1e-10
+            dpdu = (e1[ok] * d2[ok, 1:2] - e2[ok] * d1[ok, 1:2]) / det[ok, None]
+            dpdv = (e2[ok] * d1[ok, 0:1] - e1[ok] * d2[ok, 0:1]) / det[ok, None]
+            corner = t[ok, 0]
+            tangent = m['tangents'][corner]
+            cos_u.append((tangent * dpdu).sum(1) / np.maximum(np.linalg.norm(dpdu, axis=1), 1e-30))
+            side.append(np.sign((h[corner, None] * np.cross(n[corner], tangent) * dpdv).sum(1)))
+        self.assertGreater(float(np.median(np.concatenate(cos_u))), 0.99)
+        self.assertGreater(float((np.concatenate(side) < 0).mean()), 0.95)
 
     def test_geometry_less_model_is_reported(self):
         path = 'environment/megalopolis/architecture/meg_arch_rooftop_garden_01/meg_arch_rooftop_garden_planter_bush_x2/garden_planter_bush_x2_stump.model'

@@ -93,14 +93,33 @@ class AtRestTests(unittest.TestCase):
     inputs = {'VB.POS.x': np.array([0, 4096]), 'VB.POS.y': np.array([0, 0]), 'VB.POS.z': np.array([4096, 0])}
     normals = np.array([[0.0, 0.0, 1.0]] * 2)
 
-    def run_pair(self, pair, offset=(0.0, 0.0, 0.0)):
-        return rv.at_rest(pair, self.inputs, None, np.arange(2), np.asarray(offset), self.normals)
+    def run_pair(self, pair, offset=(0.0, 0.0, 0.0), with_tangents=False):
+        return rv.at_rest(pair, self.inputs, None, np.arange(2), np.asarray(offset), self.normals, with_tangents)
 
     def test_offset_lands_in_the_decoder_frame(self):
         positions, normals = self.run_pair(_recipe(0.25), offset=(10.0, 0.0, 0.0))
         np.testing.assert_allclose(positions, [[10.25, 0.0, 1.0], [11.25, 0.0, 0.0]], atol=1e-6)
         self.assertTrue(rv.moved(positions, normals, [[10.0, 0, 1], [11.0, 0, 0]], self.normals))
         self.assertFalse(rv.moved(positions, normals, positions, normals))
+
+    def test_rest_tangent_comes_from_the_program(self):
+        pair = _recipe(0.25)
+        positions, normals, tangents, w = self.run_pair(pair, with_tangents=True)
+        self.assertIsNone(tangents)   # the recipe writes no TEXCOORD3: the stored tangent stays
+        for name in ('rest', 'view'):
+            g = sm5.Graph()
+            g.nodes = [dict(n) for n in pair[name]['nodes']]
+            for k, c in enumerate('xyzw'):
+                g.nodes.append(dict(op='const', type='f', value=(0.0, 1.0, 0.0, -4.0)[k], args=[]))
+                pair[name]['terms']['tangent.' + c] = len(g.nodes) - 1
+            pair[name]['nodes'] = g.nodes
+        positions, normals, tangents, w = self.run_pair(pair, with_tangents=True)
+        np.testing.assert_allclose(tangents, [[0.0, 1.0, 0.0]] * 2)
+        np.testing.assert_allclose(w, [-4.0, -4.0])
+        mesh = dict(positions=positions)
+        rv._set_tangents(mesh, tangents, w)
+        np.testing.assert_array_equal(mesh['tangent_signs'], [-1.0, -1.0])
+        np.testing.assert_allclose(mesh['tangent_w'], w)
 
     def test_view_dependent_program_has_no_rest_shape(self):
         self.assertIsNone(self.run_pair(_recipe(0.25, view_offset=0.5)))

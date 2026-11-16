@@ -397,6 +397,10 @@ def selected_meshes(decoded, lod, look):
 # The shape key that keeps a mesh's stored vertices when a decoder moved them (Rift Apart vertex programs at rest,
 # rc2016.games.rcra.vertex.STORED_SHAPE): a glTF morph target at weight 0, a shape key in Blender.
 STORED_SHAPE = 'stored vertices'
+# Rift Apart's decoded vertex tangent (native axes) and its TEXCOORD3.w as one glTF custom attribute (xyz, w): Blender's
+# importer keeps it as a point attribute of this name (rc2016.export.rcra_blender.TANGENT_ATTRIBUTE). One attribute, since
+# the importer pairs two custom attributes of a primitive with each other's data when its set order differs.
+TANGENT_ATTRIBUTE = '_RCRA_TANGENT'
 
 
 def _unit_normals(normals):
@@ -405,8 +409,9 @@ def _unit_normals(normals):
 
 
 def mesh_arrays(mesh, joint_count):
-    """Native positions/normals, game UVs (top row first), triangles, skin sets (or None), and the stored vertices and
-    normals of a mesh the decoder moved (``stored``, or None)."""
+    """Native positions/normals, game UVs (top row first), triangles, skin sets (or None), the stored vertices and
+    normals of a mesh the decoder moved (``stored``, or None), and a Rift Apart mesh's tangent and TEXCOORD3.w
+    (``tangents``, ``tangent_w``, or None)."""
     positions = np.asarray(mesh['positions'], np.float32).reshape(-1, 3)
     normals = np.asarray(mesh['normals'], np.float32).reshape(-1, 3) if len(mesh.get('normals') if mesh.get('normals') is not None else ()) else None
     if normals is not None:
@@ -422,6 +427,10 @@ def mesh_arrays(mesh, joint_count):
             uv = np.asarray(uv, np.float32).reshape(-1, 2)
             uvs.append(np.stack([uv[:, 0], 1.0 - uv[:, 1]], axis=1))   # decoder flipped V for Blender
     triangles = np.asarray(mesh['triangles'], np.uint32).reshape(-1, 3)
+    tangents = tangent_w = None
+    if mesh.get('tangent_w') is not None and mesh.get('tangents') is not None and len(mesh['tangent_w']) == len(positions):
+        tangents = np.asarray(mesh['tangents'], np.float32).reshape(-1, 3)
+        tangent_w = np.asarray(mesh['tangent_w'], np.float32).reshape(-1)
     skin = None
     if joint_count and mesh.get('weights'):
         joints = np.zeros((len(positions), 8), np.uint16)
@@ -436,7 +445,8 @@ def mesh_arrays(mesh, joint_count):
         weights[total[:, 0] <= 0, 0] = 1.0   # unweighted vertices follow joint 0 (the root)
         sets = 2 if np.any(weights[:, 4:] > 0) else 1
         skin = dict(joints=joints[:, :4 * sets], weights=weights[:, :4 * sets].astype(np.float32), sets=sets, unweighted=unweighted)
-    return dict(positions=positions, normals=normals, uvs=uvs, triangles=triangles, skin=skin, stored=stored)
+    return dict(positions=positions, normals=normals, uvs=uvs, triangles=triangles, skin=skin, stored=stored,
+                tangents=tangents, tangent_w=tangent_w)
 
 
 def _quat_from_matrix(m):
@@ -1051,6 +1061,8 @@ class ModelExporter:
                 attributes['NORMAL'] = g.accessor(a['normals'], 'VEC3', 34962)
             for n, uv in enumerate(a['uvs']):
                 attributes[f'TEXCOORD_{n}'] = g.accessor(uv.astype(np.float32), 'VEC2', 34962)
+            if a.get('tangents') is not None:
+                attributes[TANGENT_ATTRIBUTE] = g.accessor(np.column_stack((a['tangents'], a['tangent_w'])), 'VEC4', 34962)
             if skinned:
                 skin = a['skin']
                 for s in range(skin['sets']):
