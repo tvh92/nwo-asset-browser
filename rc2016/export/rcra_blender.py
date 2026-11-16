@@ -363,7 +363,12 @@ class _Emitter:
             probe = self.node('ShaderNodeNormalMap', space='TANGENT', uv_map=self.uv_maps[0] if self.uv_maps else '')
             probe.inputs['Color'].default_value = colour
             probe.inputs['Strength'].default_value = 1.0
-            probes[name] = probe.outputs[0]
+            # The Normal Map node negates its output on back faces too (Cycles svm_node_normal_map, EEVEE
+            # node_normal_map): un-flipped with the normal, so the tangent is the mesh's on both sides.
+            unflip = self.node('ShaderNodeVectorMath', operation='SCALE')
+            self.link(probe.outputs[0], unflip.inputs[0])
+            self.link(facing, unflip.inputs['Scale'])
+            probes[name] = unflip.outputs[0]
         cross = self.node('ShaderNodeVectorMath', operation='CROSS_PRODUCT')
         self.link(normal.outputs[0], cross.inputs[0])
         self.link(probes['tangent'], cross.inputs[1])

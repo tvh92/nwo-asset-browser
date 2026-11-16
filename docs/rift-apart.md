@@ -711,7 +711,7 @@ The emitter reads its inputs from the mesh:
 - **Tangent frame:** the decoded tangent and `TEXCOORD3.w`.
   - **Export:** the glTF export writes them as one custom point attribute, `_RCRA_TANGENT` (native xyz, w). Blender's importer swaps the data of two custom attributes on one primitive when its set order differs from its list order, so there is only one. The importer makes a VEC4 a float colour attribute.
   - **Conversion:** `rcra_blender.store_tangent_frame` turns the attribute into the tangent's coordinates (a, b, c) at each corner, `T = a t + b (n × t) + c n`, where t is Blender's UV0 tangent (MikkTSpace) and n is the corner normal. They are stored as the corner attribute `rcra_tangent_frame`, w as the point attribute `rcra_tangent_w`, and the colour attribute is removed. The coordinates are solved in that basis, so they also hold where Blender's tangent is not orthogonal to the normal (degenerate UV triangles), and they keep c, the part of the game's tangent along the normal.
-  - **Material:** rebuilds T from the Normal Map node's tangent and the geometry normal, so T turns with the armature as both do.
+  - **Material:** rebuilds T from the Normal Map node's tangent and the geometry normal, so T turns with the armature as both do. On a back face, Cycles and EEVEE negate both the geometry normal and the Normal Map node's output. The material un-flips both, as the game's interpolants are not turned. The UV0-frame fallback does the same.
   - **Without the attribute:** a mesh gets Blender's UV0 frame, with the bitangent sign on Blender's +v (the game's −v), labelled (`NO_TANGENT_NOTE`).
   - **Draw state:** render flag 0x10000 is clear (unmirrored draw).
 - **Vertex colour:** the first colour attribute, else 1.
@@ -780,8 +780,11 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 
 **Tangent checks.** On the swarmer, the decoded frame and the UV-derivative frame draw the same picture, apart from silhouette edges and the grille, where the per-pixel derivative frame is noisy. On the helper bot's `.blend`:
 - the stored coordinates rebuild the decoded tangent at every corner within 2.4 × 10⁻⁷;
-- a Cycles bake of the material's own `TEXCOORD3` agrees with it at a median of 4 × 10⁻⁴ (99.9 % within 0.01, its sign 99.98 %);
-- 17 corners (0.03 %) differ by more than 0.1. They are not traced: the stored coordinates rebuild the tangent there too, so the difference comes from the tangent Cycles computes at those corners.
+- a Cycles bake of the material's own `TEXCOORD3` agrees with it at a median of 4 × 10⁻⁴, and 99.9 % of corners are within 0.01;
+- 13 corners (0.02 %) differ by more than 0.1:
+  - 12 lie on four zero-area triangles, which the bake leaves black and which nothing draws.
+  - One lies on a triangle of 7.5 × 10⁻⁶ square units whose corner tangents differ. The bake samples inside that triangle, not at its corner.
+- Before the back-face fix, four more corners were flipped. They lie on two folded triangles, whose corner normals oppose their winding, so Cycles shades them as back faces.
 
 ### Not translated
 

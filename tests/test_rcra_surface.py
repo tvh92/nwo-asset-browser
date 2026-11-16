@@ -296,6 +296,77 @@ class VolumeTests(unittest.TestCase):
         self.assertAlmostEqual(float(want['albedo'][0, 0]), float(decoded.mean()), places=5)
         np.testing.assert_allclose(got['albedo'][:, :3], want['albedo'], atol=1e-6)
 
+    @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
+    def test_blender_tangent_frame_on_front_and_back_faces(self):
+        """The decoded tangent (glTF attribute _RCRA_TANGENT) rebuilt by the material from Blender's UV0 frame, baked in
+        Cycles: a front-facing triangle, and one whose corner normals oppose its winding, which Cycles shades as a back
+        face (as on the helper bot's folded triangles). The Normal Map node negates its output there."""
+        import json
+        import subprocess
+        script = r'''
+import json, sys
+import bpy
+import numpy as np
+sys.path.insert(0, sys.argv[sys.argv.index('--') + 1])
+from rc2016.export.rcra_blender import TANGENT_ATTRIBUTE, _Emitter, store_tangent_frame
+bpy.ops.wm.read_factory_settings(use_empty=True)
+mesh = bpy.data.meshes.new('frame')
+mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0), (2, 0, 0), (3, 0, 0), (2, 1, 0)], [], [(0, 1, 2), (3, 4, 5)])
+mesh.uv_layers.new(name='UVMap').data.foreach_set('uv', [0, 0, 1, 0, 0, 1] * 2)
+mesh.normals_split_custom_set([(0, 0, 1)] * 3 + [(0, 0, -1)] * 3)
+tangent = np.array([[0.8, 0.5, 0.2]] * 3 + [[0.6, -0.7, -0.3]] * 3)
+tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
+native = np.stack((tangent[:, 0], tangent[:, 2], -tangent[:, 1]), 1)   # Blender (x, y, z) = game (x, -z, y)
+packed = np.column_stack((native, [2.0] * 3 + [-3.0] * 3)).astype(np.float32)
+mesh.attributes.new(TANGENT_ATTRIBUTE, 'FLOAT_COLOR', 'POINT').data.foreach_set('color', packed.ravel())
+assert store_tangent_frame(mesh)
+obj = bpy.data.objects.new('frame', mesh)
+bpy.context.scene.collection.objects.link(obj)
+material = bpy.data.materials.new('probe')
+material.use_nodes = True
+tree = material.node_tree
+tree.nodes.clear()
+frame = _Emitter(tree, dict(nodes=[], terms={}), {}, ['UVMap'], None, tangent=True).frame()
+out, emit = tree.nodes.new('ShaderNodeOutputMaterial'), tree.nodes.new('ShaderNodeEmission')
+tree.links.new(emit.outputs[0], out.inputs['Surface'])
+combine, remap = tree.nodes.new('ShaderNodeCombineXYZ'), tree.nodes.new('ShaderNodeVectorMath')
+remap.operation = 'MULTIPLY_ADD'
+remap.inputs[1].default_value = remap.inputs[2].default_value = (0.5, 0.5, 0.5)
+tree.links.new(combine.outputs[0], remap.inputs[0])
+tree.links.new(remap.outputs[0], emit.inputs['Color'])
+mesh.materials.append(material)
+scene = bpy.context.scene
+scene.render.engine = 'CYCLES'
+scene.cycles.samples = 1
+scene.cycles.device = 'CPU'
+obj.select_set(True)
+bpy.context.view_layer.objects.active = obj
+baked = {}
+for name, sockets in (('tangent', frame['tangent']), ('w', [frame['sign']] * 3)):
+    for k in range(3):
+        for link in list(combine.inputs[k].links):
+            tree.links.remove(link)
+        tree.links.new(sockets[k], combine.inputs[k])
+    attribute = mesh.color_attributes.new('bake_' + name, 'FLOAT_COLOR', 'CORNER')
+    mesh.color_attributes.active_color = attribute
+    bpy.ops.object.bake(type='EMIT', target='VERTEX_COLORS')
+    values = np.empty(len(mesh.loops) * 4, np.float32)
+    attribute.data.foreach_get('color', values)
+    baked[name] = (values.reshape(-1, 4)[:, :3] * 2.0 - 1.0).tolist()
+print('FRAME ' + json.dumps(dict(baked=baked, native=native.tolist())))
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'frame.py'
+            path.write_text(script)
+            run = subprocess.run([BLENDER, '--background', '--factory-startup', '--python-exit-code', '1', '--python',
+                                  str(path), '--', str(Path(__file__).resolve().parents[1])],
+                                 capture_output=True, text=True, timeout=600)
+        line = next((x for x in run.stdout.splitlines() if x.startswith('FRAME ')), None)
+        self.assertIsNotNone(line, run.stdout[-2000:] + run.stderr[-2000:])
+        result = json.loads(line[6:])
+        np.testing.assert_allclose(result['baked']['tangent'], result['native'], atol=0.01)
+        np.testing.assert_allclose(np.asarray(result['baked']['w'])[:, 0], [2.0] * 3 + [-3.0] * 3, atol=0.01)
+
     def test_non_finite_sample_coordinates_are_undefined(self):
         """A coordinate divided by a neutral 0 (here u * inf) samples nowhere: the pixel is left out, not a crash."""
         nodes = [dict(op='input', type='f', name='TEXCOORD.x', args=[]), dict(op='input', type='f', name='TEXCOORD.y', args=[]),
