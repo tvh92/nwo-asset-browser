@@ -187,6 +187,32 @@ class CaseTests(unittest.TestCase):
         self.assertEqual(rsurface.evaluate_recipe(out, inputs, None), rsurface.evaluate_recipe(recipe, inputs, None))
         self.assertEqual(rsurface.evaluate_recipe(out, inputs, None), {'clip': True, 'low': 0.25, 'never': False})
 
+    def test_loop_flag_in_a_float_register_is_pruned_where_unused(self):
+        """An unrolled loop's exit flag kept in a float register (bits2f(b2i(counter >= 16)), NaN when set) and carried
+        into a register the program reads only when the loop did not exit: the NaN is taken out, the values stay. A
+        term that does read the flag keeps its NaN."""
+        g = sm5.Graph()
+        x = g.input('TEXCOORD.x')
+        broke = g.op('lt', x, g.const('f', 0.5))
+        counter = g.op('iadd', g.select(broke, g.const('i', 18), g.const('i', 0)), g.const('i', 1))
+        flag = g.op('bits2f', g.op('b2i', g.op('ige', counter, g.const('i', 16))))
+        reg = g.select(g.op('b_not', broke), g.op('mul', x, g.const('f', 2.0)), flag)
+        dead = g.select(broke, x, g.op('add', reg, g.const('f', 1.0)))
+        live = g.op('add', reg, g.const('f', 0.0))
+        terms = {'dead': dead, 'live': live}
+        out, _packed = self._in_float(g, terms)
+        pruned = rsurface._prune_nan(g, out)
+        nan = lambda i: rsurface._is_nan(g.nodes[i])  # noqa: E731
+        self.assertTrue(any(nan(i) for i in g.reachable([out['dead']])))
+        self.assertFalse(any(nan(i) for i in g.reachable([pruned['dead']])))
+        self.assertTrue(any(nan(i) for i in g.reachable([pruned['live']])))
+        for u in (0.1, 0.49, 0.5, 0.9):
+            want = sm5.evaluate(g, list(terms.values()), {'TEXCOORD.x': u})
+            got = sm5.evaluate(g, list(pruned.values()), {'TEXCOORD.x': u})
+            for k in terms:
+                a, b = got[pruned[k]], want[terms[k]]
+                self.assertTrue(a == b or (a != a and b != b), (k, u, a, b))
+
     def test_fields_packed_and_read_back_are_their_values(self):
         """A word packed from quantised floats (shifted fields, a bfi flag) and read back by and, ubfe and ushr."""
         g = sm5.Graph()

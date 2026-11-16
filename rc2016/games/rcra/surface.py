@@ -813,6 +813,8 @@ def _integers_in_float(g, terms):
         op, args = n['op'], n['args']
         if op in ('itof', 'utof'):
             return f(args[0])
+        if op == 'bits2f' and g.nodes[args[0]]['op'] == 'b2i':   # a boolean kept in a float register: all ones is NaN
+            return g.select(g.nodes[args[0]]['args'][0], g.const('f', float('nan')), g.const('f', 0.0))
         if op in ('ieq', 'ine', 'ilt', 'ige'):
             a, b = f(args[0]), f(args[1])
             if a is None or b is None:
@@ -833,6 +835,112 @@ def _integers_in_float(g, terms):
         if new is not None:
             replace[i] = new
     return _substitute(g, terms, replace), bool(replace), packed[0]
+
+
+NAN_PRUNE_BUDGET = 200000   # node rebuilds; past it the terms are kept as they are
+
+
+class _Budget(Exception):
+    pass
+
+
+def _is_nan(n):
+    return n['op'] == 'const' and isinstance(n.get('value'), float) and n['value'] != n['value']
+
+
+def _learn(g, facts, cond, value):
+    """``facts`` ({condition node: truth}) with cond = value and what follows from it through not, and, or."""
+    out, pending = dict(facts), []
+
+    def learn(node, v):
+        if node in out or g.is_const(node):
+            return
+        out[node] = v
+        n = g.nodes[node]
+        if n['op'] == 'b_not':
+            learn(n['args'][0], not v)
+        elif n['op'] == ('b_and' if v else 'b_or'):
+            for a in n['args']:
+                learn(a, v)
+        elif n['op'] in ('b_and', 'b_or'):
+            pending.append(node)   # a false and, a true or: one side follows once the other is known
+    learn(cond, value)
+    for node, v in facts.items():   # earlier facts may now decide a pending side
+        if g.nodes[node]['op'] in ('b_and', 'b_or') and v == (g.nodes[node]['op'] == 'b_or'):
+            pending.append(node)
+    changed = True
+    while changed:
+        changed = False
+        for node in pending:
+            x, y = g.nodes[node]['args']
+            want = g.nodes[node]['op'] == 'b_or'
+            for p, q in ((x, y), (y, x)):
+                if out.get(p) is (not want) and q not in out:
+                    learn(q, want)
+                    changed = True
+    return out
+
+
+def _prune_nan(g, terms):
+    """``terms`` with the NaN constants that only select branches no input reaches taken out: each select's branches are
+    rebuilt knowing its condition (true in the first, false in the second), so a select inside them on a condition that
+    follows takes its branch. Exact. An unrolled loop's exit flag kept in a float register (all ones, NaN) is carried into
+    later iterations' registers only on paths the loop's own conditions rule out; an emitter whose select is arithmetic
+    (Blender's b + c (a - b)) would otherwise spread the NaN of the branch not taken."""
+    reach = g.reachable(list(terms.values()))
+    if not any(_is_nan(g.nodes[i]) for i in reach):
+        return terms
+    tainted = set()
+    for i in sorted(reach):   # arguments come before their users
+        n = g.nodes[i]
+        if _is_nan(n) or any(a in tainted for a in n['args']):
+            tainted.add(i)
+    memo, count = {}, [0]
+    leaves = sm5.Translator.LEAVES
+
+    def rebuild(n, args):
+        meta = {m: v for m, v in n.items() if m not in ('op', 'type', 'args')}
+        if not meta and n['op'] in sm5.OPS:
+            return g.op(n['op'], *args)   # folds a comparison whose operands the facts decided
+        return g._add(n['op'], n['type'], args, **meta)
+
+    def under(i, facts, key):
+        """i under facts: a select on a decided condition takes its branch; a select whose branches hold NaN is
+        rebuilt with its condition known in each."""
+        if i in facts:
+            return g.const('b', facts[i])
+        n = g.nodes[i]
+        if i not in tainted and (n['op'] in leaves or not g.predicated[i]):
+            return i   # a texture read at a NaN address is rebuilt like any other node
+        k = (i, key)
+        if k in memo:
+            return memo[k]
+        count[0] += 1
+        if count[0] > NAN_PRUNE_BUDGET:
+            raise _Budget
+        if n['op'] == 'select':
+            c = under(n['args'][0], facts, key)
+            taken = g.value(c)
+            if taken is not None:
+                out = under(n['args'][1] if taken else n['args'][2], facts, key)
+            elif i in tainted:
+                yes, no = _learn(g, facts, c, True), _learn(g, facts, c, False)
+                out = g.select(c, under(n['args'][1], yes, frozenset(yes.items())),
+                               under(n['args'][2], no, frozenset(no.items())))
+            else:
+                out = g.select(c, under(n['args'][1], facts, key), under(n['args'][2], facts, key))
+        else:
+            args = [under(a, facts, key) for a in n['args']]
+            out = i if args == n['args'] else rebuild(n, args)
+        if out in facts:   # rebuilt into a node the facts decide (hash-consing makes it the same node)
+            out = g.const('b', facts[out])
+        memo[k] = out
+        return out
+    try:
+        pruned = {name: under(i, {}, frozenset()) for name, i in terms.items()}
+    except (_Budget, RecursionError):
+        return terms
+    return pruned
 
 
 def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, what):
@@ -865,6 +973,11 @@ def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, wh
                 reach = g.reachable(roots)
     if bad:
         raise Unsupported('Non-portable operations remain: ' + ', '.join(bad))
+    pruned = _prune_nan(g, terms)
+    if pruned is not terms:
+        terms = pruned
+        roots = list(terms.values())
+        reach = g.reachable(roots)
     if g.unknowns(roots):
         raise Unsupported('%s depends on unknown values' % what)
     textures = {}
