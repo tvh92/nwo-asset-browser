@@ -277,7 +277,7 @@ class Gallery:
         self.scrollbar = ttk.Scrollbar(self.frame, orient='vertical', command=self._scroll_command)
         self.scrollbar.grid(row=1, column=1, sticky='ns')
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.message = ttk.Label(self.frame, text='Thumbnails need an Output folder: they are cached there. Set Output above.',
+        self.message = ttk.Label(self.frame, text='Thumbnails need a game folder. Pick a Source above.',
                                  wraplength=380, justify='center')
         self.canvas.bind('<Configure>', lambda _e: self._relayout())
         self.canvas.bind('<ButtonPress-1>', self._click)
@@ -337,15 +337,15 @@ class Gallery:
             return
         self.stale = False
         app = self.app
-        output = app.output_var.get().strip()
-        if not output:
+        game = app.game
+        if game is None:
             self._show_message(True)
             self.records, self.ids = [], set()
             self.info_var.set('')
             self.stop_renderer()
             return
         self._show_message(False)
-        root = Path(output)
+        root = game.cache_dir()   # the app's own .cache, never the output folder
         if root != self.cache_root:
             self.cache_root = root
             self._clear_images()
@@ -903,7 +903,7 @@ class Gallery:
                 self._clear_images()
             if code not in (0, None) and not self.blocked:
                 self.blocked = f'renderer exited with code {code}; see .cache/thumbnails/renderer.log'
-                self.app._append_log(f'Thumbnail renderer exited with code {code}; see .cache/thumbnails/renderer.log in the output folder.', 'error')
+                self.app._append_log(f'Thumbnail renderer exited with code {code}; see thumbnails/renderer.log in the game .cache folder.', 'error')
             self._describe()
             if finished_all:
                 self.info_var.set('Thumbnails finished.')

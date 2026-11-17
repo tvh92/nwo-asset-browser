@@ -3,9 +3,9 @@
 The renderer runs as its own process so the browser's Tk thread and 3D view never block and
 a batch can be cancelled::
 
-    python -m rc2016.app.thumbnails --source <game root> --output <output root> [--ids-file F | --all]
+    python -m rc2016.app.thumbnails --source <game root> --cache <game cache folder> [--ids-file F | --all]
 
-Thumbnails are written to ``<output>/.cache/thumbnails/<model id>.png`` and described by
+Thumbnails are written to ``<cache>/thumbnails/<model id>.png`` and described by
 ``index.json`` in the same folder. One JSON line per finished model goes to stdout.
 The pure parts (index, PNG, downsampling, argument handling) import without Tk or OpenGL.
 """
@@ -33,9 +33,10 @@ STATUSES = ('ok', 'unsupported', 'error')
 
 
 # Cache layout and index ------------------------------------------------------
-def cache_dir(output_root) -> Path:
-    """Folder that holds the thumbnails of one output root (never the source folders or the repository)."""
-    return Path(output_root) / '.cache' / 'thumbnails'
+def cache_dir(cache_root) -> Path:
+    """Folder that holds one game's thumbnails: under the game's cache folder (``Game.cache_dir()``, inside the
+    app's own ``.cache``), never the output root or the source folders."""
+    return Path(cache_root) / 'thumbnails'
 
 
 def safe_name(model_id) -> str:
@@ -230,7 +231,7 @@ def entry_identity(archive, entry):
 def build_parser():
     parser = argparse.ArgumentParser(prog='python -m rc2016.app.thumbnails', description=__doc__.splitlines()[0])
     parser.add_argument('--source', required=True, type=Path, help='extracted game archive root (read only)')
-    parser.add_argument('--output', required=True, type=Path, help='output root; thumbnails go to <output>/.cache/thumbnails')
+    parser.add_argument('--cache', required=True, type=Path, help='the game cache folder; thumbnails go to <cache>/thumbnails')
     parser.add_argument('--size', type=int, default=DEFAULT_SIZE, help='thumbnail edge in pixels (32-512)')
     parser.add_argument('--ids-file', type=Path, help='model ids to render, one per line, in priority order')
     parser.add_argument('--all', action='store_true', help='render every archive model (after any ids from --ids-file)')
@@ -433,7 +434,7 @@ def run(args) -> int:
     # Thumbnails do not need the streamed HD mips (interactive viewing is unaffected: this is this process only).
     textures.MIN_PREVIEW_SIZE = 0
     size, supersample = args.size, SUPERSAMPLE
-    folder = cache_dir(args.output)
+    folder = cache_dir(args.cache)
     folder.mkdir(parents=True, exist_ok=True)
     index = ThumbnailIndex.load(folder)
     loader = SourcePreviewLoader()
@@ -517,22 +518,22 @@ def run(args) -> int:
 class RendererProcess:
     """One owned renderer child: JSON status lines arrive on ``events``; no shell command string."""
 
-    def __init__(self, source, output, ids=None, all_models=False, size=DEFAULT_SIZE, cwd=None, python=None, ids_dir=None):
+    def __init__(self, source, cache, ids=None, all_models=False, size=DEFAULT_SIZE, cwd=None, python=None, ids_dir=None):
         self.events = queue.Queue()
         self.process = None
         self.finished = threading.Event()
         self.lock = threading.Lock()
         self.ids = list(ids or [])
         self.command = None
-        self.source, self.output, self.size, self.all_models = source, output, size, all_models
+        self.source, self.cache, self.size, self.all_models = source, cache, size, all_models
         self.cwd, self.python = cwd, python
-        self.ids_dir = Path(ids_dir) if ids_dir else cache_dir(output)
+        self.ids_dir = Path(ids_dir) if ids_dir else cache_dir(cache)
 
     def start(self):
-        folder = cache_dir(self.output)
+        folder = cache_dir(self.cache)
         folder.mkdir(parents=True, exist_ok=True)
         command = [str(self.python or sys.executable), '-m', 'rc2016.app.thumbnails', '--source', str(self.source),
-                   '--output', str(self.output), '--size', str(self.size)]
+                   '--cache', str(self.cache), '--size', str(self.size)]
         if self.ids:
             ids_file = self.ids_dir / f'queue-{os.getpid()}-{id(self)}.txt'
             ids_file.write_text('\n'.join(self.ids) + '\n', encoding='utf8')

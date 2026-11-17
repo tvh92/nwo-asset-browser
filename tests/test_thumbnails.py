@@ -44,8 +44,8 @@ class IndexTests(unittest.TestCase):
         index.write_png(model_id, b'png')
         return index.record(model_id, 'ok', source_hash, size)
 
-    def test_cache_lives_under_the_output_root_cache_folder(self):
-        self.assertEqual(self.folder, Path(self.temp.name) / '.cache' / 'thumbnails')
+    def test_cache_lives_under_the_game_cache_folder(self):
+        self.assertEqual(self.folder, Path(self.temp.name) / 'thumbnails')
 
     def test_file_names_are_safe(self):
         self.assertEqual(th.safe_name('f696247894031f0d7010'), 'f696247894031f0d7010')
@@ -166,14 +166,14 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(th.read_ids_file(path), ['b', 'a', 'c'])
 
     def test_arguments(self):
-        args = th.parse_arguments(['--source', 'S', '--output', 'O', '--all'])
+        args = th.parse_arguments(['--source', 'S', '--cache', 'O', '--all'])
         self.assertEqual((args.size, args.all, args.force, args.no_fbo, args.ids_file), (192, True, False, False, None))
-        args = th.parse_arguments(['--source', 'S', '--output', 'O', '--ids-file', 'f.txt', '--size', '96', '--limit', '5'])
+        args = th.parse_arguments(['--source', 'S', '--cache', 'O', '--ids-file', 'f.txt', '--size', '96', '--limit', '5'])
         self.assertEqual((args.size, args.limit, args.ids_file), (96, 5, Path('f.txt')))
 
     def test_argument_errors(self):
-        for argv in (['--source', 'S', '--output', 'O'],                       # nothing to render
-                     ['--source', 'S', '--output', 'O', '--all', '--size', '8'],
+        for argv in (['--source', 'S', '--cache', 'O'],                       # nothing to render
+                     ['--source', 'S', '--cache', 'O', '--all', '--size', '8'],
                      ['--source', 'S', '--all']):
             with self.subTest(argv=argv), mock.patch('sys.stderr'), self.assertRaises(SystemExit):
                 th.parse_arguments(argv)
@@ -183,11 +183,11 @@ class CommandLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'ids.txt'
             path.write_text('id3\n', encoding='utf8')
-            args = th.parse_arguments(['--source', 'S', '--output', 'O', '--ids-file', str(path), '--all'])
+            args = th.parse_arguments(['--source', 'S', '--cache', 'O', '--ids-file', str(path), '--all'])
             self.assertEqual(th.select_ids(args, models), ['id3', 'id1', 'id2'])
-            args = th.parse_arguments(['--source', 'S', '--output', 'O', '--ids-file', str(path)])
+            args = th.parse_arguments(['--source', 'S', '--cache', 'O', '--ids-file', str(path)])
             self.assertEqual(th.select_ids(args, models), ['id3'])
-            args = th.parse_arguments(['--source', 'S', '--output', 'O', '--all', '--limit', '2'])
+            args = th.parse_arguments(['--source', 'S', '--cache', 'O', '--all', '--limit', '2'])
             self.assertEqual(th.select_ids(args, models), ['id1', 'id2'])
 
 
