@@ -99,9 +99,6 @@ def decoded_maps(source, key):
     out = dict(layout=None, occlusion=False, g=None, m=None, reason=None)
     try:
         graph = vm._graph(source, key)
-        if graph is None:
-            out['reason'] = 'a fur material: its fur constants are not decoded'
-            return out
         surface, _forward, _blend, _limitations, textures = vm.translate(source, key)
     except (ValueError, KeyError, OSError) as error:   # NotTranslated and Unsupported are ValueErrors
         out['reason'] = 'the writer does not translate: %s' % error
@@ -109,9 +106,12 @@ def decoded_maps(source, key):
     if surface is None:
         out['reason'] = 'the material draws no G-buffer surface'
         return out
-    rows, _offsets, _defaults = rshaders._layout(graph)
-    binding = {k: 'textureUnit%d' % (rshaders.FIRST_MATERIAL_UNIT + u) for u, k, _p in rows}
-    g_binding, m_binding = binding.get(rmat.SLOT_G), binding.get(rmat.SLOT_MASK)
+    if graph is None:   # a fur material: the engine fur writer's gloss and control maps (rc2016.games.rcra.fur)
+        g_binding, m_binding = 'g_FurGlossMap', 'g_FurControlMap'
+    else:
+        rows, _offsets, _defaults = rshaders._layout(graph)
+        binding = {k: 'textureUnit%d' % (rshaders.FIRST_MATERIAL_UNIT + u) for u, k, _p in rows}
+        g_binding, m_binding = binding.get(rmat.SLOT_G), binding.get(rmat.SLOT_MASK)
     out['layout'], out['occlusion'], out['reason'] = _plain(surface, g_binding, m_binding)
     out['g'] = textures.get(g_binding) if out['layout'] else None
     out['m'] = textures.get(m_binding) if out['occlusion'] else None

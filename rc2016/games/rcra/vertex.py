@@ -488,8 +488,10 @@ def run(recipe, inputs, reader, count):
 def _code_sha256():
     from pathlib import Path
     package = Path(__file__).resolve().parents[2]
-    files = [Path(__file__), package / 'shaders' / 'sm5.py', package / 'shaders' / 'dxbc.py',
-             package / 'games' / 'rcra' / 'shaders.py']
+    # The cached recipes also hold the slot binding (material.py) and the missing-texture stand-ins (blender_export.py,
+    # texture.py).
+    files = [Path(__file__), package / 'shaders' / 'sm5.py', package / 'shaders' / 'dxbc.py'] + [
+        package / 'games' / 'rcra' / name for name in ('shaders.py', 'material.py', 'blender_export.py', 'texture.py')]
     try:
         return hashlib.sha256(b''.join(f.read_bytes() for f in files)).hexdigest()
     except OSError:

@@ -329,34 +329,46 @@ def _images(source, results, folder, texture_cache):
             for binding, path in textures.items()}
 
 
+def engine_default(kind):
+    """The engine default texture (texture.ENGINE_DEFAULTS) of a slot type (material.SLOT_TYPE_*)."""
+    from rc2016.games.rcra import material as rmat
+    from rc2016.games.rcra import texture as rtex
+    if kind == rmat.SLOT_TYPE_3D:
+        return rtex.ENGINE_DEFAULT_3D
+    if kind in rmat.SLOT_TYPES_CUBE:
+        return rtex.ENGINE_DEFAULT_CUBE
+    return rtex.ENGINE_DEFAULT_2D   # 2D, and 1D whose default holds the same value
+
+
 def replace_missing(source, graph_data, result):
-    """Replace in a translation result each texture the install does not hold: by the graph's default for that unit when
-    the install has it, else by texture.UNBOUND (reads 0, as an unbound D3D resource). The result's limitations say which;
-    the game's own fallback for a texture it cannot load is not known."""
+    """Replace in a translation result each texture the install does not hold by the engine default texture of its slot
+    type, as the game binds it (texture.ENGINE_DEFAULTS); a unit no slot row names takes texture.UNBOUND (reads 0, as an
+    unbound D3D resource). The result's limitations name each texture and its stand-in."""
+    from rc2016.games.rcra import material as rmat
     from rc2016.games.rcra import shaders as rshaders
-    from rc2016.games.rcra.texture import UNBOUND
+    from rc2016.games.rcra.texture import CONSTANT_TEXTURES, UNBOUND
 
     def present(path):
-        return path == UNBOUND or sum(source.entries[k]['type'] == 'texture' for k in source.resolve(path)) == 1
-    defaults = {}
+        return path in CONSTANT_TEXTURES or sum(source.entries[k]['type'] == 'texture' for k in source.resolve(path)) == 1
+    kinds = {}
     if graph_data is not None:
-        rows, _offsets, _defaults = rshaders._layout(graph_data)
-        defaults = {'textureUnit%d' % (rshaders.FIRST_MATERIAL_UNIT + unit): re.sub('/+', '/', default)
-                    for unit, _key, default in rows if default}
+        kinds = {'textureUnit%d' % (rshaders.FIRST_MATERIAL_UNIT + row[0]): row[4]
+                 for row in rmat.graph_slot_rows(graph_data)}
     notes = []
     for binding, path in sorted(result['textures'].items()):
         if present(path):
             continue
-        default = defaults.get(binding)
-        stand_in = default if default and default != path and present(default) else UNBOUND
+        stand_in = engine_default(kinds[binding]) if binding in kinds else UNBOUND
         result['textures'][binding] = stand_in
-        notes.append('%s (%s): %s' % (path, binding, 'the graph default %s' % stand_in if stand_in != UNBOUND
-                                       else 'reads 0, as an unbound texture'))
+        notes.append('%s (%s): %s' % (path, binding, ENGINE_DEFAULT_NOTES.get(stand_in, 'reads 0, as an unbound texture')))
     if notes:
         result['limitations'].append(MISSING_NOTE % '; '.join(notes))
 
 
-MISSING_NOTE = 'Textures the install does not hold, with their stand-ins: %s.'
+MISSING_NOTE = 'Textures the install does not hold, with the engine default the game binds in their place: %s.'
+ENGINE_DEFAULT_NOTES = {'engine/default_2d.texture': 'Default 2D, 128/255 in every channel',
+                        'engine/default_3d.texture': 'Default 3D, 1 in every channel',
+                        'engine/default_cube.texture': 'Default Cube, 128/255 in every channel'}
 
 
 def _reads_background(recipe):

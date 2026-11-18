@@ -428,7 +428,7 @@ The viewer draws a labelled **Rift Apart preview** (`rule_kind 'rift apart previ
 - **`_g` and `_m` maps:** the preview does not read them. Their channels ([above](#_g-and-_m-channels)) reach the viewer through the translated programs, which apply each graph's own form.
 - **Material graphs:** the preview translates no graph shader. Architecture glass keeps its hand decode (next section) as the fallback of the translated program. 1,474 graphs exist; 1,386 are bound by materials and 29 materials bind none.
 - **Gloss, metal, emission and blending:** these are review values, not game data.
-- **Fur shells:** they have no texture slots, so they draw in the neutral colour.
+- **Fur shells:** not drawn. A fur material's preview takes the base colour and normal from its fur record ([Fur materials](#fur-materials)).
 
 ### Architecture glass (`gbl_arch_glass`)
 
@@ -438,12 +438,17 @@ The one decoded graph. 44 materials use it, among them the Nefarious trooper and
 
 | Section | Content |
 | --- | --- |
-| `0x1CAFE804` (graph) | Slot table, rows of (u32 default-texture string offset, u16, u16 unit, u64 slot hash). Unit `u` is texture register `t(5 + u)`. |
+| `0x1CAFE804` (graph) | Slot table, rows of (u32 default-texture string offset, u16 exposed flag, u16 unit, u32 slot key, u32 slot type) (`material.graph_slot_rows`). Unit `u` is texture register `t(5 + u)`. |
 | `0x45C4F4C0` (graph) | Parameter records (u16 byte offset, u16 byte size, u32 key); the offset is the dword position in `cb2`. |
 | `0xA59F667B` (graph) | The float defaults of `cb2`. |
 | `0xF5260180` (material) | The same record layout from byte 40, its values in a block that starts at header word 2. |
 
-`cb2` is the graph's defaults overwritten by the material's values at the graph's offsets. An unbound texture unit takes the graph's default texture.
+`cb2` is the graph's defaults overwritten by the material's values at the graph's offsets.
+
+**Texture binding** (`material.slot_texture`, traced in the engine's material loader). For each slot row:
+- **Exposed row** (flag 1): the material's texture for the slot key when the material binds that key, else the graph's default path.
+- **Hidden row** (flag 0): always the graph's default path, even when the material binds the key. In the install, 4,382 of 32,658 rows are hidden, and 26 material texture records name a hidden row (stale records, such as the orb pickup's colour).
+- **Missing path:** when the path is empty or not installed, the engine's default texture for the slot type ([Missing textures](#missing-textures)).
 
 **Texture units**
 
@@ -612,7 +617,22 @@ A lit material's background coefficient could carry the forward lighting the pro
 
 **Scene mode.** A program that reads the scene behind other than as an affine tint keeps it: the screen blend curves of the holograms and camera panes (`bg < 0.5 ? 2ab : …`), a vignette's contrast power, the absolute value or saturate of a distorted scene, and particles that read one background channel into all three. `surface.forward` then returns the whole target with `BACKGROUND.rgba` as inputs and a background tint of 0 (`reads_scene`), labelled (`SCENE_NOTE`). A lit one qualifies only when its target reads the scene and the light sources in separate summands (`surface._separable` over the symbolic translation), so the scene passes through unlit. The symbolic values are the light sources only: the unbound `GlobalWorldCBuffer` constants and the lighting textures; view and draw settings (clip plane, depth of field, temporal jitter, alpha overrides) keep their profile values. The viewer samples the inputs from a copy of its frame taken before the batch; Blender has no node for the scene behind, so these materials keep their G-buffer surface there.
 
-**Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps (`TextureCube`, and a `TextureCubeArray` read at a constant cube index) are sampled along the direction the program computes (the first three address lanes, in game space). The explicit mip level, bias or gradients of a cube lookup are not applied: the top mip is read, and the result says so. An array read at a run-time index, or a cube read by `gather` or `ld`, is unsupported. A cube texture's slices are its faces, six per cube in the order +X, -X, +Y, -Y, +Z, -Z, top row first. A constant array index that is NaN (a per-object seed of 0 divided by 0) reads slice 0, as D3D converts NaN to the integer 0 (`blender_export._slice_index`), and one past the array reads its last slice, as D3D clamps an array index (`slice_index`). A texture a material binds that the install does not hold (about 20 materials) is replaced by the graph's default for that unit when the install has it, else by a texture that reads 0 in every channel, as an unbound D3D resource does (`texture.UNBOUND`). The game's own fallback is not known; the limitations name each texture and its stand-in (`blender_export.replace_missing`).
+**Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps (`TextureCube`, and a `TextureCubeArray` read at a constant cube index) are sampled along the direction the program computes (the first three address lanes, in game space). The explicit mip level, bias or gradients of a cube lookup are not applied: the top mip is read, and the result says so. An array read at a run-time index, or a cube read by `gather` or `ld`, is unsupported. A cube texture's slices are its faces, six per cube in the order +X, -X, +Y, -Y, +Z, -Z, top row first. A constant array index that is NaN (a per-object seed of 0 divided by 0) reads slice 0, as D3D converts NaN to the integer 0 (`blender_export._slice_index`), and one past the array reads its last slice, as D3D clamps an array index (`slice_index`). A texture the install does not hold gets the engine's default ([Missing textures](#missing-textures)).
+
+#### Missing textures
+
+`RiftApart.exe` builds its default textures at start-up ("TextureDefaultsInit"). When a material texture's asset does not exist, the asset manager reports it missing ("did not load because the asset does not exist"). The material loader's default for the slot then stays bound in its place. The texture's own graph default is not tried. `blender_export.replace_missing` binds the same default (`texture.ENGINE_DEFAULTS`), and the material's limitations name each texture and its stand-in. A unit that no slot row names reads 0, as an unbound D3D resource does (`texture.UNBOUND`).
+
+The default follows the slot type, the high u32 of the slot hash. Each default is a 4 × 4 `R8G8B8A8_UNORM` texture of one texel value:
+
+| Slot type | Rows in the install | Default | Texel |
+| --- | --- | --- | --- |
+| `0x49A7866B` (2D), and any other type | 29,765 | Default 2D | 128/255 in every channel |
+| `0x628AD5A8` (1D) | 2,086 | Default 1D | 128/255 in every channel |
+| `0x50BCB72A` (3D) | 685 | Default 3D | 1 in every channel |
+| `0x884C4BF8`, `0x186494E9` (cube) | 122 | Default Cube | 128/255 in every channel |
+
+107 slot bindings in the install name a texture that is not installed. The engine also builds "Asset Missing" textures (opaque blue) and "Asset Error" textures (opaque red), but a material texture never shows them. The missing hook runs while the reference is created, and the loader's default replaces its proxy afterwards.
 
 **Coverage:** 1,744 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0), 27 of them in scene mode, which Blender does not draw. Not translated: the three goo decals that light the scene behind them through a specular factor.
 
@@ -672,13 +692,44 @@ All 583 translate. Slots 3, 10, 13 and 17 place every vertex where slot 7 does, 
 
 ### Fur materials
 
-A fur material (19: Ratchet's and Rivet's head, ears and limbs, Daxter, the sheep, a carpet, a towel, a cotton canopy and a cloud) has no graph. In place of the serialized parameters it carries a fur record, DAT1 section 0xD9B12454: 13 u32, an integer (32 on Ratchet's head), eight floats, and four offsets into the material's DAT1 of its texture paths, in the order base colour, normal, gloss and fur control (`fur.fur_record`; the viewer's preview takes the first three as its slots).
+A fur material (19: Ratchet's and Rivet's head, ears and limbs, Daxter, the sheep, a carpet, a towel, a cotton canopy and a cloud) has no graph. In place of the serialized parameters it carries a fur record, DAT1 section 0xD9B12454 (`fur.fur_record`; the viewer's preview takes the first three textures as its slots). The executable names its fields: the material loader copies them into its fur object, and a per-instance override pass writes each field by its name hash.
+
+| Record u32 | Field | Ratchet's head |
+| --- | --- | --- |
+| 0 | `Fur_LayerCount` (integer) | 32 |
+| 1 | `Fur_LoDReduction` | 0 |
+| 2 | `Fur_Length` | 0.03 |
+| 3 | `Fur_Density` | 16 |
+| 4 | `Fur_OffsetScale` | 1 |
+| 5 | `Fur_GlossScale` | 1 |
+| 6 | `Fur_SpecularScale` | 1 |
+| 7 | `Fur_TransmittanceScale` | 0.1 |
+| 8 | `Fur_Wetness` | 0 |
+| 9 to 12 | Offsets into the material's DAT1 of `Fur_BaseMap`, `Fur_NormalMap`, `Fur_GlossMap` and `Fur_ControlMap` | `_c`, `_n`, `_g`, fur control |
+
+`Fur_WindStrength` and `Fur_WindTurbulence` follow in the fur object and are 0 from the file. Every installed record holds wetness 0.
 
 The executable holds the fur programs, found by their reflection names (`fur.fur_writer`): the fur G-buffer writer, a ps_5_0 with constant buffer `MatrialFurCBuffer` (`m_Density`, `m_Length`, `m_GlossScale`, `m_SpecularScale`, `m_TransmittanceScale`, `m_Wetness`) and textures `g_BaseMap` (t5), `g_FurLayerMap` (t7, 3D), `g_FurGlossMap` (t8) and `g_FurControlMap` (t9), writing the four engine targets; a five-target variant; and the shell vertex programs (`ModelFurCBuffer`). `surface.surface` takes the writer as its `program` (`fur.fur_program`), so the material gets the same terms and packing as a graph's writer: albedo from the base map, F0 and gloss from the gloss map, occlusion from the control map, and the vertex normal (the writer binds no normal map).
 
+The fur draw (render command `0x21`, "ModelFurShellGBufferDeferred") copies six fields into `g_Fur` unchanged. `fur.fur_constants` binds them the same way:
+- `m_Density` from `Fur_Density`
+- `m_Length` from `Fur_Length`
+- `m_GlossScale` from `Fur_GlossScale`
+- `m_SpecularScale` from `Fur_SpecularScale`
+- `m_TransmittanceScale` from `Fur_TransmittanceScale`
+- `m_Wetness` from `Fur_Wetness`
+
+It binds the base, normal, gloss and control maps at t5, t6, t8 and t9. The shell constant buffer (`ModelFurCBuffer`) takes `Fur_OffsetScale`, one over the drawn layer count (`Fur_LayerCount` cut by `Fur_LoDReduction` with distance), `Fur_Length` and the wind terms clamped to [0, 1].
+
+**Layer map.** `g_FurLayerMap` is the engine's "Default Fur Shells" texture, built at start-up, so no file of it ships. It is a 128 × 128 × 32 R8 volume made from the engine's xorshift128 generator, seeded with the canonical state (123456789, 362436069, 521288629, 88675123). For each texel column, x outer and y inner:
+- **Strand length:** n = min(⌊32 (r / 2²⁴)²⌋ + 1, 32), where r is the next random number shifted right by 8.
+- **Layers:** layer d < n holds ⌊255 sat(1 − 0.8 max(2 (d + 1) / n − 1, 0)²)⌋.
+
+The generator saves and restores the global random state, so the map is the same on every run.
+
 What is not decoded, and labelled (`fur.FUR_NOTE`):
-- How the engine fills the fur constants from the record. The surface terms read `m_GlossScale`, `m_SpecularScale` and `m_Wetness`, bound to review values 1, 1 and 0 (`FUR_REVIEW`).
-- The shells: layers extruded along the normal and cut by the layer map, which the engine builds at run time (no texture of it ships). The writer's discard, sat(layer term + TEXCOORD3.w) < 0.5, is that cut and is not applied: the material is its base surface.
+- **Wetness at run time:** gameplay can raise `Fur_Wetness` through the override pass and the FurWetness settings, for example in rain. The material keeps the record's dry value.
+- **Shells:** the shells are layers extruded along the normal by the shell vertex programs and cut by the layer map. They are not drawn, so the material is its base surface. The writer's discard, sat(layer term + TEXCOORD3.w) < 0.5, is that cut and is not applied.
 
 ## Blender materials
 

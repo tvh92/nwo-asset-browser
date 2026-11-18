@@ -2,8 +2,12 @@
 
 A fur material (19 in the install: Ratchet's and Rivet's head, ears and limbs, Daxter, the sheep, a carpet, a towel, a
 cotton canopy and a cloud) has DAT1 section 0xD9B12454 instead of the serialized parameter section. The record is 13 u32:
-dword 0 is an integer (32 on Ratchet's head), eight floats follow, and dwords 9 to 12 are offsets into the material's DAT1
-of four texture paths, in the order base colour (_c), normal (_n), gloss (_g) and fur control (19 of 19 materials).
+the layer count (32 on Ratchet's head), eight floats (FUR_FIELDS) and four offsets into the material's DAT1 of the texture
+paths, in the order base colour (_c), normal (_n), gloss (_g) and fur control (19 of 19 materials). RiftApart.exe names
+them: the material loader (0x1410d196c) copies the nine values into its fur object, whose fields the per-instance override
+pass (0x1410cec20) writes by name hash: Fur_LayerCount, Fur_LoDReduction, Fur_Length, Fur_Density, Fur_OffsetScale,
+Fur_GlossScale, Fur_SpecularScale, Fur_TransmittanceScale and Fur_Wetness, then Fur_WindStrength and Fur_WindTurbulence
+(0 from the file), Fur_BaseMap, Fur_NormalMap, Fur_GlossMap and Fur_ControlMap.
 
 The executable holds the programs (found by their reflection names, rc2016.shaders.dxbc): the fur G-buffer writer, a
 ps_5_0 with constant buffer MatrialFurCBuffer (g_Fur: m_Density, m_Length, m_GlossScale, m_SpecularScale,
@@ -11,11 +15,13 @@ m_TransmittanceScale, m_Wetness), textures g_BaseMap (t5), g_FurLayerMap (t7, 3D
 (t9), and the engine's four G-buffer targets; a five-target variant; and the shell vertex programs (ModelFurCBuffer). The
 writer binds no normal map: its normal is the vertex normal.
 
-How the engine fills g_Fur from the record is not decoded. The writer's surface terms read m_GlossScale, m_SpecularScale
-(F0 and gloss) and m_Wetness (albedo); they are bound to review values (FUR_REVIEW), labelled. The shells, layers extruded
-along the normal and cut by the layer map, are not drawn: the material is its base surface. The writer's discard is that
-cut, sat(layer term + TEXCOORD3.w) < 0.5, where the shell pass's interpolant and the engine's layer map (built at run
-time: no texture of it ships) are not available, so it is not applied.
+The fur draw (command 0x21 "ModelFurShellGBufferDeferred", 0x1410ee6b0) copies the fur object into g_Fur unchanged:
+m_Density, m_Length, m_GlossScale, m_SpecularScale, m_TransmittanceScale and m_Wetness (fur_constants), and binds the base,
+normal, gloss and control maps at t5, t6, t8 and t9. The writer's surface terms read m_GlossScale, m_SpecularScale (F0
+and gloss) and m_Wetness (albedo). Every installed record holds wetness 0; gameplay can raise it at run time (the
+override pass's Fur_Wetness, the FurWetness settings), which is not modelled. The shells, layers extruded along the
+normal and cut by the layer map, are not drawn: the material is its base surface. The writer's discard is that cut,
+sat(layer term + TEXCOORD3.w) < 0.5, where the shell pass's interpolant is not available, so it is not applied.
 """
 import os
 import struct
@@ -27,13 +33,17 @@ FUR_RECORD = 0xD9B12454
 EXECUTABLE = 'RiftApart.exe'
 FUR_BUFFER = 'MatrialFurCBuffer'    # sic, the engine's name
 FUR_UNITS = {0: 'g_BaseMap', 2: 'g_FurGlossMap', 3: 'g_FurControlMap'}   # record texture index -> writer binding
-FUR_REVIEW = {FUR_BUFFER + '.m_Density': 1.0, FUR_BUFFER + '.m_Length': 0.0, FUR_BUFFER + '.m_GlossScale': 1.0,
-              FUR_BUFFER + '.m_SpecularScale': 1.0, FUR_BUFFER + '.m_TransmittanceScale': 1.0, FUR_BUFFER + '.m_Wetness': 0.0}
-FUR_NOTE = ('Fur material: the engine\'s fur G-buffer writer from the executable (constant buffer %s), drawn as the base '
-            'surface without its shells. How the engine fills the fur constants from the material\'s fur record is not '
-            'decoded; they are review values: %s. The writer binds no normal map (vertex normal). Its discard, the shell '
-            'cut by the engine layer map, is not applied.'
-            % (FUR_BUFFER, ', '.join('%s %g' % (k.split('.')[1], v) for k, v in FUR_REVIEW.items())))
+# The eight floats of the record, in order (the engine's parameter names without "Fur_").
+FUR_FIELDS = ('LoDReduction', 'Length', 'Density', 'OffsetScale', 'GlossScale', 'SpecularScale', 'TransmittanceScale',
+              'Wetness')
+# g_Fur member <- record field, as the fur draw copies them.
+FUR_CONSTANTS = (('m_Density', 'Density'), ('m_Length', 'Length'), ('m_GlossScale', 'GlossScale'),
+                 ('m_SpecularScale', 'SpecularScale'), ('m_TransmittanceScale', 'TransmittanceScale'),
+                 ('m_Wetness', 'Wetness'))
+FUR_NOTE = ('Fur material: the engine\'s fur G-buffer writer from the executable (constant buffer %s, filled from the '
+            'material\'s fur record as the engine does), drawn as the base surface without its shells. Wetness is the '
+            'record\'s (dry); gameplay can raise it at run time. The writer binds no normal map (vertex normal). Its '
+            'discard, the shell cut by the engine layer map, is not applied.' % FUR_BUFFER)
 PIXEL = 0xFFFF
 _LOCK = threading.Lock()
 _WRITERS = {}
@@ -60,6 +70,12 @@ def fur_record(data):
             raise ValueError('Fur texture string outside the material')
         paths.append(dat1[at:stop].decode('latin-1').replace('\\', '/').lower())
     return first, floats, paths
+
+
+def fur_constants(record):
+    """{'MatrialFurCBuffer.<member>': value} of a fur_record, as the engine's fur draw fills g_Fur."""
+    fields = dict(zip(FUR_FIELDS, record[1]))
+    return {FUR_BUFFER + '.' + member: float(fields[field]) for member, field in FUR_CONSTANTS}
 
 
 def _writer(blob_source):
@@ -112,4 +128,4 @@ def fur_program(source, data):
         raise ValueError('Not a fur material')
     blob = fur_writer(source.root)
     return dict(shader=dxbc.shader(blob), cb2=(), units={binding: record[2][i] for i, binding in FUR_UNITS.items()},
-                named=dict(FUR_REVIEW), limitations=[FUR_NOTE], key=blob, discard=False)
+                named=fur_constants(record), limitations=[FUR_NOTE], key=blob, discard=False)

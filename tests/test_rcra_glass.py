@@ -79,6 +79,21 @@ class GlassReaderTests(unittest.TestCase):
         for got, want in zip(defaults, DEFAULTS):
             self.assertAlmostEqual(got, want, places=6)
 
+    def test_slot_rows_follow_the_engine_binding(self):
+        from rc2016.games.rcra import shaders as rshaders
+        rows = rmat.graph_slot_rows(self.graph)
+        self.assertEqual([(row[0], row[3], row[4]) for row in rows], [(3, True, 0x49A7866B), (2, True, 0x49A7866B),
+                                                                       (0, True, 0x49A7866B), (1, True, 0x49A7866B)])
+        units = rshaders.material_units(self.graph, self.material)
+        self.assertEqual(units['textureUnit7'], 'm/dome_n.texture')
+        self.assertEqual(units['textureUnit5'], 'textures/default_pink_shader/default_pink_shader_c.texture')   # not bound
+        # A row whose u16 flag is 0 is not exposed: the engine binds the graph default although the material binds the key.
+        at = self.graph.find(struct.pack('<HHII', 1, 2, rmat.SLOT_NORMAL, 0x49A7866B))
+        hidden = self.graph[:at] + struct.pack('<H', 0) + self.graph[at + 2:]
+        self.assertFalse(rmat.graph_slot_rows(hidden)[1][3])
+        self.assertEqual(rshaders.material_units(hidden, self.material)['textureUnit7'],
+                         'textures/default_pink_shader/default_pink_shader_n.texture')
+
     def test_params_are_defaults_overwritten_by_material_values(self):
         params = rmat.arch_glass_params(self.graph, self.material)
         self.assertEqual(tuple(params), rmat.ARCH_GLASS_PARAMS)

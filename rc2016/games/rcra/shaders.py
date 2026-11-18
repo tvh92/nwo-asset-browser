@@ -192,12 +192,11 @@ def constant_name(index):
 
 
 def material_units(graph_data, material_data):
-    """{'textureUnit<n>': texture path}: each slot-table row's material texture, else the graph default."""
+    """{'textureUnit<n>': texture path}: what the engine binds for each slot-table row (material.slot_texture): the
+    material's texture for an exposed row, else the graph default."""
     slots = dict(rmat.material_slots(material_data))
-    rows, _offsets, _defaults = _layout(graph_data)
-    # Some material and graph strings double their separators ("textures//default_pink_shader//..."); the toc does not.
-    return {'textureUnit%d' % (FIRST_MATERIAL_UNIT + unit): re.sub('/+', '/', slots.get(key) or default)
-            for unit, key, default in rows}
+    return {'textureUnit%d' % (FIRST_MATERIAL_UNIT + row[0]): rmat.slot_texture(slots, row)
+            for row in rmat.graph_slot_rows(graph_data)}
 
 
 class NeutralEngine(sm5.Bindings):

@@ -616,16 +616,18 @@ class RealSurfaceTests(unittest.TestCase):
             entry = blender_export.material_entry(self.source, FUR, Path(tmp))
         self.assertIn('recipe', entry)
 
-    def test_missing_textures_get_stand_ins(self):
+    def test_missing_textures_get_the_engine_default(self):
         from rc2016.games.rcra.texture import UNBOUND, texture_header
         with tempfile.TemporaryDirectory() as tmp:
-            default = blender_export.material_entry(
+            # The glove's _c is not installed (its graph default is); the shadow's texture and its default are not.
+            glove = blender_export.material_entry(
                 self.source, 'material/character/hero/hero_ratchet_protosuit_glove/hero_ratchet_protosuit_glove.material', Path(tmp))
-            unbound = blender_export.material_entry(
+            shadow = blender_export.material_entry(
                 self.source, 'material/characters/hero/hero_platform_shadow/hero_platform_shadow.material', Path(tmp))
-        for entry, stand_in in ((default, 'the graph default'), (unbound, 'reads 0')):
+        for entry in (glove, shadow):
             self.assertNotIn('error', entry)
-            self.assertTrue(any('install does not hold' in line and stand_in in line for line in entry['limitations']))
+            self.assertTrue(any('install does not hold' in line and 'Default 2D, 128/255' in line
+                                for line in entry['limitations']))
         self.assertEqual(texture_header(self.source, UNBOUND)['format'], 2)
 
     def test_graph_named_by_file_name(self):

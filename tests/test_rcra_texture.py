@@ -117,6 +117,24 @@ class TextureTests(unittest.TestCase):
             self.assertEqual((Path(folder) / 't_c.texture.stream').read_bytes(), stream)
 
 
+class EngineDefaultTests(unittest.TestCase):
+    def test_engine_defaults_are_constant_rgba8(self):
+        from rc2016.games.rcra import blender_export as bexp
+        for path, value, faces in ((rt.ENGINE_DEFAULT_2D, 128, 1), (rt.ENGINE_DEFAULT_3D, 255, 1),
+                                   (rt.ENGINE_DEFAULT_CUBE, 128, 6)):
+            texture = rt.read_top_mip(None, path, full=True)
+            self.assertEqual((texture['width'], texture['height'], texture['format'], texture['faces']), (4, 4, 28, faces))
+            self.assertEqual(len(texture['slices']), faces)
+            self.assertEqual(set(texture['pixels']), {value})
+            self.assertEqual(rt.texture_size(None, path), (4, 4, 1, 1))
+            self.assertEqual(rt.texture_header(None, path)['format'], 28)
+            self.assertTrue((bexp.texel_array(texture) == value / 255.0).all())
+        self.assertEqual(bexp.engine_default(rmat.SLOT_TYPE_1D), rt.ENGINE_DEFAULT_2D)
+        self.assertEqual(bexp.engine_default(rmat.SLOT_TYPE_3D), rt.ENGINE_DEFAULT_3D)
+        self.assertEqual(bexp.engine_default(rmat.SLOT_TYPES_CUBE[1]), rt.ENGINE_DEFAULT_CUBE)
+        self.assertEqual(bexp.engine_default(0x49A7866B), rt.ENGINE_DEFAULT_2D)
+
+
 class MaterialTests(unittest.TestCase):
     def setUp(self):
         self.tex, _ = texture_asset(hd_mips=0)

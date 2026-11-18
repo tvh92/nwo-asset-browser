@@ -35,6 +35,11 @@ RULE_KIND = 'rift apart preview'
 ARCH_GLASS_GRAPH = 'materialgraph/environment/global/architecture/gbl_arch_glass/gbl_arch_glass.materialgraph'
 GLASS_RULE_KIND = 'rift apart glass'
 GRAPH_SLOT_TABLE, GRAPH_PARAM_RECORDS, GRAPH_DEFAULTS = 0x1CAFE804, 0x45C4F4C0, 0xA59F667B
+# The engine's material loader (RiftApart.exe 0x1410d2100) binds each slot row: the material's texture for the row's key
+# when the row's u16 flag is non-zero, else the graph's default path. A path that is empty or not installed keeps the
+# engine default texture for the row's type, the high u32 of its slot hash (texture.ENGINE_DEFAULTS): 0x628AD5A8 1D,
+# 0x50BCB72A 3D, 0x186494E9 and 0x884C4BF8 cube, anything else (0x49A7866B) 2D.
+SLOT_TYPE_1D, SLOT_TYPE_3D, SLOT_TYPES_CUBE = 0x628AD5A8, 0x50BCB72A, (0x186494E9, 0x884C4BF8)
 # gbl_arch_glass pixel shader (SM5 ps_5_0, forward pass): the four material texture units t5..t8 bind the graph's slot table
 # in order (unit u = t(5 + u)); cb2 (g_CustomMaterial_Buffer) holds the graph's float defaults at the graph's own byte
 # offsets, overwritten by the material's parameter values (keys in section 0x45C4F4C0 of the graph and 0xF5260180 of the material).
@@ -186,22 +191,40 @@ def graph_switches(data):
     return {key: value for value, key in (struct.unpack_from('<II', dat, offset + 8 * i) for i in range(count))}
 
 
+def graph_slot_rows(data):
+    """[(unit, slot key, default texture path, exposed, slot type)] of a materialgraph's section 0x1CAFE804, whose rows are
+    (u32 string offset, u16 flag, u16 unit, u32 slot key, u32 slot type). ``exposed`` is the flag: the engine takes the
+    material's texture for the key only when it is set (``slot_texture``). Empty when the graph has no slot table."""
+    dat = data[36:]
+    table = sections(dat)
+    offset, size = table.get(GRAPH_SLOT_TABLE, (0, 0))
+    rows = []
+    for at in range(offset, offset + size - 15, 16):
+        name, flag, unit, key, kind = struct.unpack_from('<IHHII', dat, at)
+        stop = dat.find(b'\0', name)
+        if name >= len(dat) or stop < 0:
+            raise ValueError('Material graph default texture string outside its data')
+        rows.append((unit, key, dat[name:stop].decode('latin-1').replace('\\', '/').lower(), bool(flag), kind))
+    return rows
+
+
+def slot_texture(slots, row):
+    """The texture path the engine binds for one graph_slot_rows ``row`` given the material's {slot key: path}: the
+    material's when the row is exposed and the material binds its key, else the graph default. Separators are single,
+    as in the toc (some material and graph strings double them)."""
+    _unit, key, default, exposed, _kind = row
+    return re.sub('/+', '/', (slots.get(key) if exposed else None) or default)
+
+
 def graph_layout(data):
     """(slot rows, parameter offsets, defaults) of a materialgraph: [(unit, slot key, default texture path)], {key: byte offset} and
-    the graph's float defaults. Section 0x1CAFE804 rows are (u32 string offset, u16, u16 unit, u64 slot hash)."""
+    the graph's float defaults (graph_slot_rows has the whole rows)."""
     dat = data[36:]
     table = sections(dat)
     if not {GRAPH_SLOT_TABLE, GRAPH_PARAM_RECORDS, GRAPH_DEFAULTS} & set(table):
         raise ValueError('Material graph has no slot, parameter or default section')
     # A graph without parameters lacks the parameter and default sections (some have only the slot table): empty parts.
-    offset, size = table.get(GRAPH_SLOT_TABLE, (0, 0))
-    rows = []
-    for at in range(offset, offset + size - 15, 16):
-        name, _flags, unit, key, _high = struct.unpack_from('<IHHII', dat, at)
-        stop = dat.find(b'\0', name)
-        if name >= len(dat) or stop < 0:
-            raise ValueError('Material graph default texture string outside its data')
-        rows.append((unit, key, dat[name:stop].decode('latin-1').replace('\\', '/').lower()))
+    rows = [row[:3] for row in graph_slot_rows(data)]
     offset, size = table.get(GRAPH_PARAM_RECORDS, (0, 0))
     offsets = {key: at for at, _width, key in (struct.unpack_from('<HHI', dat, i) for i in range(offset, offset + size - 7, 8))}
     offset, size = table.get(GRAPH_DEFAULTS, (0, 0))
@@ -292,7 +315,8 @@ def _load(source, path, cache, hd):
 def _arch_glass(source, key, slots, cache, hd):
     """(forward rule, {role: texture}) of a gbl_arch_glass material, or None when it does not use that graph or the graph cannot be read.
 
-    An unbound unit takes the graph's default texture, as the game does."""
+    Each unit binds what the engine binds (slot_texture): the material's texture for an exposed slot, else the graph's
+    default."""
     if ARCH_GLASS_GRAPH not in _graphs(source, key):
         return None
     graph_key = next((k for k in source.resolve(ARCH_GLASS_GRAPH) if source.entries[k]['type'] == 'materialgraph'), None)
@@ -301,14 +325,14 @@ def _arch_glass(source, key, slots, cache, hd):
     try:
         graph = source.asset_data(graph_key)
         params = arch_glass_params(graph, source.asset_data(key))
-        rows, _offsets, _defaults = graph_layout(graph)
+        rows = graph_slot_rows(graph)
     except (ValueError, KeyError, OSError, struct.error):
         return None
     textures = {}
-    for unit, slot, default in rows:
-        role = ARCH_GLASS_ROLES.get(unit)
+    for row in rows:
+        role = ARCH_GLASS_ROLES.get(row[0])
         if role:
-            textures[role] = _load(source, slots.get(slot) or default, cache, hd)
+            textures[role] = _load(source, slot_texture(slots, row), cache, hd)
     forward = dict(kind='rcra_arch_glass', blend='alpha_over', two_sided=False, params=params, writer='gbl_arch_glass',
                    limitation=GLASS_LIMITATION)
     return forward, textures
