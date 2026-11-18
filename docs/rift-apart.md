@@ -640,7 +640,7 @@ The default follows the slot type, the high u32 of the slot hash. Each default i
 
 ### Render flags
 
-`MatDrawCB.m_RenderFlags` is set per draw. The material and pass part comes from one engine function, traced in `RiftApart.exe` (`0x141038b60`). It reads the material flags word ([Flags word](#flags-word)) and the renderer's pass id:
+`MatDrawCB.m_RenderFlags` is set per draw, traced in `RiftApart.exe`. The decal draw (`0x141038b60`, called for the scene's `DecalSubmitQuery` list, `0x141038800`) reads the material flags word ([Flags word](#flags-word)) and the renderer's pass id:
 
 | Bits | Set when |
 | --- | --- |
@@ -661,7 +661,7 @@ The main model-instance draw (`0x1411212d0`, the packet word stored at `0x141122
 | `0x10000` | The instance's world matrix is mirrored: its 3 × 3 determinant is negative. The instance set-up (`0x1410fc6b0`) stores the transform's class in the low bits of `+0x5C` (`0x141629e60`: `4` for a negative determinant, `0x10` for non-uniform scale, bits 0 and 1 for the axis with the largest scale), and the draw takes bit 2. |
 | `0x80`, `0x40`, `0x8000000` | Instance flags (`+0x80` bits 25, 8 and 26), and `0x80` again when the packet has a second record |
 
-Nothing in either function sets `0x800`. The programs read the three per-instance bits this way:
+No draw sets `0x800`: none of the 117 functions that submit draw packets (callers of `0x141215870`) puts it in the render-flag word. Their other `0x800` constants go to the packet's sort word at `+0x2E`. The programs read the three per-instance bits this way:
 - **`0x8000`:** set, the colour comes from `g_MainColorVBView` at half the subset's colour index; clear, from `g_MainPaintVBView` at the index.
 - **`0x800`:** with no colour stream, the colour is 0 when set and 1 when clear.
 - **`0x10000`:** negates `TEXCOORD3.w`, so the bitangent stays right-handed under a mirrored transform.
@@ -673,9 +673,9 @@ Nothing in either function sets `0x800`. The programs read the three per-instanc
 
 The colour section is RGBA8 there, and the subset's `m_VertexColorIndex` counts 4-byte elements. So a plain instance, with `0x8000` clear, reads the model's own colour section through `g_MainPaintVBView`, the RGBA8 view. Per-instance vertex paint (`VertexPaint`, `0x141103d30`, for models of kind 4) is allocated as RGBA8 in the same buffer. The `0x8000` path halves the index, so `g_MainColorVBView` is an 8-byte view, where kind-10 geometry overrides keep their colours.
 
-Still open: which pass ids are the G-buffer and forward passes.
+The pass ids matter only to decals. The model instance draw sets the lit bit with no pass test, so a model's G-buffer and forward passes get the same flags.
 
-So the translations bind the plain instance draw: base `0x1`, `0x8000` clear, and the lit bit in both passes (`material.draw_flags`). `0x800` stays clear as in the main draw, and `0x10000` stays clear for an unmirrored draw ([Vertex programs](#vertex-programs)).
+So the translations bind the plain instance draw: base `0x1`, `0x8000` clear, and the lit bit in both passes (`material.draw_flags`), as the game sets it for a model. `0x800` stays clear, as no draw sets it, and `0x10000` stays clear for an unmirrored draw ([Vertex programs](#vertex-programs)).
 
 ### Per-object values
 
