@@ -17,7 +17,8 @@ the emissive map is _c x that channel, at strength K (KHR_materials_emissive_str
 "blended") is exported with glTF BLEND when its forward program's alpha is a constant or a constant times _c alpha.
 Additive and modulate materials have no glTF blend and stay opaque. The graph-specific masks and every other graph term
 are not carried into these formats; the Blender formats translate them. Every material is single-sided: the culling state
-is not decoded.
+is not decoded. A float or 16-bit texture is used as its sampled values rounded to 8 bits when they lie in 0..1
+(``rcra.unit_texture``); otherwise it is left out with its range.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ EMISSION_NOTE = 'emission from the writer: _c x %s x %g (self-lit albedo x E)'
 NO_EMISSION_NOTE = 'emission not carried: %s'
 ALPHA_NOTE = 'alpha-over (glTF BLEND): alpha = %s from the forward program'
 NO_ALPHA_NOTE = 'drawn %s in the game; exported opaque: %s'
+UNIT_NOTE = '%s texture %s: stored as DXGI %d (float or 16-bit), its sampled values rounded to 8 bits'
 RATIO_TOLERANCE = 1e-4
 STAND_IN = 'no game F0 or gloss: exported non-metallic and fully rough (%s)'
 CONVERSION = ('F0 and gloss from _g (%s), converted with the Khronos spec-gloss to metal-rough conversion; roughness '
@@ -46,7 +48,8 @@ UV_TOLERANCE = 1e-6
 
 
 def exportable(fmt) -> bool:
-    """Formats ``viewer.textures.to_image`` reads as stored: RGBA8, R8G8, R8 and the BC formats."""
+    """Formats ``viewer.textures.to_image`` reads as stored: RGBA8, R8G8, R8 and the BC formats. Float and 16-bit
+    formats go through ``rcra.unit_texture`` first."""
     from rc2016.viewer.textures import GL_COMPRESSED, GL_UNCOMPRESSED
     return fmt in GL_COMPRESSED or fmt in GL_UNCOMPRESSED
 
@@ -229,6 +232,7 @@ def decoded_maps(source, key):
 
 def material_maps(source, material, cache, map_cache=None):
     from rc2016.export.models import _convert_maps
+    from rc2016.games.rcra import unit_texture
     from rc2016.games.rcra.material import PREVIEW_ROLES, _material_key, material_slots
     from rc2016.games.rcra.texture import load_texture_full
     name = material.get('name') or (Path(material['path']).stem if material.get('path') else f"material_{material.get('index', 0)}")
@@ -261,16 +265,20 @@ def material_maps(source, material, cache, map_cache=None):
         if path not in cache:
             try:
                 loaded = load_texture_full(source, path)
-                if not exportable(loaded['format']):
-                    # Float/16-bit data formats (e.g. the 4x4 R32G32_FLOAT default_pink_shader_n placeholder): how
-                    # their values map to 8-bit is not decoded, so they are left out instead of guessed.
-                    raise ValueError(f"DXGI format {loaded['format']} has no decoded 8-bit conversion")
+                if unit_texture.is_data(loaded['format']):
+                    # Float/UNORM16 (e.g. the 4x4 R32G32_FLOAT default_pink_shader_n placeholder): the sampled values
+                    # rounded to 8 bits when they lie in 0..1; otherwise it raises with their range.
+                    loaded = unit_texture.as_rgba8(loaded)
+                elif not exportable(loaded['format']):
+                    raise ValueError(f"DXGI format {loaded['format']} has no image conversion")
                 cache[path] = loaded
             except (ValueError, KeyError, OSError) as error:
                 cache[path] = None
                 out['notes'].append(f'{role} texture {path} left out: {error}')
         if cache[path] is not None:
             out['sources'][role] = path
+            if 'stored_format' in cache[path]:
+                out['notes'].append(UNIT_NOTE % (role, path, cache[path]['stored_format']))
         return cache[path]
 
     emission, alpha = decoded.get('emission'), decoded.get('alpha')

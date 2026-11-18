@@ -2410,7 +2410,9 @@ def to_image(texture: dict, index: int = 0):
 
 FORMAT_NAMES = {28: 'RGBA8', 29: 'RGBA8 sRGB', 49: 'R8G8', 61: 'R8', 71: 'BC1', 72: 'BC1 sRGB',
                 74: 'BC2', 75: 'BC2 sRGB', 77: 'BC3', 78: 'BC3 sRGB', 80: 'BC4', 83: 'BC5',
-                95: 'BC6H', 96: 'BC6H signed', 98: 'BC7', 99: 'BC7 sRGB'}
+                95: 'BC6H', 96: 'BC6H signed', 98: 'BC7', 99: 'BC7 sRGB',
+                2: 'RGBA32F', 10: 'RGBA16F', 11: 'RGBA16', 16: 'RG32F', 34: 'RG16F', 35: 'RG16', 41: 'R32F',
+                54: 'R16F', 56: 'R16'}   # the float/16-bit rows: Rift Apart data formats
 
 
 def export_textures(archive, paths, folder, formats, flip=False, progress=None) -> list[dict]:

@@ -105,6 +105,47 @@ class TextureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'not previewable'):
             rt.load_texture(FakeSource({'v.texture': data}), 'v.texture')
 
+    def test_unit_float_and_16_bit_textures_convert_to_rgba8(self):
+        from rc2016.games.rcra import unit_texture as ut
+        rg32f = dict(format=16, width=2, height=1, pixels=struct.pack('<4f', 0.0, 0.5, 128 / 255, 1.0))
+        out = ut.as_rgba8(rg32f)
+        self.assertEqual((out['format'], out['stored_format'], out['srgb']), (28, 16, False))
+        self.assertEqual(list(out['pixels']), [0, 128, 0, 255, 128, 255, 0, 255])   # D3D defaults: B 0, A 1
+        r16 = dict(format=56, width=2, height=1, pixels=struct.pack('<2H', 65535, 32896), slices=[struct.pack('<2H', 65535, 32896)])
+        self.assertEqual(list(ut.as_rgba8(r16)['pixels']), [255, 0, 0, 255, 128, 0, 0, 255])
+        with self.assertRaisesRegex(ValueError, 'from -1 to 2'):
+            ut.unit_rgba(dict(format=41, width=2, height=1, pixels=struct.pack('<2f', -1.0, 2.0)))
+        with self.assertRaisesRegex(ValueError, '1 non-finite'):
+            ut.unit_rgba(dict(format=41, width=2, height=1, pixels=struct.pack('<2f', float('nan'), 0.0)))
+        self.assertFalse(ut.is_data(28))
+
+    def test_unit_data_textures_preview_and_export_as_16_bit_png(self):
+        from rc2016.games import rcra_game
+        data, _ = texture_asset(fmt=35, hd_mips=0)   # R16G16_UNORM, 8x8 with 2 mips: 320 bytes
+        top = struct.pack('<128H', *[i * 512 for i in range(128)])
+        data = data[:-320] + top + bytes(64)
+        source = FakeSource({'v.texture': data})
+        texture = rcra_game.load_texture(source, 'v.texture')
+        self.assertEqual((texture['format'], texture['stored_format'], texture['width']), (28, 35, 8))
+        self.assertEqual(texture['pixels'][:8], bytes([0, 2, 0, 255, 4, 6, 0, 255]))   # round(i * 512 / 65535 * 255)
+        with tempfile.TemporaryDirectory() as folder:
+            rows = rt.export_textures(source, ['v.texture'], folder, {'png', 'dds'})
+            self.assertIsNone(rows[0]['error'])
+            png = (Path(folder) / 'v.png').read_bytes()
+            self.assertEqual(png[24:26], bytes([16, 6]))   # 16-bit RGBA
+            import zlib
+            idat = png.index(b'IDAT')
+            rows16 = zlib.decompress(png[idat + 4:idat + 4 + struct.unpack('>I', png[idat - 4:idat])[0]])
+            self.assertEqual(struct.unpack('>4H', rows16[1:9]), (0, 512, 0, 65535))   # UNORM16 kept exactly
+        half, _ = texture_asset(fmt=54, hd_mips=0, sd_mips=1)   # R16F, every value 2.0
+        bad = half[:-128] + struct.pack('<64e', *[2.0] * 64)
+        with self.assertRaisesRegex(ValueError, 'outside the 0..1'):
+            rcra_game.load_texture(FakeSource({'b.texture': bad}), 'b.texture')
+        with tempfile.TemporaryDirectory() as folder:
+            row = rt.export_textures(FakeSource({'b.texture': bad}), ['b.texture'], folder, {'dds', 'png'})[0]
+            self.assertIn('outside the 0..1', row['error'])
+            self.assertEqual([Path(f).name for f in row['files']], ['b.dds'])   # the DDS keeps the stored values
+
     def test_export_writes_asset_stream_and_dds(self):
         data, hd_len = texture_asset()
         stream = bytes(hd_len)

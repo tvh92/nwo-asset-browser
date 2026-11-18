@@ -150,13 +150,14 @@ def ps4_deswizzle_top(data,width,height,fmt):
     return bytes(result)
 
 
-def dds_bytes(width,height,fmt,pixels,array_size=1):
-    """DX10 DDS of one top mip; with array_size > 1, `pixels` holds that many slices back to back."""
-    size=top_mip_size(width,height,fmt)
+def dds_bytes(width,height,fmt,pixels,array_size=1,size=None):
+    """DX10 DDS of one top mip; with array_size > 1, `pixels` holds that many slices back to back. `size` is the top
+    mip's byte size, for formats `top_mip_size` does not list (Rift Apart's float and 16-bit data formats)."""
+    size=size or top_mip_size(width,height,fmt)
     if array_size>1:
         if len(pixels)<size*array_size:
             raise ValueError(f'Texture payload is smaller than {array_size} top-mip slices')
-        header=bytearray(dds_bytes(width,height,fmt,pixels[:size])[:148])
+        header=bytearray(dds_bytes(width,height,fmt,pixels[:size],size=size)[:148])
         struct.pack_into('<I',header,128+12,array_size)   # DX10 arraySize
         return bytes(header)+pixels[:size*array_size]
     if len(pixels)<size:

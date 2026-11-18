@@ -72,8 +72,19 @@ def texture_paths(source):
 
 
 def load_texture(source, path, hd=False):
-    from rc2016.games.rcra.texture import load_texture as load
-    return load(source, path, hd=hd)
+    """The Textures tab's texture: float and 16-bit data formats come as their RGBA8 conversion (rcra.unit_texture),
+    or raise with the range that keeps them out. The viewer's materials call rcra.texture.load_texture directly and
+    upload those formats as float."""
+    from rc2016.games.rcra import unit_texture
+    from rc2016.games.rcra.texture import load_texture as load, read_top_mip
+    from rc2016.viewer.textures import MIN_PREVIEW_SIZE
+    try:
+        return load(source, path, hd=hd)
+    except ValueError:
+        texture = read_top_mip(source, path, full=hd and MIN_PREVIEW_SIZE > 0)
+        if not unit_texture.is_data(texture['format']):
+            raise
+        return unit_texture.as_rgba8(texture)
 
 
 def export_textures(source, paths, folder, formats, flip=False, progress=None):

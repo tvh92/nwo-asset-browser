@@ -49,7 +49,7 @@ The portable export (GLB, glTF, OBJ) writes only what is decoded, through `rc201
 - Emission where the G-buffer writer's self-lit term (albedo × E) has a plain `_c` albedo, and E is a constant K or K times one channel of `_c`, `_g` or `_m` at UV0, at every probe (`rcra_export.decoded_emission`). The emissive map is `_c` times that channel, at strength K (`KHR_materials_emissive_strength`). Over the install, 208 materials carry it: 199 as `_m` red, 8 as a constant and 1 as `_g` green. The writers of 1,052 others tint the self-lit albedo, and 100 use another form; their notes say so.
 - Alpha-over for a material whose flags blend is "blended", where the forward program's alpha is K times `_c` alpha (143 materials, the base map keeps `_c` alpha) or a constant K below 1 (`rcra_export.decoded_alpha`). This is glTF `BLEND` with alpha factor K. A constant alpha of 1 stays opaque. Additive (427) and modulate (11) materials have no glTF blend and stay opaque, as do 984 blended materials whose alpha has another form. Each material's notes name its case.
 - Everything else is single-sided (the culling state is not decoded), and the graph-specific masks and other terms are not carried. Without decoded F0 and gloss a material is non-metallic and fully rough, and its notes say so.
-- A texture stored in a float or 16-bit data format is left out with a note, because its 8-bit conversion is not decoded. One example is the 4×4 `R32G32_FLOAT` `default_pink_shader_n` placeholder.
+- A texture stored in a float or 16-bit data format is used as its sampled values rounded to 8 bits when they all lie in 0..1 ([Float and 16-bit textures](#float-and-16-bit-textures)), with a note. This carries the flat 4×4 `R32G32_FLOAT` `default_pink_shader_n` placeholder of 386 materials and the `R16G16` normal of the escape ship. A texture with values outside 0..1 is left out with its range.
 
 ## Install layout
 
@@ -339,7 +339,16 @@ The clip notes take about 8 s to compute, off the Tk thread.
 
 **Format coverage.** All 12,502 headers parse, and their SD and HD sizes match the computed chains exactly.
 - **Previewable:** BC1–BC7, BC6H, RGBA8, R8 and R8G8.
-- **Sized but not previewed:** the float data formats (RG32F, RGBA16F, RGBA32F, RG16F, RG16, R16F) used by vertex-animation and lookup textures.
+- **Float and 16-bit data formats** (RG32F, RGBA16F, RGBA32F, RG16F, RG16, R16F) used by vertex-animation, sky and lookup textures: sized, and previewed where their values fit an image ([Float and 16-bit textures](#float-and-16-bit-textures)).
+
+### Float and 16-bit textures
+
+`rc2016/games/rcra/unit_texture.py` turns these formats into image values. D3D samples a UNORM16 texel as its integer / 65535 and a float texel as the float itself, with 0 for a missing green or blue and 1 for a missing alpha. An 8-bit UNORM image stores the same values rounded to 1/255, so a texture whose values all lie in 0..1 converts by rounding alone.
+
+- **Converted:** 6 of the 156 listed float and 16-bit textures (three `R16G16` ones: the escape-ship and eye-remap normals and a flowmap; the foam and wetness lookups; the coretest copy of the pink normal), and the unlisted `default_pink_shader_n` placeholder.
+- **Kept out:** the other 150. 140 vertex-animation tables hold non-finite values, because their floats are packed bits. Ten others, including two HDR skies, hold values outside 0..1. No 0..1 image holds them without a remap the files do not define. The error gives the range or the non-finite count.
+- **Textures tab:** a converted texture previews through its RGBA8 conversion; the info line keeps the stored format. Its PNG export is a 16-bit RGBA PNG, exact for UNORM16 and rounded to 1/65535 for floats. DDS export writes every data format as stored, so it keeps the values a PNG cannot hold.
+- **Model export:** glTF and OBJ maps use the 8-bit conversion. The viewer's translated materials and the Blender export read these formats as float instead ([Blender materials](#blender-materials)).
 
 ## Materials and the viewer preview
 

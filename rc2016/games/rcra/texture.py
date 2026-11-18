@@ -218,7 +218,9 @@ def archive_textures(source):
 
 def export_textures(source, paths, folder, formats, flip=False, progress=None):
     """viewer.textures.export_textures for Rift Apart: 'texture' writes the asset as stored (toc header
-    included) and its HD stream as ``.texture.stream``; 'dds' and 'png' use the largest top mip."""
+    included) and its HD stream as ``.texture.stream``; 'dds' and 'png' use the largest top mip. A float or 16-bit
+    texture's PNG is 16-bit RGBA of its sampled values when they lie in 0..1 (rcra.unit_texture); otherwise that
+    texture's row gets the error with their range, after its DDS."""
     from rc2016.viewer.textures import to_image
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
@@ -247,16 +249,21 @@ def export_textures(source, paths, folder, formats, flip=False, progress=None):
                 if 'dds' in formats:
                     target = folder / f'{name}.dds'
                     target.write_bytes(dds_bytes(texture['width'], texture['height'], texture['format'],
-                                                 b''.join(texture['slices']), count))
+                                                 b''.join(texture['slices']), count,
+                                                 size=chain_sizes(texture['format'], texture['width'], texture['height'], 1)[0]))
                     row['files'].append(str(target))
                 if 'png' in formats:
+                    from rc2016.games.rcra import unit_texture
                     for index in range(count):
-                        image = to_image(texture, index)
-                        if flip:
-                            from PIL import Image
-                            image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
                         target = folder / (f'{name}.png' if count == 1 else f'{name}_slice{index:02d}.png')
-                        image.save(target)
+                        if unit_texture.is_data(texture['format']):   # float/16-bit: a 16-bit PNG of its 0..1 values
+                            target.write_bytes(unit_texture.png16(texture, index, flip))
+                        else:
+                            image = to_image(texture, index)
+                            if flip:
+                                from PIL import Image
+                                image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+                            image.save(target)
                         row['files'].append(str(target))
         except Exception as error:   # one bad texture must not stop the rest
             row['error'] = f'{type(error).__name__}: {error}'

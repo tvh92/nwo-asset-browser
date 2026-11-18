@@ -210,9 +210,10 @@ class LoaderDispatchTests(unittest.TestCase):
             'g.texture': dict(format=28, width=2, height=2, pixels=bytes([64, 10, 0, 255] * 4), srgb=False),
             'g_rgb.texture': dict(format=28, width=2, height=2, pixels=bytes([10, 10, 10, 128] * 4), srgb=False),
             'm.texture': dict(format=28, width=2, height=2, pixels=bytes([255, 0, 77, 255] * 4), srgb=False),
-            'float_n.texture': dict(format=16, width=2, height=2, pixels=bytes(32), srgb=False)}
+            'float_n.texture': dict(format=16, width=2, height=2, pixels=struct.pack('<8f', *[2.0] * 8), srgb=False),
+            'pink_n.texture': dict(format=16, width=2, height=2, pixels=struct.pack('<8f', *[128 / 255] * 8), srgb=False)}
         slots = {'a.material': [(SLOT_BASE_COLOUR, 'c.texture'), (SLOT_NORMAL, 'n.texture'), (SLOT_G, 'g.texture')],
-                 'b.material': [(SLOT_NORMAL, 'float_n.texture')]}
+                 'b.material': [(SLOT_NORMAL, 'float_n.texture')], 'c.material': [(SLOT_NORMAL, 'pink_n.texture')]}
         source = SimpleNamespace(asset_data=lambda key: key)
         with patch('rc2016.games.rcra.material._material_key', side_effect=lambda s, path: path), \
                 patch('rc2016.games.rcra.material.material_slots', side_effect=lambda data: slots[data]), \
@@ -222,8 +223,8 @@ class LoaderDispatchTests(unittest.TestCase):
 
     def test_rift_apart_export_maps_without_a_plain_writer_are_the_stand_in(self):
         stand_in = dict(layout=None, occlusion=False, g=None, m=None, reason='the writer does not translate: x')
-        maps = self.rift_apart_maps({'a.material': stand_in, 'b.material': stand_in})
-        a, b = maps['a.material'], maps['b.material']
+        maps = self.rift_apart_maps({'a.material': stand_in, 'b.material': stand_in, 'c.material': stand_in})
+        a, b, c = maps['a.material'], maps['b.material'], maps['c.material']
         self.assertEqual(a['sources'], {'_c': 'c.texture', '_n': 'n.texture'})   # _g is not read without a plain writer
         self.assertEqual(a['base'].shape, (2, 2, 3))
         self.assertEqual((a['alpha_mode'], a['double_sided'], a['emissive'], a['occlusion']), ('OPAQUE', False, None, False))
@@ -233,7 +234,11 @@ class LoaderDispatchTests(unittest.TestCase):
         self.assertIn('fully rough (the writer does not translate: x)', ' '.join(a['notes']))
         self.assertIn('Rift Apart portable material', a['notes'][-1])
         self.assertEqual((b['sources'], b['normal'], b['base_factor']), ({}, None, [0.8, 0.8, 0.8]))
-        self.assertTrue(any('float_n.texture left out' in note for note in b['notes']))
+        self.assertTrue(any('float_n.texture left out' in note and 'from 2 to 2' in note for note in b['notes']))
+        # An R32G32_FLOAT normal in 0..1 is its values rounded to 8 bits, like the R8G8 one (z rebuilt).
+        self.assertEqual(c['sources'], {'_n': 'pink_n.texture'})
+        self.assertEqual(c['normal'].tolist(), a['normal'].tolist())
+        self.assertTrue(any('pink_n.texture: stored as DXGI 16' in note for note in c['notes']))
 
     def test_rift_apart_export_maps_take_the_decoded_g_and_m_channels(self):
         maps = self.rift_apart_maps({'a.material': dict(layout='grey', occlusion=True, g='g.texture', m='m.texture', reason=None),

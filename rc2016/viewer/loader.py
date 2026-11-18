@@ -370,7 +370,8 @@ class SourcePreviewLoader:
             with self.texture_lock:texture=game.load_texture(archive,texture_path)
             self.preview_cache[texture_path]=texture
         index=min(max(0,index),texture.get('array_size',1)-1)
-        facts=dict(path=texture_path,format=texture['format'],format_name=FORMAT_NAMES.get(texture['format'],str(texture['format'])),
+        fmt=texture.get('stored_format',texture['format'])   # a game's float texture shown through its 8-bit conversion
+        facts=dict(path=texture_path,format=fmt,format_name=FORMAT_NAMES.get(fmt,str(fmt)),
                    preview_size=(texture['width'],texture['height']),full_size=texture['full_size'],srgb=texture['srgb'],
                    array_size=texture.get('array_size',1),slice=index)
         return to_image(texture,index),facts

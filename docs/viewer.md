@@ -506,7 +506,7 @@ The Model's tab has the preview on the left and the list, export and Used by con
 
 - **Original .texture:** the decompressed built asset, plus `<name>.texture.stream` exactly as archived when the texture has a stream.
 - **DDS:** the original block-compressed largest top mip with a DX10 header.
-- **PNG:** the stored values with no colourspace conversion. R8G8 gets B = 0 and BC6H is clamped to 8-bit by Pillow. Array textures export as one DX10 array DDS plus one PNG per slice (`<name>_sliceNN.png`).
+- **PNG:** the stored values with no colourspace conversion. R8G8 gets B = 0 and BC6H is clamped to 8-bit by Pillow. Rift Apart's float and 16-bit textures write a 16-bit PNG when their values lie in 0..1 and only the DDS otherwise ([Rift Apart](rift-apart.md#float-and-16-bit-textures)). Array textures export as one DX10 array DDS plus one PNG per slice (`<name>_sliceNN.png`).
 
 Name collisions get a `__2`, `__3` suffix. A failed texture is logged and does not stop the others.
 
