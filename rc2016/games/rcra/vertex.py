@@ -15,10 +15,11 @@ that depends on the view, which is not applied. ``evaluate`` runs a translation 
 the GPU), reading the material's textures (``TextureReader``); ``deform_model`` applies it to a decoded model, so the viewer
 and every export draw the vertices where the game places them at that state. Motion over time stays a limitation.
 
-The draw's render flags (MatDrawCB) hold 0x2, 0x8000 and the material's lit bit. 0x2 is the base the engine gives a
-model draw (RiftApart.exe 0x141038b60; other packet kinds take 0x1). The programs test the two low bits only together,
-writing no geometry when both are clear, and every installed vertex program translates the same with 0x1. 0x8000 reads the
-model colour stream, as the viewer does.
+The draw's render flags (MatDrawCB) hold 0x2, 0x8000 and the material's lit bit. 0x2 is one packet kind's base
+(RiftApart.exe 0x141038b60); the main instance draw (0x1411212d0) and another packet kind use 0x1. The programs test the
+two low bits only together, writing no geometry when both are clear, and every installed vertex program translates the
+same with 0x1. 0x8000 reads the model colour stream, as the viewer does. The main draw sets it only for an instance with a
+kind-10 attachment, and otherwise reads the paint view at the colour offset; where that offset points is not decoded.
 """
 from __future__ import annotations
 

@@ -644,14 +644,36 @@ The default follows the slot type, the high u32 of the slot hash. Each default i
 
 | Bits | Set when |
 | --- | --- |
-| `0x2` | Every model draw: the base. Another packet kind writes `0x381` (base `0x1`). |
+| `0x2` | The base for this packet kind. Another packet kind writes `0x381`, and the main instance draw below uses `0x1`. |
 | `0x382` | Pass ids `0x14` and `0x28`, which also set `0x100` and never the lit bit |
 | `0x400` | Lit: material flag `0x800`, only in pass ids from `0x2C` up |
 | `0x100` | Material flag `0x1000`, or flag `0x1000000` under a global option |
 | `0x4000` | Material flag `0x2000` |
 | `0x4000000` | Material flag `0x80`: additive blend. The forward programs then apply a fog factor to the alpha. |
 
-The per-instance bits are added elsewhere and are not traced: `0x8000` (model colour section), `0x10000` (mirrored draw) and `0x800` (no colour stream). The pass ids are not yet tied to the G-buffer and forward passes. So the translations still bind the lit bit in both passes (`material.draw_flags`) and leave the other bits clear, apart from the vertex programs' base and colour bits ([Vertex programs](#vertex-programs)).
+The main model-instance draw (`0x1411212d0`, the packet word stored at `0x141122aa5`) builds the word itself:
+
+| Bits | Set when |
+| --- | --- |
+| `0x1` | The base, from the view's per-pass word (`0x101` under the same global option that sets `0x100` above) |
+| `0x400`, `0x4000000`, `0x100` | The material bits above; here the lit bit has no pass-id test, and `0x4000` is not added |
+| `0x8000` | The instance's attachment (instance `+0x90`, a 128-byte record in a global table) is of kind 10 |
+| `0x10000` | Bit 2 of the instance's byte `+0x5C` |
+| `0x80`, `0x40`, `0x8000000` | Instance flags (`+0x80` bits 25, 8 and 26), and `0x80` again when the packet has a second record |
+
+Nothing in either function sets `0x800`. The programs read the three per-instance bits this way:
+- **`0x8000`:** set, the colour comes from `g_MainColorVBView` at half the subset's colour offset; clear, from `g_MainPaintVBView` at the offset.
+- **`0x800`:** with no colour stream, the colour is 0 when set and 1 when clear.
+- **`0x10000`:** negates `TEXCOORD3.w`.
+
+The paint view holds per-instance vertex paint, RGBA8 allocated at run time (`VertexPaint`, `0x141103d30`, for models of kind 4).
+
+Still open:
+- Where a plain instance's colour offset points: at the model's colour section, or into the paint pool.
+- What writes the instance's mirror byte.
+- Which pass ids are the G-buffer and forward passes.
+
+So the translations still bind the lit bit in both passes (`material.draw_flags`) and leave the other bits clear, apart from the vertex programs' base and colour bits ([Vertex programs](#vertex-programs)). The model's colour section is drawn as the colour, `0x800` stays clear as in the main draw, and `0x10000` stays clear for an unmirrored draw.
 
 ### Per-object values
 
