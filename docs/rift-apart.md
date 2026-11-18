@@ -488,7 +488,7 @@ The one decoded graph. 44 materials use it, among them the Nefarious trooper and
 **Translated program.** The automatic path (see [Material graph shaders](#material-graph-shaders)) reproduces these equations: on the trooper dome, with the real material values and textures, its alpha and emissive colour match them to float precision (`tests/test_rcra_shaders.py`). The translation also shows the terms the preview leaves out:
 - the material and vertex alpha (`TEXCOORD.w`) and the per-draw alpha override (`MatDrawCB.m_AlphaOverrides`)
 - the custom clip plane and the dissolve test on `TEXCOORD.z`, which set the alpha to 0
-- a fog factor on the alpha, gated by render flag `0x4000000`
+- a fog factor on the alpha, gated by render flag `0x4000000`, which the engine sets for additive materials ([Render flags](#render-flags))
 - the unlit path: with render flag `0x400` clear, the lighting term is exactly 1
 - the normal frame: the vertex tangent and its bitangent sign, not screen derivatives
 
@@ -636,6 +636,21 @@ The default follows the slot type, the high u32 of the slot hash. Each default i
 
 **Coverage:** 1,744 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0), 27 of them in scene mode, which Blender does not draw. Not translated: the three goo decals that light the scene behind them through a specular factor.
 
+### Render flags
+
+`MatDrawCB.m_RenderFlags` is set per draw. The material and pass part comes from one engine function, traced in `RiftApart.exe` (`0x141038b60`). It reads the material flags word ([Flags word](#flags-word)) and the renderer's pass id:
+
+| Bits | Set when |
+| --- | --- |
+| `0x2` | Every model draw: the base. Another packet kind writes `0x381` (base `0x1`). |
+| `0x382` | Pass ids `0x14` and `0x28`, which also set `0x100` and never the lit bit |
+| `0x400` | Lit: material flag `0x800`, only in pass ids from `0x2C` up |
+| `0x100` | Material flag `0x1000`, or flag `0x1000000` under a global option |
+| `0x4000` | Material flag `0x2000` |
+| `0x4000000` | Material flag `0x80`: additive blend. The forward programs then apply a fog factor to the alpha. |
+
+The per-instance bits are added elsewhere and are not traced: `0x8000` (model colour section), `0x10000` (mirrored draw) and `0x800` (no colour stream). The pass ids are not yet tied to the G-buffer and forward passes. So the translations still bind the lit bit in both passes (`material.draw_flags`) and leave the other bits clear, apart from the vertex programs' base and colour bits ([Vertex programs](#vertex-programs)).
+
 ### Per-object values
 
 Programs read the engine's per-object record, `g_SceneObjectView` (element `$Element`, 128 bytes; names and offsets from the reflection). The engine's model vertex program shows its layout:
@@ -661,7 +676,7 @@ The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain 
 The subset record (`g_ModelSubsetView`) gives the stream offsets, the scale and the UV-scale word; the paint and skinned streams are not read for a static subset.
 
 **Bindings** (`vertex.translate`; review values, labelled `REST_NOTE`):
-- **Draw:** `MatDrawCB.m_RenderFlags` holds 0x1, 0x8000 and the material's lit bit. With both low bits clear the programs write no geometry, and their meaning is not decoded; 0x8000 reads the model's colour section, as the viewer does.
+- **Draw:** `MatDrawCB.m_RenderFlags` holds 0x2 (a model draw's base, [Render flags](#render-flags)), 0x8000 and the material's lit bit. The programs test the two low bits only together and write no geometry when both are clear: all 583 material uses translate the same with 0x1. 0x8000 reads the model's colour section, as the viewer does.
 - **Object:** the neutral object of [Per-object values](#per-object-values), and the same transform as its previous one.
 - **Engine:** shader time 0 and every other engine constant 0: no wind, no ambient animation, no force fields (the per-tile force-field bitset is empty).
 - **View:** the camera at the origin with world axes and an identity world-to-clip matrix, so `SV_POSITION.xyz` is the moved position in model units and `TEXCOORD2.xyz` the world normal.
@@ -861,7 +876,7 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 - **Object paint:** when the subset's paint offset (dword 3) plus the object's (`g_SceneObjectView` byte 0x4C) is positive, `g_MainPaintVBView` there, plus the vertex index, replaces it.
 - **No colour stream:** 1, or 0 with render flag 0x800.
 
-The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes in R, G, B, A order. The translated materials' vertex program (`rcra_glsl.vertex_source`, attribute `aRcraColour`) squares it. The game sets the views' formats at run time, so this channel order is the reader's, not read from the game. A model without the section reads 1. Object paint and the paint stream are not drawn: the viewer takes render flag 0x8000 as set and 0x800 as clear.
+The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes in R, G, B, A order. The translated materials' vertex program (`rcra_glsl.vertex_source`, attribute `aRcraColour`) squares it. The engine's buffer manager (`D3DBufferManager::InitBuffer`) creates one typed view per format over the shared geometry buffer. Its only four-channel 8-bit view is `R8G8B8A8_UNORM`, and it creates no BGRA view, so the colour bytes are R, G, B, A in order, as the reader takes them. The other views are `R32G32B32A32_UINT`, `R16G16B16A16_SINT` and `_FLOAT`, `R10G10B10A2_UNORM`, `R32G32_UINT`, `R16G16_SINT`, `R16_UINT` and a raw view. A model without the section reads 1. Object paint and the paint stream are not drawn: the viewer takes render flag 0x8000 as set and 0x800 as clear.
 
 `tests/test_rcra_viewer.py` draws the swarmer through the model viewport (Windows, `RCRA_GAME`) and checks that the translated programs link and draw. It also draws a pressure button whose material reads `TEXCOORD4.x`, and checks that its colour bytes reach the program: the frame changes when they are replaced by 1. The swarmer's materials read `TEXCOORD3`: its decoded tangent is uploaded, and the frame changes when the tangent is turned a quarter turn about the normal.
 

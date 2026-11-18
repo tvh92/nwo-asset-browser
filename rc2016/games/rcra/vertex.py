@@ -15,8 +15,10 @@ that depends on the view, which is not applied. ``evaluate`` runs a translation 
 the GPU), reading the material's textures (``TextureReader``); ``deform_model`` applies it to a decoded model, so the viewer
 and every export draw the vertices where the game places them at that state. Motion over time stays a limitation.
 
-The draw's render flags (MatDrawCB) hold 0x1, 0x8000 and the material's lit bit: the programs write no geometry when both
-low bits are clear (their meaning is not decoded), and 0x8000 reads the model colour stream, as the viewer does.
+The draw's render flags (MatDrawCB) hold 0x2, 0x8000 and the material's lit bit. 0x2 is the base the engine gives a
+model draw (RiftApart.exe 0x141038b60; other packet kinds take 0x1). The programs test the two low bits only together,
+writing no geometry when both are clear, and every installed vertex program translates the same with 0x1. 0x8000 reads the
+model colour stream, as the viewer does.
 """
 from __future__ import annotations
 
@@ -33,7 +35,7 @@ from rc2016.shaders import sm5
 VERTEX_SLOTS = (3, 7, 10, 13, 17)
 SLOT = 7                    # the vertex program of the G-buffer pass (the five agree at rest: Research note)
 U32 = 0xFFFFFFFF
-DRAW_FLAGS = 0x1 | 0x8000   # see the module docstring
+DRAW_FLAGS = 0x2 | 0x8000   # see the module docstring
 VERTEX_ID = 'VERTEX_ID'
 # Vertex streams: binding -> (input prefix, channel type, components, element index of vertex v).
 STREAMS = {'g_MainVBPosView': ('VB.POS', 'i', 4, lambda v: 2 * v), 'g_MainVBNrmTanView': ('VB.NRM', 'f', 4, lambda v: 4 * v + 2),
