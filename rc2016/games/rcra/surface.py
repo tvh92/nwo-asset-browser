@@ -93,6 +93,8 @@ class _Bindings(rshaders.NeutralEngine):
         self.record_read = False
         self.engine_read = set()
         self.named = {}   # constants an engine program's caller binds by name (surface ``program``)
+        self.interpolants = {}   # interpolants an engine program's vertex stage sets (surface ``program``: fur shells)
+        self.symbolic = {}   # interpolants an engine program's vertex stage passes, as renderer inputs {name: input}
 
     def texture_size(self, binding):
         """The bound material texture's size (``texture_sizes(path)``), for the programs that query it (resinfo)."""
@@ -143,6 +145,10 @@ class _Bindings(rshaders.NeutralEngine):
         return self.graph.const('f', value)
 
     def input(self, name):
+        if name in self.interpolants:
+            return self.graph.const('f', self.interpolants[name])
+        if name in self.symbolic:
+            return self.graph.input(self.symbolic[name])
         if name == 'SV_IsFrontFace.x':   # read only as a truth value: a boolean input
             return self.graph.input('SV_IsFrontFace', 'b')
         if name in GEOMETRY_INPUTS:
@@ -470,8 +476,10 @@ def surface(graph_data, material_data, slot=rshaders.SLOT_GBUFFER, texture_sizes
     with the forward profile's view (_ViewBindings, VIEW_NOTE), and that translation is used when it has no NaN.
 
     ``program`` replaces the graph's writer with an engine program: dict(shader, cb2 [floats], units {binding: path},
-    named {constant: value}, limitations [text], discard: False to drop the program's own discard)
-    (rc2016.games.rcra.fur.fur_program); ``graph_data`` is then unused.
+    named {constant: value}, limitations [text], discard: False to drop the program's own discard, and optionally
+    interpolants {input: value} its vertex stage sets, symbolic {input: renderer input name} it passes per vertex, and
+    coverage: a builder (graph -> node) of a ``coverage`` term, the fraction of the surface the program keeps) (rc2016.games.rcra.fur.fur_program, shell_program); ``graph_data`` is
+    then unused.
 
     Returns dict(graph, terms {name: node}, textures {binding: path}, inputs [names], limitations [text]).
     Raises Unsupported when the writer is not the engine packing or keeps non-portable operations."""
@@ -497,6 +505,8 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
         shader, cb2, units = program['shader'], program['cb2'], program['units']
     bindings = binding_class(cb2, shader.reflection, units, texture_sizes)
     bindings.named.update(program['named'] if program else {})
+    bindings.interpolants.update(program.get('interpolants', {}) if program else {})
+    bindings.symbolic.update(program.get('symbolic', {}) if program else {})
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
@@ -544,6 +554,8 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
         'occlusion': g.op('sat', occlusion), 'emission': g.op('max', g.op('min', emission, g.const('f', 31.0)), zero),
         'clip': tr.discard,
     }
+    if program and program.get('coverage'):
+        terms['coverage'] = program['coverage'](g)
     for name, byte in (('f0.r', f0r), ('f0.g', f0g), ('f0.b', f0b)):
         stored = _rounded(g, g.op('sat', byte))
         terms[name] = g.op('mul', stored, stored)

@@ -93,10 +93,18 @@ ENGINE_DEFAULTS = {ENGINE_DEFAULT_2D: (bytes((128,) * 4), 1), ENGINE_DEFAULT_3D:
                    ENGINE_DEFAULT_CUBE: (bytes((128,) * 4), 6)}
 ENGINE_DEFAULT_SIZE = 4
 ENGINE_DEFAULT_FORMAT = 28
-CONSTANT_TEXTURES = (UNBOUND, *ENGINE_DEFAULTS)
+# The engine's "Default Fur Shells" array the fur writer reads (rc2016.games.rcra.fur.layer_map).
+FUR_SHELLS = 'engine/default_fur_shells.texture'
+CONSTANT_TEXTURES = (UNBOUND, *ENGINE_DEFAULTS, FUR_SHELLS)
 
 
 def _constant(path):
+    if path == FUR_SHELLS:
+        from rc2016.games.rcra import fur
+        slices = fur.layer_map()
+        n = fur.LAYER_SIZE
+        return dict(path=path, width=n, height=n, format=fur.LAYER_FORMAT, pixels=slices[0], slices=list(slices),
+                    array_size=len(slices), faces=1, full_size=(n, n), srgb=False, mips=fur.LAYER_MIPS)
     if path == UNBOUND:
         texel = bytes(16)
         return dict(path=UNBOUND, width=1, height=1, format=UNBOUND_FORMAT, pixels=texel, slices=[texel], array_size=1,
@@ -106,6 +114,11 @@ def _constant(path):
     pixels = texel * (n * n)
     return dict(path=path, width=n, height=n, format=ENGINE_DEFAULT_FORMAT, pixels=pixels, slices=[pixels] * faces,
                 array_size=faces, faces=faces, full_size=(n, n), srgb=False)
+
+
+def path_is_array(texture_path):
+    """True for a constant texture that is an array (the fur layer map); the engine defaults count as one slice."""
+    return texture_path == FUR_SHELLS
 
 
 def _entry(source, texture_path):
@@ -166,7 +179,7 @@ def texture_header(source, texture_path):
     if texture_path in CONSTANT_TEXTURES:
         texture = _constant(texture_path)
         return dict(format=texture['format'], hd_width=0, hd_height=0, sd_width=texture['width'],
-                    sd_height=texture['height'], array_size=1)
+                    sd_height=texture['height'], array_size=texture['array_size'] if path_is_array(texture_path) else 1)
     key = _entry(source, texture_path)
     cache = source.__dict__.setdefault('_texture_header_cache', {})
     facts = cache.get(key)
@@ -181,6 +194,8 @@ def texture_size(source, texture_path):
     resident: the HD stream's top mip and both chains' mips (the SD chain starts where the HD mips end). Memoized."""
     if texture_path in CONSTANT_TEXTURES:
         texture = _constant(texture_path)
+        if path_is_array(texture_path):
+            return texture['width'], texture['height'], texture['array_size'], texture['mips']
         return texture['width'], texture['height'], 1, 1
     key = _entry(source, texture_path)
     cache = source.__dict__.setdefault('_texture_size_cache', {})
