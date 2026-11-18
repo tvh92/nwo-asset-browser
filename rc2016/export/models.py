@@ -135,6 +135,8 @@ def _png(array, mode='RGB'):
     from PIL import Image
     import io
     data = np.ascontiguousarray(array if array.dtype == np.uint8 else _u8(array))
+    if mode == 'RGB' and data.ndim == 3 and data.shape[2] == 4:   # a base map with alpha (Rift Apart glTF BLEND)
+        mode = 'RGBA'
     buffer = io.BytesIO()
     Image.fromarray(data, mode).save(buffer, 'PNG', optimize=False, compress_level=1)
     return buffer.getvalue()
@@ -303,12 +305,14 @@ def rcra_roughness(gloss):
     return np.clip(0.9725 - 0.7514 * gloss, 0.0, 1.0)
 
 
-def _convert_maps(c_tex, g_tex, n_tex, paths, o_tex=None):
+def _convert_maps(c_tex, g_tex, n_tex, paths, o_tex=None, e_tex=None):
     """The pixel work of ``material_maps``: 8-bit base / metal-rough / normal / emissive maps for one texture set.
 
     ``paths['roughness'] == 'rcra'`` takes Rift Apart's gloss curve (``rcra_roughness``) instead of R&C 2016's. ``o_tex``
     with ``paths['occlusion'] == 'blue'`` puts its blue channel (the sampled value) in the metal-rough map's red channel, the
-    glTF occlusion channel, and sets ``occlusion``."""
+    glTF occlusion channel, and sets ``occlusion``. The self-lit mask (``paths['self_lit']``) is _c alpha by default,
+    'g_blue', 'one' (no mask), or 'texture': channel ``paths['self_lit_channel']`` of ``e_tex``. ``paths['base_alpha']``
+    keeps _c alpha as the base map's alpha (glTF BLEND)."""
     from rc2016.viewer.textures import SRGB_FORMATS
     out = dict(base=None, mr=None, normal=None, emissive=None, emissive_strength=0.0, occlusion=False, notes=[])
     size = None
@@ -356,12 +360,26 @@ def _convert_maps(c_tex, g_tex, n_tex, paths, o_tex=None):
     if c_tex is not None or g_tex is not None or out['occlusion']:
         out['base'] = _u8(_linear_to_srgb(base))
         out['mr'] = _u8(np.stack([occlusion, rough, metallic], axis=-1))
+    if paths.get('base_alpha') and out['base'] is not None:
+        out['base'] = np.concatenate([out['base'], _u8(c_alpha)[..., None]], axis=-1)
     k = float(paths.get('k', 0.0) or 0.0)
-    mask = g_blue if paths.get('self_lit') == 'g_blue' else (c_alpha if c_tex is not None else None)
+    self_lit = paths.get('self_lit')
+    if self_lit == 'g_blue':
+        mask = g_blue
+    elif self_lit == 'one':
+        mask = np.ones(albedo.shape[:2], np.float32)
+    elif self_lit == 'texture':
+        e = _rgba_u8(e_tex, (albedo.shape[1], albedo.shape[0])) if e_tex is not None else None
+        channel = int(paths.get('self_lit_channel', 0))
+        mask = None if e is None else (_SRGB_LUT[e[..., channel]] if e_tex['format'] in SRGB_FORMATS and channel < 3
+                                       else _unit(e[..., channel]))
+    else:
+        mask = c_alpha if c_tex is not None else None
     if k > 0 and mask is not None and float(mask.max()) > 0.0:
         out['emissive'] = _u8(_linear_to_srgb(albedo * mask[..., None]))
         out['emissive_strength'] = k
-        out['notes'].append(f"self-lit = _c.rgb x {'_g.B' if paths.get('self_lit') == 'g_blue' else '_c.a'} x K {k:g}")
+        label = {'g_blue': '_g.B', 'one': '1', 'texture': paths.get('self_lit_label', 'mask')}.get(self_lit, '_c.a')
+        out['notes'].append(f"self-lit = _c.rgb x {label} x K {k:g}")
     if n_tex is not None:
         n = _rgba(n_tex)
         x, y = n[..., 0] * 2 - 1, n[..., 1] * 2 - 1

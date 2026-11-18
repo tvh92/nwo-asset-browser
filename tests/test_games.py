@@ -271,6 +271,57 @@ class LoaderDispatchTests(unittest.TestCase):
         self.assertEqual(_plain(recipe(u_scale=2.0), 'textureUnit7', 'textureUnit8')[:2], (None, True))   # tiled _g
         self.assertEqual(_plain(recipe(), None, 'textureUnit8')[0], None)
 
+    def test_rift_apart_emission_and_alpha_forms(self):
+        """Emission K x _m.r with a plain _c albedo, a constant emission, a forward alpha K x _c.a; a mixed form is refused."""
+        from rc2016.games.rcra_export import decoded_alpha, decoded_emission
+
+        def recipe(emission=None, alpha=None, albedo_scale=None):
+            nodes = [dict(op='input', name='TEXCOORD.x', type='f', args=[]), dict(op='input', name='TEXCOORD.y', type='f', args=[]),
+                     dict(op='sample', binding='textureUnit5', args=[0, 1]), dict(op='sample', binding='textureUnit8', args=[0, 1])]
+            nodes += [dict(op='channel', index=i, type='f', args=[2]) for i in range(4)]      # _c r g b a: 4..7
+            nodes += [dict(op='channel', index=0, type='f', args=[3])]                        # _m r: 8
+            nodes += [dict(op='const', type='f', value=2.5, args=[])]                         # 9
+            nodes += [dict(op='mul', type='f', args=[8, 9]), dict(op='mul', type='f', args=[7, 9])]   # 10: 2.5 _m.r, 11: 2.5 _c.a
+            nodes += [dict(op='mul', type='f', args=[8, 7])]                                  # 12: _m.r _c.a
+            albedo = [4, 5, 6]
+            if albedo_scale:
+                nodes += [dict(op='mul', type='f', args=[4, 9])]
+                albedo = [len(nodes) - 1, 5, 6]
+            terms = {'albedo.r': albedo[0], 'albedo.g': albedo[1], 'albedo.b': albedo[2]}
+            if emission is not None:
+                terms['emission'] = emission
+            if alpha is not None:
+                terms['alpha'] = alpha
+            return dict(nodes=nodes, terms=terms, inputs=['TEXCOORD.x', 'TEXCOORD.y'], textures={})
+        form, reason = decoded_emission(recipe(emission=10), 'textureUnit5', None, 'textureUnit8')
+        self.assertEqual((form['binding'], form['channel'], reason), ('textureUnit8', 0, None))
+        self.assertAlmostEqual(form['k'], 2.5, places=5)
+        form, _ = decoded_emission(recipe(emission=9), 'textureUnit5', None, 'textureUnit8')
+        self.assertEqual((form['binding'], form['k']), (None, 2.5))   # a constant emission
+        self.assertEqual(decoded_emission(recipe(emission=12), 'textureUnit5', None, 'textureUnit8')[0], None)   # mixed
+        self.assertIn('albedo', decoded_emission(recipe(emission=10, albedo_scale=True), 'textureUnit5', None,
+                                                 'textureUnit8')[1])
+        form, _ = decoded_alpha(recipe(alpha=11), 'textureUnit5')
+        self.assertEqual(form['binding'], 'textureUnit5')
+        self.assertEqual(form['k'], 1.0)   # 2.5 _c.a: the glTF factor is capped at 1
+        self.assertIsNone(decoded_alpha(recipe(alpha=10), 'textureUnit5')[0])   # _m, not _c alpha
+
+    def test_rift_apart_export_maps_carry_emission_and_alpha(self):
+        maps = self.rift_apart_maps({
+            'a.material': dict(layout=None, occlusion=False, g=None, m=None, reason='x', blend='blended',
+                               emission=dict(binding='textureUnit8', channel=0, k=4.0, path='m.texture', label='_m.r'),
+                               alpha=dict(binding='textureUnit5', k=0.5, label='0.5 x _c.a')),
+            'b.material': dict(layout=None, occlusion=False, g=None, m=None, reason='x', blend='additive',
+                               alpha_reason='glTF has no additive blend')})
+        a, b = maps['a.material'], maps['b.material']
+        self.assertEqual(a['base'].shape, (2, 2, 4))   # _c alpha kept for BLEND
+        self.assertEqual((a['alpha_mode'], a['alpha'], a['emissive_strength']), ('BLEND', 0.5, 4.0))
+        self.assertEqual(a['sources']['_e'], 'm.texture')
+        self.assertEqual(tuple(int(x) for x in a['emissive'][0, 0]), tuple(int(x) for x in a['base'][0, 0, :3]))   # _m.r = 1
+        self.assertIn('emission from the writer: _c x _m.r x 4', ' '.join(a['notes']))
+        self.assertEqual((b['alpha_mode'], b['emissive']), ('OPAQUE', None))
+        self.assertIn('drawn additive in the game; exported opaque: glTF has no additive blend', ' '.join(b['notes']))
+
     def test_gltf_occlusion_shares_the_metal_rough_image(self):
         import numpy as np
         from rc2016.export.models import ModelExporter
