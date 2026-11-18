@@ -161,6 +161,40 @@ def draw_skip_note(data):
     return None if alpha > 0 else NOT_DRAWN_NOTE % alpha   # NaN fails the engine's test too (comiss: unordered)
 
 
+# The draw alpha reaches the pixel programs as the interpolant TEXCOORD.w. The instance draw packs a x 4096, truncated, in
+# the low 16 bits of MatDrawCB.m_AlphaOverrides (0x141122ac9..0x141122b02). The engine model vertex program, and every
+# graph's own vertex program, reads that half as a signed 4.12 value s: TEXCOORD.w = |s| - (s < 0 ? sat(|s| - 1) : 0),
+# where a negative s is a dissolve; when the half is 0 it takes the object's alpha x g_MaterialView.m_Alpha instead. Every
+# translated forward program multiplies its alpha by TEXCOORD.w.
+DRAW_ALPHA_INPUT, ALPHA_FIXED = 'TEXCOORD.w', 4096
+
+
+def draw_alpha(data):
+    """TEXCOORD.w of the plain model-instance draw of the material (full instance alpha, no LOD or distance fade): the
+    material alpha through the draw packet's 4.12 field; None when that field is 0 (the vertex program then reads the
+    object and material records, which the neutral profile holds at 1)."""
+    import numpy as np
+    alpha = np.float32(material_alpha(data))
+    if not np.isfinite(alpha):
+        return None
+    word = int(np.float32(alpha * np.float32(ALPHA_FIXED))) & 0xFFFF   # cvttss2si, then the low 16 bits
+    signed = word - 0x10000 if word & 0x8000 else word
+    if not signed:
+        return None
+    value = np.float32(signed) / np.float32(ALPHA_FIXED)
+    dissolve = min(max(abs(value) - 1.0, 0.0), 1.0) if signed < 0 else 0.0
+    return float(np.float32(abs(value) - np.float32(dissolve)))
+
+
+def draw_interpolants(data):
+    """{DRAW_ALPHA_INPUT: draw_alpha} for the pixel-program bindings, or {} to keep the neutral 1."""
+    try:
+        value = draw_alpha(data)
+    except (ValueError, struct.error):
+        return {}
+    return {} if value is None else {DRAW_ALPHA_INPUT: value}
+
+
 def undrawn_materials(source, materials):
     """{material path: NOT_DRAWN_NOTE} of the model's materials that the plain instance draw never draws."""
     out = {}
@@ -203,6 +237,16 @@ def material_parameters(data):
 SERIALIZED_HEADER = ('size', 'parameter_count', 'value_start', 'switch_count', 'value_end', 'texture_count', 'texture_start',
                      'texture_end', 'zero_8', 'zero_9')
 GRAPH_SWITCHES = 0xBC93FB5E
+# Technique records of section 0xBC93FB5E: 32 switch slots, then six u32. The loader copies the third (record +0x108) to the
+# runtime technique's flags (+0x24, RiftApart.exe 0x1410d951f) and ORs it into the graph's (+0x7C, 0x1410d9604). Bit 0x200
+# is a forward technique: the loader costs it by its forward pass (pass record 1) instead of its G-buffer pass (record 5,
+# 0x1410d952a), and Material::PatchUpDefaults sets material +0x60 bit 0x20 << technique (0x1410d2317). Every graph with
+# the bit (862) has a G-buffer writer that stores constant black albedo, so its colour is the forward program's.
+TECHNIQUE_RECORD, TECHNIQUE_SLOTS, TECHNIQUE_FLAGS = 280, 32, 0x108
+FORWARD_TECHNIQUE = 0x200
+FORWARD_TECHNIQUE_NOTE = ('The game draws this graph with its forward program (technique flag 0x200): its G-buffer writer '
+                          'is a stub that stores black albedo. The forward program is not drawn for an opaque material, so '
+                          'it renders black here.')
 
 
 def material_switches(data):
@@ -224,18 +268,38 @@ def material_switches(data):
     return {key: value for value, key in (struct.unpack_from('<II', section, start + 8 * i) for i in range(count))}
 
 
+def technique_flags(data):
+    """The flags word of each technique of a materialgraph (section 0xBC93FB5E records, +0x108); [] without the section."""
+    dat = data[36:]
+    table = sections(dat)
+    if GRAPH_SWITCHES not in table:
+        return []
+    offset, size = table[GRAPH_SWITCHES]
+    if size % TECHNIQUE_RECORD:
+        raise ValueError('Material graph technique section has an unexpected size')
+    return [struct.unpack_from('<I', dat, offset + at + TECHNIQUE_FLAGS)[0] for at in range(0, size, TECHNIQUE_RECORD)]
+
+
+def forward_technique(graph_data):
+    """True when the graph's first technique is a forward technique (FORWARD_TECHNIQUE)."""
+    flags = technique_flags(graph_data)
+    return bool(flags and flags[0] & FORWARD_TECHNIQUE)
+
+
 def graph_switches(data):
-    """{switch key: u32 default} of a materialgraph's section 0xBC93FB5E: 32 or 64 (u32 value, u32 key) slots, then six u32
-    whose first is the count of slots in use."""
+    """{switch key: u32 default} of a materialgraph's first technique. Section 0xBC93FB5E holds one TECHNIQUE_RECORD-byte
+    record per technique (the graph loader counts size / 280, RiftApart.exe 0x1410d912b; graphs with 36 pass records have
+    two): 32 (u32 value, u32 key) slots, then six u32 whose first is the count of slots in use and whose third is the
+    technique flags word (technique_flags)."""
     dat = data[36:]
     table = sections(dat)
     if GRAPH_SWITCHES not in table:
         return {}
     offset, size = table[GRAPH_SWITCHES]
-    if size < 24 or (size - 24) % 8:
+    if size < TECHNIQUE_RECORD or size % TECHNIQUE_RECORD:
         raise ValueError('Material graph switch section has an unexpected size')
-    count = struct.unpack_from('<I', dat, offset + size - 24)[0]
-    if 8 * count > size - 24:
+    count = struct.unpack_from('<I', dat, offset + TECHNIQUE_SLOTS * 8)[0]
+    if count > TECHNIQUE_SLOTS:
         raise ValueError('Material graph switch count exceeds its slots')
     return {key: value for value, key in (struct.unpack_from('<II', dat, offset + 8 * i) for i in range(count))}
 

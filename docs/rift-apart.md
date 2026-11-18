@@ -372,7 +372,7 @@ The clip notes take about 8 s to compute, off the Tk thread.
   | 8, 9 | 0 in every material |
 
 - **Parameter records** follow the header: (u16 offset in the value block, u16 byte size, u32 key). See [Architecture glass](#architecture-glass-gbl_arch_glass) for how they fill `cb2`.
-- **Switches** (`material_switches`): (u32 value, u32 key) records, values 0 or 1, in 1,557 materials. They override the graph's switch defaults in section `0xBC93FB5E` (`graph_switches`: 32 slots, or 64 in the graphs with 36 pass records, of (u32 value, u32 key), then six u32 whose first is the count in use). 706 records name a key their graph does not declare. No shipped program reads a switch: 15 switch keys are also `cb2` parameters (the `gbl_rgb_blend` family, water foam, a shockwave), and no pass of their graph reads those `cb2` dwords. So the material binding ignores the switches, although 350 materials set one to a value other than the graph's `cb2` default. Whether the engine reads any of them elsewhere is not known.
+- **Switches** (`material_switches`): (u32 value, u32 key) records, values 0 or 1, in 1,557 materials. They override the graph's switch defaults in section `0xBC93FB5E`. `graph_switches` reads the first [technique](#techniques) record: 32 slots of (u32 value, u32 key), then six u32 whose first is the count in use. Graphs with 36 pass records have two records. 706 records name a key their graph does not declare. No shipped program reads a switch: 15 switch keys are also `cb2` parameters (the `gbl_rgb_blend` family, water foam, a shockwave), and no pass of their graph reads those `cb2` dwords. So the material binding ignores the switches, although 350 materials set one to a value other than the graph's `cb2` default. Whether the engine reads any of them elsewhere is not known.
 - **Texture records:** each is (u32 string offset from the batch end, u32 slot key). The strings follow the batch.
 - **Section `0xE1275683`** is the 40-byte flags block. Its third u32 is the material flags word ([Flags word](#flags-word)).
 - **Fur materials** have no `0xF5260180` section, so they bind no textures.
@@ -401,7 +401,12 @@ The main model-instance draw (`0x1411212d0`, [Render flags](#render-flags)) test
 - **Exceptions:** fur materials (flag `0x4000`) skip the test. So does an instance with effect-overlay records (the count in the u16 at `+0xE` of its per-instance record), which may draw the mesh with an effect.
 - **The packet:** otherwise its first 16 bytes are the draw's `MatDrawCB` record: render flags, scene object, subset material, and `m_AlphaOverrides` with a × 4096 in its low half.
 
-The forward programs read a negative low half as a dissolve. A positive one is not read as opacity in `basic_normal_gloss`, whose forward alpha is the sampled base-colour alpha. How a fractional material alpha reaches the blend is not traced.
+**Draw alpha.** The draw alpha reaches the pixel programs as the interpolant `TEXCOORD.w`:
+- **Packing:** the draw writes trunc(a × 4096) to the low 16 bits of `m_AlphaOverrides` (`0x141122ac9`, `cvttss2si`).
+- **Reading:** the engine model vertex program reads it as a signed 4.12 value s (instructions 30 to 38). So does every one of the 208 graphs' own vertex programs, which share that code. They set `TEXCOORD.w` = |s| − (s < 0 ? sat(|s| − 1) : 0); a negative s is a dissolve. When the field is 0, they set it to the object's alpha × `g_MaterialView.m_Alpha` instead.
+- **Use:** every translated forward program (306 surveyed) multiplies its alpha by `TEXCOORD.w`. Eleven blended-path G-buffer writers use it in their discard or gloss, and no opaque writer reads it.
+
+So a fractional material alpha is opacity. The translations bind `TEXCOORD.w` to the plain instance's value, `material.draw_alpha`: trunc(material alpha × 4096) / 4096, so 0.3 gives 0.2998 as in the game. A field of 0 keeps the neutral 1 (the profile's records). The limitations give the value.
 
 `material.draw_skip_note` returns a note for a material the plain instance draw never draws:
 - the blended path, a material alpha that is not above 0 (NaN fails the engine's test too), and neither flag `0x4000` nor `0x20000`;
@@ -552,12 +557,25 @@ The slot meanings below come from each program's stage, outputs and bindings acr
 | 3, 7, 10, 13, 17 | 208 | Vertex programs of vertex-deforming graphs ([Vertex programs](#vertex-programs)). |
 | 0, 14, 18 to 31 | fewer | Other pixel and vertex programs, mostly in the 36-record tables. |
 
+### Techniques
+
+Section `0xBC93FB5E` holds one 280-byte record per technique; the graph loader counts them as the section size / 280 (`0x1410d912b`). Each record holds 32 switch slots (`graph_switches`, [material layout](#layout-1)), then six u32. The third of those, at record `+0x108`, is the technique flags word. The loader copies it to the runtime technique (`+0x24`) and ORs it into the graph's word (`0x1410d951f`, `0x1410d9604`).
+
+Bit `0x200` marks a forward technique:
+- **Cost estimate:** the loader estimates the technique's cost from the size and resource flags of the forward pass (record 1) when the bit is set, and of the G-buffer pass (record 5) when it is clear (`0x1410d952a`).
+- **Material bit:** `Material::PatchUpDefaults` sets material `+0x60` bit `0x20 << technique` for it (`0x1410d2317`).
+- **Stub writer:** every graph with the bit (862) has a G-buffer writer that stores constant black albedo, and only 4 graphs without it do. For example, `basic_eye`'s slot-4 program writes `o1 = (0, 0, 0, 1)` and gloss 0.8.
+
+Blended materials sit on most of them. An opaque material on one is drawn opaque in the forward layer: the engine's blend enum describes opaque as "GBuffer or Forward layer". Where the draw reads the material bit is not traced. `material.forward_technique` reads the bit, and the G-buffer translation of such an opaque material says why it is black (`FORWARD_TECHNIQUE_NOTE`). Such materials are listed under [Not translated](#not-translated).
+
+### Engine vertex program
+
 The engine vertex program that feeds slots 1, 4 and 5 is in the exe (vertex pulling from `g_MainVBPosView`, `g_MainVBNrmTanView`, `g_MainVBUV0View` and others). Its translation gives the interpolants:
 
 | Interpolant | Content |
 | --- | --- |
 | `TEXCOORD.xy` | UV0 (int16 × the subset's UV scale / 16384) |
-| `TEXCOORD.zw` | Material and object values (dissolve, alpha) |
+| `TEXCOORD.zw` | `m_AlphaOverrides`: its high half or the material's `m_AlphaTest`, and the draw alpha ([Material alpha](#material-alpha)) |
 | `TEXCOORD1.xy` | UV1 |
 | `TEXCOORD2.xyz`, `.w` | World normal; instance index + 0.25 |
 | `TEXCOORD3.xyz`, `.w` | World tangent; `sign(w) / (e/31)²`, the bitangent sign over a scale ([Vertex decoding](#vertex-decoding)) |
@@ -630,6 +648,7 @@ The class-0 apply program (exe offset 59122268) gives the deferred BRDF. It is n
 Blended materials are drawn by their forward program (slot 1), which lights itself. For export, `rc2016/games/rcra/shaders.py` defines one labelled set of engine inputs. Its rule is that every light source is zero, and the renderer lights the material's G-buffer surface instead:
 - **Lights:** key light, light grid and lists, shadow atlas, ray-traced shadows, gobos, probes, GI, SSR, AO and the BRDF lookup read 0 (`FORWARD_LIGHTING`).
 - **Draw flags:** only the material's lit bit (`material.draw_flags`).
+- **Draw alpha:** `TEXCOORD.w` is the material alpha as the plain instance draw packs it ([Material alpha](#material-alpha)); `TEXCOORD.z` is 0.
 - **Object:** the neutral object of [Per-object values](#per-object-values).
 - **Depth:** the stored scene depth sits at the far clip, so there is no soft depth fade.
 - **Scene G-buffer:** the scene the far-clip depth stands for is empty, so reads of `g_GBufNormalSpec` (screen effects, eye normal smoothing, decals reading around the pixel) return a cleared target, every word 0, at the review viewport size (`SCENE_GBUFFER`, `SCENE_SIZE`). G-buffer writers that read these engine textures, or the default probe in their emission, get the same values.
@@ -964,6 +983,12 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 - **Blended materials whose forward program does not translate** (3 of 1,747), or that read the scene behind in scene mode (27): Blender gets their G-buffer surface, opaque.
 - **Forward lighting:** the forward program's own light loop is not used. Blender's lights shade the G-buffer surface instead, which assumes that the forward program lights the same terms as the deferred apply.
 - **Lighting classes 1 to 5:** skin, hair and the other special classes need their own apply programs. They are lit with class 0.
+- **Opaque materials on forward techniques** (245 materials, 44 of them eyes, such as `basic_eye`): their graph's G-buffer writer is a black stub ([Techniques](#techniques)), so both renderers draw them black. Their colour is the forward program's. Ratchet's eye forward program does not translate under the forward profile, for three reasons:
+  - it reprojects through `g_SSRVelocityTex` and `g_HalfResLinearDepth`, which the profile does not bind;
+  - it does pixel arithmetic on `SV_POSITION.xy` (a checker parity and texel reads at the screen size), which the profile maps to the view offset;
+  - it runs a ray-march loop that stays unbounded.
+
+  With every light symbolic, each colour channel is F0 + Y_d × L_d + Y_s × L_s: one diffuse light factor and one specular factor. So a renderer could light its Y_d as the eye's albedo once those inputs are bound.
 - **Instance effects:** a material the plain instance draw skips ([Material alpha](#material-alpha)) may still be drawn by a per-instance effect overlay or a raised instance alpha. Neither is decoded, so such a layer is not drawn.
 
 ## Evidence tool
@@ -985,4 +1010,4 @@ python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --su
 
 `tests/test_rcra_vertex.py` checks the vertex-program path. Without game files, it checks the vectorised evaluator against the translator's operations bit for bit, the view check, the stored vertices as a glTF morph target, and the notes in the loader. With `RCRA_GAME` it checks that the swarmer's vertex-animation texture moves every mesh, with each vertex where the translator's own evaluator puts it. It also checks that a dimensional glitch is view-dependent and that a balloon keeps its stored vertices.
 
-`tests/test_rcra_draw_skip.py` checks the draw-skip rule on synthetic flags blocks (blended, additive, opaque, fur and distance-fade cases), and the viewport and export wiring. With `RCRA_GAME` it checks that Ratchet's head lists only `compositeshell` as undrawn, and that the texture entries mark its slot. `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores). It skips without the DLL. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.
+`tests/test_rcra_draw_skip.py` checks two things on synthetic flags blocks: the draw-skip rule (blended, additive, opaque, fur and distance-fade cases) and the packed draw alpha. It also checks the viewport and export wiring. With `RCRA_GAME` it checks that Ratchet's head lists only `compositeshell` as undrawn and that the texture entries mark its slot. It also checks that a glass of material alpha 0.3 gets forward alpha × 1228/4096. `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores). It skips without the DLL. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.

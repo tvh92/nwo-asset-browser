@@ -26,6 +26,7 @@ background: colour = A + B x background, split into the terms colour (A) and bac
 import math
 from collections import defaultdict
 
+from rc2016.games.rcra import material as rmaterial
 from rc2016.games.rcra import shaders as rshaders
 from rc2016.shaders import sm5
 
@@ -39,11 +40,20 @@ GEOMETRY_INPUTS = {'TEXCOORD.x': 'uv0.x', 'TEXCOORD.y': 'uv0.y', 'TEXCOORD1.x': 
                    'TEXCOORD3.x': 'tangent.x', 'TEXCOORD3.y': 'tangent.y', 'TEXCOORD3.z': 'tangent.z',
                    'TEXCOORD3.w': 'tangent.sign', 'TEXCOORD4.x': 'colour.r', 'TEXCOORD4.y': 'colour.g',
                    'TEXCOORD4.z': 'colour.b', 'TEXCOORD4.w': 'colour.a', 'SV_IsFrontFace': 'front_facing'}
-# Per-draw and per-object values a material does not own, bound to the neutral draw: no dissolve, opaque, no render flags
+# Per-draw and per-object values a material does not own, bound to the neutral draw: no dissolve, no render flags
 # (class 0 lighting, occlusion mode decided by the material), instance 0, shader time 0. Viewer choices, labelled as such.
+# TEXCOORD.w, the draw alpha, is replaced per material by the plain instance's (material.draw_interpolants: the material
+# alpha, decoded); its 1 here is the neutral object and material records the vertex program reads when that is 0.
 NEUTRAL_DRAW_FLOATS = {'TEXCOORD.z': 0.0, 'TEXCOORD.w': 1.0, 'TEXCOORD2.w': 0.25, 'GlobalWorldCBuffer.m_ShaderTimer': 0.0,
                        'GlobalWorldCBuffer.m_DeltaTime': 0.0, 'GlobalWorldCBuffer.m_TimeOfDay': 0.0,
                        'GlobalWorldCBuffer.m_MaterialLoDOffset': 0.0}
+
+
+def _draw_alpha_text(material_data):
+    """The draw alpha the translation binds, for the limitations."""
+    return '%g' % rmaterial.draw_interpolants(material_data).get(rmaterial.DRAW_ALPHA_INPUT, 1.0)
+
+
 NEUTRAL_DRAW_DYNAMIC = {'MatDrawCB': 0}   # m_RenderFlags and the other per-draw words read through the instance index
 NEUTRAL_DRAW_FLOATS.update(rshaders.NEUTRAL_OBJECT_INTERPOLANTS)   # the neutral object's custom values, as the VS passes them
 SURFACE_TERMS = ('albedo.r', 'albedo.g', 'albedo.b', 'f0.r', 'f0.g', 'f0.b', 'gloss', 'normal.x', 'normal.y', 'normal.z',
@@ -504,6 +514,7 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
     else:
         shader, cb2, units = program['shader'], program['cb2'], program['units']
     bindings = binding_class(cb2, shader.reflection, units, texture_sizes)
+    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))   # the plain instance's draw alpha
     bindings.named.update(program['named'] if program else {})
     bindings.interpolants.update(program.get('interpolants', {}) if program else {})
     bindings.symbolic.update(program.get('symbolic', {}) if program else {})
@@ -560,11 +571,14 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
         stored = _rounded(g, g.op('sat', byte))
         terms[name] = g.op('mul', stored, stored)
     terms['gloss'] = _rounded(g, g.op('sat', gloss))
-    limitations = ['Per-draw values are the neutral draw: no dissolve, opaque, no render flags (lighting class 0), '
-                   'no flag volumes, shader time 0.' + OBJECT_NOTE * bindings.object_read + RECORD_NOTE * bindings.record_read
+    limitations = ['Per-draw values are the neutral draw: draw alpha %s (the material alpha), no dissolve, no render '
+                   'flags (lighting class 0), ' % _draw_alpha_text(material_data)
+                   + 'no flag volumes, shader time 0.' + OBJECT_NOTE * bindings.object_read + RECORD_NOTE * bindings.record_read
                    + (ENGINE_NOTE % ', '.join(sorted(bindings.engine_read)) if bindings.engine_read else ''), 'The 12-bit normal and the 8-bit albedo, occlusion and emission are used before the '
                    "G-buffer's rounding; F0 and gloss keep it."]
     limitations += program['limitations'] if program else []
+    if program is None and rmaterial.forward_technique(graph_data) and rmaterial.material_blend(material_data) == 'opaque':
+        limitations.append(rmaterial.FORWARD_TECHNIQUE_NOTE)   # an opaque material the game draws in the forward layer
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Surface')
 
 
@@ -1158,6 +1172,7 @@ def _engine_translation(shader, graph_data, material_data, flags, texture_sizes)
     (_EngineFreeBindings); engine(i) is true for nodes that read one."""
     bindings = _EngineFreeBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
                                    rshaders.material_units(graph_data, material_data), texture_sizes)
+    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
@@ -1299,6 +1314,7 @@ def forward(graph_data, material_data, texture_sizes=None):
     flags = draw_flags(material_data)
     bindings = _ForwardBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
                                 rshaders.material_units(graph_data, material_data), texture_sizes)
+    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))   # the plain instance's draw alpha
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
@@ -1327,9 +1343,10 @@ def forward(graph_data, material_data, texture_sizes=None):
         'Forward colour with every engine light source zero (key light, light grid, probes, GI, reflections): the '
         "material's own emission and effects. The renderer's lights shade its G-buffer surface instead of the forward "
         "program's lighting.",
-        "Draw: render flags hold only the material's lit bit (%s), no dissolve, no particle values, no flag volumes, "
+        "Draw: render flags hold only the material's lit bit (%s), draw alpha %s (the material alpha), no dissolve, "
+        'no particle values, no flag volumes, '
         'shader time 0; stored scene depth at the far clip (no soft depth fade); view space with the world axes.'
-        % ('lit' if flags else 'unlit: lighting term 1') + OBJECT_NOTE * bindings.object_read
+        % ('lit' if flags else 'unlit: lighting term 1', _draw_alpha_text(material_data)) + OBJECT_NOTE * bindings.object_read
         + RECORD_NOTE * bindings.record_read
         + (SCENE_GBUFFER_NOTE if set(rshaders.SCENE_GBUFFER) & bindings.engine_read else '')]
     if scene:

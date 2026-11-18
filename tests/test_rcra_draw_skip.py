@@ -47,6 +47,27 @@ class DrawSkipRuleTests(unittest.TestCase):
             if note:
                 self.assertIn('Not drawn', note)
 
+    def test_draw_alpha_is_the_packed_material_alpha(self):
+        # the draw packs trunc(alpha x 4096) into 16 bits; the vertex program reads it back as TEXCOORD.w
+        for alpha, expected in ((1.0, 1.0), (0.5, 0.5), (0.3, 1228 / 4096), (0.99, 4055 / 4096), (0.005, 20 / 4096)):
+            self.assertEqual(rmat.draw_alpha(material_bytes(0x1110, alpha)), expected, alpha)
+            self.assertEqual(rmat.draw_interpolants(material_bytes(0x1110, alpha)), {'TEXCOORD.w': expected})
+        for alpha in (0.0, 0.0001, float('nan')):   # a zero field: the vertex program reads the records (profile 1)
+            self.assertIsNone(rmat.draw_alpha(material_bytes(0x1110, alpha)), alpha)
+            self.assertEqual(rmat.draw_interpolants(material_bytes(0x1110, alpha)), {})
+
+    def test_technique_flags(self):
+        def graph(*words):
+            records = b''.join(bytes(8 * rmat.TECHNIQUE_SLOTS) + struct.pack('<6I', 0, 5, w, 0, 0x40800000, 0) for w in words)
+            body = b'1TAD' + struct.pack('<IIHH', 0x1592401A, 28 + len(records), 1, 0)
+            body += struct.pack('<III', rmat.GRAPH_SWITCHES, 28, len(records)) + records
+            return bytes(36) + body
+        self.assertEqual(rmat.technique_flags(graph(0x11210)), [0x11210])
+        self.assertEqual(rmat.technique_flags(graph(0x8011810, 0x11210)), [0x8011810, 0x11210])
+        self.assertTrue(rmat.forward_technique(graph(0x11210)))           # basic_eye
+        self.assertFalse(rmat.forward_technique(graph(0x8011810)))        # basic_normal_gloss
+        self.assertEqual(rmat.graph_switches(graph(0x11210, 0x11210)), {})
+
     def test_front_ends_leave_them_out(self):
         viewport = (ROOT / 'rc2016/viewer/viewport.py').read_text(encoding='utf-8')
         self.assertIn('.get("not_drawn")]', viewport)
@@ -87,6 +108,38 @@ class InstallDrawSkipTests(unittest.TestCase):
             self.assertTrue(rmat.draw_skip_note(data), path)
         eyeshadow = 'material/characters/hero/hero_rivet_eyeshadow/hero_rivet_eyeshadow.material'
         self.assertIsNone(rmat.draw_skip_note(self.source.asset_data(self.source.resolve(eyeshadow)[0])))
+
+    def test_eye_is_a_forward_technique(self):
+        from rc2016.games.rcra import surface as rsurface
+        from rc2016.games.rcra.texture import texture_size
+
+        def graph(path):
+            return self.source.asset_data(next(k for k in self.source.resolve(path)
+                                               if self.source.entries[k]['type'] == 'materialgraph'))
+        eye_graph = graph('required/materials/basic_eye.materialgraph')
+        self.assertTrue(rmat.forward_technique(eye_graph))
+        self.assertFalse(rmat.forward_technique(graph('required/materials/basic_normal_gloss.materialgraph')))
+        eye = self.source.asset_data(self.source.resolve('material/characters/hero/hero_ratchet_eyes/ratchet_eye.material')[0])
+        result = rsurface.surface(eye_graph, eye, texture_sizes=lambda p: texture_size(self.source, p))
+        g = result['graph']
+        self.assertEqual([g.nodes[result['terms'][t]].get('value') for t in ('albedo.r', 'albedo.g', 'albedo.b')], [0.0] * 3)
+        self.assertIn(rmat.FORWARD_TECHNIQUE_NOTE, result['limitations'])
+
+    def test_forward_alpha_carries_the_draw_alpha(self):
+        from rc2016.games.rcra import surface as rsurface
+        from rc2016.games.rcra.texture import texture_size
+        path = 'material/environment/megalopolis/architecture/meg_arch_gc_float/meg_arch_gc_float_glass_01.material'
+        key = self.source.resolve(path)[0]
+        data = self.source.asset_data(key)
+        graph_path = rmat._graphs(self.source, key)[0]
+        graph = self.source.asset_data(next(k for k in self.source.resolve(graph_path)
+                                            if self.source.entries[k]['type'] == 'materialgraph'))
+        self.assertAlmostEqual(rmat.material_alpha(data), 0.3, places=6)
+        result = rsurface.forward(graph, data, texture_sizes=lambda p: texture_size(self.source, p))
+        g = result['graph']
+        constants = {g.nodes[i].get('value') for i in g.reachable([result['terms']['alpha']]) if g.nodes[i]['op'] == 'const'}
+        self.assertIn(1228 / 4096, constants)
+        self.assertTrue(any('draw alpha 0.299805' in line for line in result['limitations']))
 
 
 if __name__ == '__main__':
