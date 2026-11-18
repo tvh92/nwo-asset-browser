@@ -72,6 +72,11 @@ class TexelTests(unittest.TestCase):
         nodes = [dict(op='const', type='f', value=1.0), dict(op='input', type='f', name='TEXCOORD.x'),
                  dict(op='sample', binding='textureUnit5', args=[1, 1, 0]), dict(op='sample', binding='textureUnit6', args=[1, 1, 1])]
         self.assertEqual(blender_export._slices(dict(nodes=nodes)), {'textureUnit5': 1, 'textureUnit6': blender_export.ALL_SLICES})
+        zero = [dict(op='const', type='f', value=0.0), dict(op='input', type='f', name='TEXCOORD.x'),
+                dict(op='sample', binding='textureUnit7', args=[1, 1, 0]), dict(op='sample', binding='textureUnit7', args=[1, 1, 0]),
+                dict(op='sample', binding='textureUnit8', args=[1, 1])]
+        # slice 0, read once or twice, and a sample without a slice lane stay slice 0
+        self.assertEqual(blender_export._slices(dict(nodes=zero)), {'textureUnit7': 0, 'textureUnit8': 0})
 
     def test_bilinear_matches_texel_centres(self):
         image = np.arange(16, dtype=np.float32).reshape(2, 2, 4)

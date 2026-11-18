@@ -295,7 +295,7 @@ def _slices(recipe):
             merged = merge_layouts(slices.setdefault(n['binding'], index), index)
             if merged is None and VOLUME not in (slices[n['binding']], index):
                 raise rsurface.Unsupported('Texture %s is sampled as a cube map and differently' % n['binding'])
-            slices[n['binding']] = merged or ALL_SLICES
+            slices[n['binding']] = ALL_SLICES if merged is None else merged   # slice 0 is a slice, not "every slice"
     return slices
 
 
