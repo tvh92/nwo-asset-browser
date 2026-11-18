@@ -42,7 +42,11 @@ Rift Apart's capabilities are `models`, `textures`, `export` and `animation`:
 The portable export (GLB, glTF, OBJ) writes only what is decoded, through `rc2016/games/rcra_export.py`. Blender formats replace these materials with the translated ones ([Blender materials](#blender-materials)):
 
 - Each material's base colour and its normal map, at full resolution.
-- Every portable material is opaque, single-sided, non-metallic and fully rough, and its notes say so.
+- F0, gloss and occlusion where the material's own G-buffer writer reads them as plain [`_g` and `_m` channels](#_g-and-_m-channels) (`rcra_export.decoded_maps`). The translated surface terms are evaluated at six random sets of inputs and texels. A layout counts only when gloss and F0 equal its `_g` channels within the G-buffer's 8-bit rounding at every probe, and occlusion only when it equals `_m` blue, each sampled at UV0 and array slice 0.
+  - F0 and gloss are converted to glTF metal/roughness with the Khronos spec-gloss conversion (as for R&C 2016). Roughness is `0.9725 − 0.7514 gloss`, so glTF's GGX alpha (roughness²) is the game's. The game's Lambert diffuse without glTF's energy split is not reproduced.
+  - Occlusion is the red channel of the metal/rough image, which glTF's `occlusionTexture` reads. OBJ has no occlusion map.
+  - Over the install: 745 materials take the red and green layout and 638 the rgb and alpha layout; about 1,130 take occlusion. The others keep the stand-in: their writer has no `_g` slot, mixes these channels with vertex colour, the normal or other textures, samples `_g` at a tiled UV, or does not translate. Each material's notes give the reason.
+- Everything else is opaque, single-sided and has no emission: the graph-specific masks, emission and blending are not carried. Without decoded F0 and gloss a material is non-metallic and fully rough, and its notes say so.
 - A texture stored in a float or 16-bit data format is left out with a note, because its 8-bit conversion is not decoded. One example is the 4×4 `R32G32_FLOAT` `default_pink_shader_n` placeholder.
 
 ## Install layout

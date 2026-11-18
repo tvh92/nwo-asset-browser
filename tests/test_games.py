@@ -201,29 +201,84 @@ class LoaderDispatchTests(unittest.TestCase):
         loader.export_textures(['a/x_c.texture'], 'out', {'dds'})
         self.assertEqual(calls, [('export', ['a/x_c.texture'], 'out', {'dds'}, False, None)])
 
-    def test_rift_apart_export_maps_use_base_colour_and_normal_only(self):
+    def rift_apart_maps(self, decided):
         from rc2016.export.models import _MapCache
         from rc2016.games.rcra.material import SLOT_BASE_COLOUR, SLOT_G, SLOT_NORMAL
         textures = {
             'c.texture': dict(format=28, width=2, height=2, pixels=bytes([200, 100, 50, 255] * 4), srgb=False),
             'n.texture': dict(format=49, width=2, height=2, pixels=bytes([128, 128] * 4), srgb=False),
+            'g.texture': dict(format=28, width=2, height=2, pixels=bytes([64, 10, 0, 255] * 4), srgb=False),
+            'g_rgb.texture': dict(format=28, width=2, height=2, pixels=bytes([10, 10, 10, 128] * 4), srgb=False),
+            'm.texture': dict(format=28, width=2, height=2, pixels=bytes([255, 0, 77, 255] * 4), srgb=False),
             'float_n.texture': dict(format=16, width=2, height=2, pixels=bytes(32), srgb=False)}
         slots = {'a.material': [(SLOT_BASE_COLOUR, 'c.texture'), (SLOT_NORMAL, 'n.texture'), (SLOT_G, 'g.texture')],
                  'b.material': [(SLOT_NORMAL, 'float_n.texture')]}
         source = SimpleNamespace(asset_data=lambda key: key)
         with patch('rc2016.games.rcra.material._material_key', side_effect=lambda s, path: path), \
                 patch('rc2016.games.rcra.material.material_slots', side_effect=lambda data: slots[data]), \
+                patch('rc2016.games.rcra_export.decoded_maps', side_effect=lambda s, key: dict(decided[key])), \
                 patch('rc2016.games.rcra.texture.load_texture_full', side_effect=lambda s, path: dict(textures[path])):
-            a = RCRA.material_maps(source, dict(index=0, path='a.material'), {}, _MapCache())
-            b = RCRA.material_maps(source, dict(index=1, path='b.material'), {}, _MapCache())
-        self.assertEqual(a['sources'], {'_c': 'c.texture', '_n': 'n.texture'})   # _g is not decoded, so not read
+            return {key: RCRA.material_maps(source, dict(index=i, path=key), {}, _MapCache()) for i, key in enumerate(decided)}
+
+    def test_rift_apart_export_maps_without_a_plain_writer_are_the_stand_in(self):
+        stand_in = dict(layout=None, occlusion=False, g=None, m=None, reason='the writer does not translate: x')
+        maps = self.rift_apart_maps({'a.material': stand_in, 'b.material': stand_in})
+        a, b = maps['a.material'], maps['b.material']
+        self.assertEqual(a['sources'], {'_c': 'c.texture', '_n': 'n.texture'})   # _g is not read without a plain writer
         self.assertEqual(a['base'].shape, (2, 2, 3))
-        self.assertEqual((a['alpha_mode'], a['double_sided'], a['emissive']), ('OPAQUE', False, None))
+        self.assertEqual((a['alpha_mode'], a['double_sided'], a['emissive'], a['occlusion']), ('OPAQUE', False, None, False))
         self.assertTrue((a['mr'][..., 2] == 0).all() and (a['mr'][..., 1] == 255).all())   # non-metallic, fully rough
+        self.assertTrue((a['mr'][..., 0] == 255).all())
         self.assertIsNotNone(a['normal'])
-        self.assertIn('Rift Apart preview', a['notes'][-1])
+        self.assertIn('fully rough (the writer does not translate: x)', ' '.join(a['notes']))
+        self.assertIn('Rift Apart portable material', a['notes'][-1])
         self.assertEqual((b['sources'], b['normal'], b['base_factor']), ({}, None, [0.8, 0.8, 0.8]))
         self.assertTrue(any('float_n.texture left out' in note for note in b['notes']))
+
+    def test_rift_apart_export_maps_take_the_decoded_g_and_m_channels(self):
+        maps = self.rift_apart_maps({'a.material': dict(layout='grey', occlusion=True, g='g.texture', m='m.texture', reason=None),
+                                     'b.material': dict(layout='colored', occlusion=False, g='g_rgb.texture', m=None, reason=None)})
+        grey, colored = maps['a.material'], maps['b.material']
+        self.assertEqual(grey['sources'], {'_c': 'c.texture', '_n': 'n.texture', '_g': 'g.texture', '_m': 'm.texture'})
+        gloss = (64 / 255) ** 0.5   # gloss² in red
+        self.assertEqual(int(grey['mr'][0, 0, 1]), round((0.9725 - 0.7514 * gloss) * 255))
+        self.assertEqual(int(grey['mr'][0, 0, 0]), 77)   # occlusion: _m blue in the glTF occlusion channel
+        self.assertEqual(int(grey['mr'][0, 0, 2]), 0)    # a grey F0 of 10/255 is a dielectric
+        self.assertTrue(grey['occlusion'])
+        self.assertIn('gloss² in red, grey F0 in green', ' '.join(grey['notes']))
+        self.assertEqual(int(colored['mr'][0, 0, 1]), round((0.9725 - 0.7514 * 128 / 255) * 255))   # gloss in alpha
+        self.assertEqual((int(colored['mr'][0, 0, 0]), colored['occlusion']), (255, False))
+
+    def test_rift_apart_plain_writer_check(self):
+        """A writer whose gloss is sqrt(_g.r), F0 _g.g and occlusion _m.b at UV0 is plain; scaled or moved UVs are not."""
+        from rc2016.games.rcra_export import _plain
+
+        def recipe(gloss_op='sqrt', u_scale=None):
+            nodes = [dict(op='input', name='TEXCOORD.x', type='f', args=[]), dict(op='input', name='TEXCOORD.y', type='f', args=[])]
+            u = 0
+            if u_scale:
+                nodes += [dict(op='const', type='f', value=u_scale, args=[]), dict(op='mul', type='f', args=[0, 2])]
+                u = 3
+            base = len(nodes)
+            nodes += [dict(op='sample', binding='textureUnit7', args=[u, 1]), dict(op='sample', binding='textureUnit8', args=[0, 1])]
+            nodes += [dict(op='channel', index=i, type='f', args=[base]) for i in range(4)]       # _g r g b a
+            nodes += [dict(op='channel', index=2, type='f', args=[base + 1])]                   # _m b
+            nodes += [dict(op=gloss_op, type='f', args=[base + 2])]
+            terms = {'gloss': len(nodes) - 1, 'f0.r': base + 3, 'f0.g': base + 3, 'f0.b': base + 3, 'occlusion': base + 6}
+            return dict(nodes=nodes, terms=terms, inputs=['TEXCOORD.x', 'TEXCOORD.y'], textures={})
+        self.assertEqual(_plain(recipe(), 'textureUnit7', 'textureUnit8')[:2], ('grey', True))
+        self.assertEqual(_plain(recipe('sat'), 'textureUnit7', 'textureUnit8')[:2], (None, True))   # gloss is r, not sqrt(r)
+        self.assertEqual(_plain(recipe(u_scale=2.0), 'textureUnit7', 'textureUnit8')[:2], (None, True))   # tiled _g
+        self.assertEqual(_plain(recipe(), None, 'textureUnit8')[0], None)
+
+    def test_gltf_occlusion_shares_the_metal_rough_image(self):
+        import numpy as np
+        from rc2016.export.models import ModelExporter
+        m = dict(obj_name='m', alpha=1.0, base=None, normal=None, emissive=None, emissive_strength=0.0, alpha_mode='OPAQUE',
+                 double_sided=False, png={}, mr=np.full((1, 1, 3), 128, np.uint8), occlusion=True)
+        doc = ModelExporter._build_gltf(None, 'x', [], {0: m}, None, []).doc
+        material = doc['materials'][0]
+        self.assertEqual(material['occlusionTexture'], material['pbrMetallicRoughness']['metallicRoughnessTexture'])
 
     def test_export_reads_materials_through_the_loaders_game(self):
         import inspect

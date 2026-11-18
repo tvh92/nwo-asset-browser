@@ -298,12 +298,21 @@ def material_maps(archive, material, cache, map_cache=None):
     return out
 
 
-def _convert_maps(c_tex, g_tex, n_tex, paths):
-    """The pixel work of ``material_maps``: 8-bit base / metal-rough / normal / emissive maps for one texture set."""
+def rcra_roughness(gloss):
+    """Rift Apart: glTF roughness whose GGX alpha (roughness²) is the game's, (0.9725 - 0.7514 gloss)² (docs/rift-apart.md)."""
+    return np.clip(0.9725 - 0.7514 * gloss, 0.0, 1.0)
+
+
+def _convert_maps(c_tex, g_tex, n_tex, paths, o_tex=None):
+    """The pixel work of ``material_maps``: 8-bit base / metal-rough / normal / emissive maps for one texture set.
+
+    ``paths['roughness'] == 'rcra'`` takes Rift Apart's gloss curve (``rcra_roughness``) instead of R&C 2016's. ``o_tex``
+    with ``paths['occlusion'] == 'blue'`` puts its blue channel (the sampled value) in the metal-rough map's red channel, the
+    glTF occlusion channel, and sets ``occlusion``."""
     from rc2016.viewer.textures import SRGB_FORMATS
-    out = dict(base=None, mr=None, normal=None, emissive=None, emissive_strength=0.0, notes=[])
+    out = dict(base=None, mr=None, normal=None, emissive=None, emissive_strength=0.0, occlusion=False, notes=[])
     size = None
-    for tex in (c_tex, g_tex):
+    for tex in (c_tex, g_tex, o_tex):
         if tex is not None:
             size = max(size or (0, 0), (tex['width'], tex['height']))
     h_w = size
@@ -334,14 +343,19 @@ def _convert_maps(c_tex, g_tex, n_tex, paths):
             gloss = np.sqrt(np.clip(gloss_scale * _unit(g[..., 3]) ** 2, 0, 1))
         f0 = np.clip(f0, 0.0, 1.0)
         base, metallic = spec_gloss_to_metal_rough(albedo, f0)
-        rough = np.power(2.0, -2.75 * gloss)
+        rough = rcra_roughness(gloss) if paths.get('roughness') == 'rcra' else np.power(2.0, -2.75 * gloss)
         out['notes'].append(f'_g read as {mode} (specular x{spec:g}, gloss x{gloss_scale:g})')
     else:
         base, metallic, rough = albedo, np.zeros(albedo.shape[:2], np.float32), np.ones(albedo.shape[:2], np.float32)
         out['notes'].append('no _g texture: no game specular; exported fully rough')
-    if c_tex is not None or g_tex is not None:
+    occlusion = np.ones_like(rough)
+    if o_tex is not None and paths.get('occlusion') == 'blue':
+        o = _rgba_u8(o_tex, (rough.shape[1], rough.shape[0]))
+        occlusion = _SRGB_LUT[o[..., 2]] if o_tex['format'] in SRGB_FORMATS else _unit(o[..., 2])
+        out['occlusion'] = True
+    if c_tex is not None or g_tex is not None or out['occlusion']:
         out['base'] = _u8(_linear_to_srgb(base))
-        out['mr'] = _u8(np.stack([np.ones_like(rough), rough, metallic], axis=-1))
+        out['mr'] = _u8(np.stack([occlusion, rough, metallic], axis=-1))
     k = float(paths.get('k', 0.0) or 0.0)
     mask = g_blue if paths.get('self_lit') == 'g_blue' else (c_alpha if c_tex is not None else None)
     if k > 0 and mask is not None and float(mask.max()) > 0.0:
@@ -1035,6 +1049,8 @@ class ModelExporter:
                 pbr['baseColorTexture'] = dict(index=g.image(f"{m['obj_name']}_basecolor", cached_png(m, 'base', m['base'])))
             if m['mr'] is not None:
                 pbr['metallicRoughnessTexture'] = dict(index=g.image(f"{m['obj_name']}_metal_rough", cached_png(m, 'mr', m['mr'])))
+                if m.get('occlusion'):   # occlusion in the red channel of the same image, as glTF reads it
+                    entry['occlusionTexture'] = dict(pbr['metallicRoughnessTexture'])
             if m['normal'] is not None:
                 entry['normalTexture'] = dict(index=g.image(f"{m['obj_name']}_normal", cached_png(m, 'normal', m['normal'])))
             if m['emissive'] is not None:
