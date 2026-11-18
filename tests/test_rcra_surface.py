@@ -15,6 +15,7 @@ import numpy as np
 
 from rc2016.games.rcra import blender_check, blender_export
 from rc2016.games.rcra import surface as rsurface
+from rc2016.games.rcra import texture as rtexture
 from rc2016.shaders import sm5
 
 GAME = os.environ.get('RCRA_GAME')
@@ -436,6 +437,36 @@ class RealSurfaceTests(unittest.TestCase):
             if any(r['path'] == graph_path for r in self.source.asset_references(key)):
                 return key
         self.fail('no material uses ' + graph_path)
+
+    def test_g_map_layout_follows_7107A2D8(self):
+        """Below 0.5 (or in a graph without the key) the _g map holds gloss² in red and a grey F0 in green; at or above it F0
+        in rgb and gloss in alpha."""
+        from rc2016.games.rcra import material as rmat, shaders as rshaders
+        cases = {'material/environment/sargasso/prop/uwb_prop_tube_bubbles_01/uwb_prop_tube_bubbles_01_opaque.material': False,
+                 'material/characters/hero/hero_rivet_weteye/hero_rivet_weteye.material': False,   # basic_normal_gloss, key 0
+                 'material/environment/underwaterbase/gameplay/uwb_gp_fuel_crate_frost_01/uwb_gp_fuel_crate_frost_01.material': True}
+        for path, rgb in cases.items():
+            key = next(k for k in self.source.resolve(path) if self.source.entries[k]['type'] == 'material')
+            graph_path = rmat._graphs(self.source, key)[0]
+            graph = self.source.asset_data(next(k for k in self.source.resolve(graph_path)
+                                                if self.source.entries[k]['type'] == 'materialgraph'))
+            data = self.source.asset_data(key)
+            rows, offsets, defaults = rshaders._layout(graph)
+            default = defaults[offsets[0x7107A2D8] // 4] if 0x7107A2D8 in offsets else 0.0   # absent: the red and green layout
+            mode = rmat.material_parameters(data).get(0x7107A2D8, (default,))[0]
+            self.assertEqual(mode >= 0.5, rgb, path)
+            unit = 'textureUnit%d' % (rshaders.FIRST_MATERIAL_UNIT + next(u for u, k, _ in rows if k == rmat.SLOT_G))
+            result = rsurface.surface(graph, data, texture_sizes=lambda p: rtexture.texture_size(self.source, p))
+            g, terms = result['graph'], result['terms']
+            texel = (0.36, 0.25, 0.64, 0.81)
+            values = sm5.evaluate(g, list(terms.values()), defaultdict(float, {'TEXCOORD2.z': 1.0, 'TEXCOORD3.x': 1.0,
+                                                                               'TEXCOORD3.w': 1.0}),
+                                  lambda node, args: list(texel) if node['binding'] == unit else [0.5, 0.5, 0.5, 1.0])
+            v = {k: values[i] for k, i in terms.items()}
+            gloss, f0 = (texel[3], texel[:3]) if rgb else (math.sqrt(texel[0]), (texel[1],) * 3)
+            self.assertAlmostEqual(v['gloss'], gloss, delta=1 / 255, msg=path)
+            for name, want in zip(('f0.r', 'f0.g', 'f0.b'), f0):
+                self.assertAlmostEqual(v[name], want, delta=0.01, msg=path)
 
     def test_view_direction_writer_takes_the_forward_view(self):
         """The dimensional glass normalises the direction to the camera: under review values that is NaN, so it is translated

@@ -384,8 +384,32 @@ Slot keys are the low 32 bits of the 2016 game's `0x49A7866B........` slot hashe
 | --- | --- | --- |
 | `ABDAD780` | Base colour (`_c`) | 2,600 of 2,862 |
 | `7AE34E7A` | Normal (`_n`) | 2,591 of 2,647 |
-| `1576D848` | `_g` | — |
-| `E68930AC` | `_m` mask | — |
+| `1576D848` | `_g`: F0 and gloss | — |
+| `E68930AC` | `_m`: occlusion and masks | — |
+
+### `_g` and `_m` channels
+
+What each channel means is read from the translated G-buffer writers ([Surface terms](#surface-terms)): for every material whose writer translates, the survey follows each surface term back to the channels it samples, then evaluates the recipe at several channel values to find the form.
+
+**`_g`** (2,629 materials whose graph has the slot) holds F0 and gloss in one of two layouts. The material's `cb2` parameter `7107A2D8` picks the layout, the way `g_mode` does for [architecture glass](#architecture-glass-gbl_arch_glass). This holds in all 2,390 materials whose graph declares the key. Graphs without the key use the red and green layout.
+
+| Layout | Materials | Red | Green | Blue | Alpha |
+| --- | --- | --- | --- | --- | --- |
+| `7107A2D8` < 0.5, or absent | 1,368 | gloss² (`gloss = sqrt(r)`) | F0, grey | — | — |
+| `7107A2D8` ≥ 0.5 | 1,184 | F0 red | F0 green | F0 blue | gloss |
+
+F0 is the sampled value, and the G-buffer stores its square root. In 796 materials of the first layout and 871 of the second, these are the whole terms. The others scale or remap them with material parameters, and their programs give the exact form. 20 materials (holograms) read no `_g` channel; the remaining 57 use graph-specific layouts, such as emission in blue.
+
+**`_m`** (2,360 materials whose graph has the slot):
+
+| Channel | Use |
+| --- | --- |
+| Red | Read by 1,443 materials, as a mask whose meaning depends on the graph: it gates emission (757 materials, scaled by the material's emission parameters), an albedo tint or detail layer (895), the detail normal (431), or gloss and F0 (248 and 172, such as the palette armour). One graph often uses it for several of these |
+| Green | Read by 78 materials (damage overlays, emissive decals, floating hexes) |
+| Blue | Occlusion, in 2,261 materials; the value itself in 1,833. 62 gold weapon materials also take F0 from it |
+| Alpha | Unused |
+
+52 materials, mostly holograms, read no `_m` channel.
 
 ### The labelled preview
 
@@ -397,7 +421,7 @@ The viewer draws a labelled **Rift Apart preview** (`rule_kind 'rift apart previ
 - **Everything else:** neutral parameters.
 
 **What it leaves out:**
-- **`_g` and `_m` maps:** their channel meanings are not decoded.
+- **`_g` and `_m` maps:** the preview does not read them. Their channels ([above](#_g-and-_m-channels)) reach the viewer through the translated programs, which apply each graph's own form.
 - **Material graphs:** the preview translates no graph shader. Architecture glass keeps its hand decode (next section) as the fallback of the translated program. 1,474 graphs exist; 1,386 are bound by materials and 29 materials bind none.
 - **Gloss, metal, emission and blending:** these are review values, not game data.
 - **Fur shells:** they have no texture slots, so they draw in the neutral colour.

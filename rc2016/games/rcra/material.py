@@ -11,8 +11,10 @@ u32 is the material flags word (``material_blend``).
 Slot keys are the low 32 bits of the 2016 game's 0x49A7866B........ slot hashes, and the corpus
 binds them to the same texture suffixes (5,721 materials): ABDAD780 holds the base colour (_c in
 2,600 of 2,862 materials), 7AE34E7A the normal (_n, 2,591 of 2,647), 1576D848 the _g map and
-E68930AC the _m mask. The preview draws only the base colour and the normal: what the game's
-_g and _m channels mean is not decoded. Materials whose program translates are drawn from it instead in the Shaded mode
+E68930AC the _m mask. The preview draws only the base colour and the normal. The translated writers read the _g map as
+F0 and gloss in one of two layouts, picked by the cb2 parameter 7107A2D8 (gloss² in r and grey F0 in g; or F0 in rgb and
+gloss in a), and the _m map's blue as occlusion with a graph-specific mask in red (docs/rift-apart.md, "_g and _m
+channels"). Materials whose program translates are drawn from it instead in the Shaded mode
 (rc2016.games.rcra.viewer_materials, _translated).
 
 The one decoded graph is architecture glass (gbl_arch_glass, 44 materials, e.g. the Nefarious trooper and swarmer
@@ -42,8 +44,9 @@ GLASS_LIMITATION = ('Rift Apart glass preview (graph gbl_arch_glass, traced to i
                     'texture units, the rim alpha with its floor and the emission are decoded; the light list, shadows, probes, '
                     'screen-space reflections, fog, soft depth fade, vertex alpha and tonemapping are viewer stand-ins, and the '
                     'adapted luminance that scales the emission is not known.')
-LIMITATION = ('Rift Apart preview: base colour (slot ABDAD780) and normal (slot 7AE34E7A) only; the _g/_m slots and '
-              'the material graph are not decoded, so gloss, metal, emission and blending are review values.')
+LIMITATION = ('Rift Apart preview: base colour (slot ABDAD780) and normal (slot 7AE34E7A) only. The preview reads neither the '
+              '_g map (F0 and gloss) nor the _m map (occlusion and masks) and runs no material graph, so gloss, metal, '
+              'emission and blending are review values.')
 
 
 def material_slots(data):

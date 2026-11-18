@@ -2,16 +2,18 @@
 
 Only what is decoded goes in: the base colour (slot ABDAD780) and the DirectX tangent normal (slot
 7AE34E7A) of each material, at full resolution, converted by the same pixel code as the R&C 2016
-export (``export.models._convert_maps``). The _g and _m slots, the material graph, the flags block
-and blending are not decoded, so every material is exported opaque, single-sided, non-metallic and
-fully rough, and each one says so in its notes.
+export (``export.models._convert_maps``). The _g and _m maps, the material graph and blending are
+not carried into these formats: their meaning is in each graph's program, which only the Blender
+export translates. So every material is exported opaque, single-sided, non-metallic and fully
+rough, and each one says so in its notes.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-NOTE = ('Rift Apart preview: base colour and normal only. The _g/_m slots and the material graph are not decoded, '
-        'so the export is opaque, non-metallic and fully rough; no gloss, metal, emission or blending is claimed.')
+NOTE = ('Rift Apart preview: base colour and normal only. The _g and _m maps and the material program are not carried '
+        'into this format (the Blender formats translate them), so the export is opaque, non-metallic and fully rough; '
+        'no gloss, metal, emission or blending is claimed.')
 
 
 def exportable(fmt) -> bool:
