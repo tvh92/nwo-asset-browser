@@ -1307,9 +1307,11 @@ class ModelViewport(_TkFrame):
                 gl.glEnableClientState(self.GL_TEXTURE_COORD_ARRAY)
                 gl.glTexCoordPointer(2, self.GL_FLOAT, 0, self._vptr(uv_array))
             batches = (self._payload or {}).get("batches") or [(None, 0, len(index_array) // 3)]
-            # Shadow-cast-only slots (render_state.SHADOW_ONLY_FLAG) never reach the game's colour pass.
+            # Shadow-cast-only slots (render_state.SHADOW_ONLY_FLAG) never reach the game's colour pass, and the game
+            # issues no draw at all for "not_drawn" ones (Rift Apart: rcra.material.draw_skip_note).
             textures = (self._payload or {}).get("textures") or {}
             batches = [b for b in batches if not (textures.get(b[0]) or {}).get("shadow_only")]
+            batches = [b for b in batches if not (textures.get(b[0]) or {}).get("not_drawn")]
             if self._gl_textures is None and uv_array is not None:
                 self._upload_textures()
             drawn = False

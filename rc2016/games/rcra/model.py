@@ -388,11 +388,18 @@ def decode_for_viewer(source, model_id, source_path, as_arrays):
     joint_count is the skeleton size when the model stores its joint rest transforms (section
     0xDCC88A19), else 0; the clip library (``rcra.animation.RcraAnimationLibrary``) reads the
     skeleton from ``data``, the whole asset. Meshes whose material has a vertex program are drawn
-    where it places them at rest (``rcra.vertex.deform_model``)."""
+    where it places them at rest (``rcra.vertex.deform_model``). ``undrawn_materials`` holds the
+    materials the game's plain instance draw never draws (``material.draw_skip_note``), which the
+    viewer and the model export leave out; their note also goes to ``material_notes``."""
+    from rc2016.games.rcra.material import undrawn_materials
     from rc2016.games.rcra.vertex import deform_model
     data, digest = source.bytes(model_id)
     decoded = decode_model(source_path, lod='All', data=data, as_arrays=as_arrays)
     rigged = '0x%08X' % JOINT_TRANSFORMS in decoded['section_sizes']
     decoded.update(packed_sha256=digest, codec='rcra-dsar', joint_count=len(decoded['joints']) if rigged else 0)
     deform_model(source, decoded, data)
+    decoded['undrawn_materials'] = undrawn_materials(source, decoded['materials'])
+    notes = decoded.setdefault('material_notes', {})
+    for material_path, note in decoded['undrawn_materials'].items():
+        notes.setdefault(material_path, []).append(note)
     return decoded, data

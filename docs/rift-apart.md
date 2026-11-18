@@ -391,6 +391,26 @@ The engine's material loader copies u32 2 of section `0xE1275683` into the mater
 
 `material_blend` returns `opaque`, `additive`, `blended` or `modulate`; `draw_flags` returns the lit bit. Over 5,721 materials: 3,974 opaque, 1,309 blended, 427 additive and 11 modulate. The blend factors are pipeline state outside the files.
 
+### Material alpha
+
+f32 5 of section `0xE1275683` is the material's alpha (`material.material_alpha`). The loader copies it to the material object's `+0x70` (`0x1410d16af`), whose default is 1.0 (`0x1410d162a`). Of the 1,309 blended materials, 1,127 have 1, 167 a fraction and 15 have 0; the 0 group includes `invisible_projectile_model`, `null_model`, `gbl_gp_transparent_01` and the `_hidden` rift shards.
+
+The main model-instance draw (`0x1411212d0`, [Render flags](#render-flags)) tests it for each mesh whose material is on the blended path ([Flags word](#flags-word)):
+- **Draw alpha:** a = min(1 − LOD fade, instance alpha) × material alpha + a distance fade. The distance fade is non-zero only for material flag `0x20000`.
+- **Test:** when a ≤ 0 (`0x141122c58`), the draw moves on to the next mesh (`0x141124adb`) without allocating a draw packet. The game issues no draw for that mesh.
+- **Exceptions:** fur materials (flag `0x4000`) skip the test. So does an instance with effect-overlay records (the count in the u16 at `+0xE` of its per-instance record), which may draw the mesh with an effect.
+- **The packet:** otherwise its first 16 bytes are the draw's `MatDrawCB` record: render flags, scene object, subset material, and `m_AlphaOverrides` with a × 4096 in its low half.
+
+The forward programs read a negative low half as a dissolve. A positive one is not read as opacity in `basic_normal_gloss`, whose forward alpha is the sampled base-colour alpha. How a fractional material alpha reaches the blend is not traced.
+
+`material.draw_skip_note` returns a note for a material the plain instance draw never draws:
+- the blended path, a material alpha that is not above 0 (NaN fails the engine's test too), and neither flag `0x4000` nor `0x20000`;
+- under the [neutral object](#per-object-values): full instance alpha, no LOD fade, no overlay records.
+
+19 materials qualify: 15 blended and 4 additive. They include Ratchet's `hero_ratchet_compositeshell`, a blended layer over the whole head and body in 29 models (`_holo`, in 2 more), which binds only `default_pink_shader` placeholder textures. They also include Clank's `antennaglass` and `eyeglowinner`, and Kit's `emblemglowinner` and `eyeglowinner`. Opaque materials with alpha 0 (12) are drawn: at full instance alpha the draw takes the opaque path before the test.
+
+`model.decode_for_viewer` lists them as `decoded['undrawn_materials']`, with the note in `material_notes`. The viewer leaves their batches out ([In the viewer](#in-the-viewer)), and the model export leaves their meshes out with the note, so the glTF, OBJ and Blender formats do not hold them ([Blended materials](#blended-materials)).
+
 ### Slot keys
 
 Slot keys are the low 32 bits of the 2016 game's `0x49A7866B........` slot hashes. Across 5,721 materials they bind the same texture suffixes:
@@ -892,6 +912,8 @@ B is the background tint of a program that passes the scene behind it through ([
 
 `VIEW` and `CAMERA` come from Geometry Incoming and Camera Data View Distance. EEVEE materials use the blended render method. The engine names the modes, but the blend factors are the standard ones for those names and are labelled as such. A blended material whose forward program does not translate keeps its opaque surface, with the reason in its limitations.
 
+A blended material whose alpha makes the plain instance draw skip it ([Material alpha](#material-alpha)) is not exported. The model export leaves its meshes out, unless they are all the model has, and `export.json` gives the note.
+
 ### Checks
 
 Export check: each export builds the `.blend` as a candidate, reopens it in a second Blender (`blender_convert.py --validate`), then moves it into place.
@@ -909,6 +931,7 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 | Part | Viewer |
 | --- | --- |
 | Vertices | Where the material's vertex program places them at rest, evaluated when the model is decoded ([Vertex programs](#vertex-programs)) |
+| Undrawn materials | Batches of a material the plain instance draw skips ([Material alpha](#material-alpha)) are left out. The texture entry carries `not_drawn`, and the material list shows the note. |
 | Inputs | UV0 and UV1, the world normal, the decoded tangent and the whole `TEXCOORD3.w` (attribute `aTangent`, skinned with the vertex, interpolated as the game's interpolant; render flag 0x10000 clear), the vertex colour, front face, and the view from `vTintViewOffset`. A mesh without a tangent stream gets the UV-derivative frame (`native_glsl.FRAME_HELPERS`). |
 | Textures | A sampled array slice as stored. Arrays with a run-time slice and 3D textures as the padded atlas of the Blender export, without mipmaps. A cube map as a GL cube map of its six stored faces (face k to `GL_TEXTURE_CUBE_MAP_POSITIVE_X + k`, rows top first), top mip, linear, seamless where the driver has it: D3D and GL share the face table, so `textureCube` along the game direction returns the D3D texel. Float data formats as `RGBA32F`. |
 | Lighting | The review rig with the Rift Apart BRDF: GGX α = (0.9725 − 0.7514 gloss)², Smith joint approximation, Schlick F90 = 1, Lambert, occlusion on ambient light only |
@@ -941,6 +964,7 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 - **Blended materials whose forward program does not translate** (3 of 1,747), or that read the scene behind in scene mode (27): Blender gets their G-buffer surface, opaque.
 - **Forward lighting:** the forward program's own light loop is not used. Blender's lights shade the G-buffer surface instead, which assumes that the forward program lights the same terms as the deferred apply.
 - **Lighting classes 1 to 5:** skin, hair and the other special classes need their own apply programs. They are lit with class 0.
+- **Instance effects:** a material the plain instance draw skips ([Material alpha](#material-alpha)) may still be drawn by a per-instance effect overlay or a raised instance alpha. Neither is decoded, so such a layer is not drawn.
 
 ## Evidence tool
 
@@ -961,4 +985,4 @@ python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --su
 
 `tests/test_rcra_vertex.py` checks the vertex-program path. Without game files, it checks the vectorised evaluator against the translator's operations bit for bit, the view check, the stored vertices as a glTF morph target, and the notes in the loader. With `RCRA_GAME` it checks that the swarmer's vertex-animation texture moves every mesh, with each vertex where the translator's own evaluator puts it. It also checks that a dimensional glitch is view-dependent and that a balloon keeps its stored vertices.
 
-`tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores). It skips without the DLL. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.
+`tests/test_rcra_draw_skip.py` checks the draw-skip rule on synthetic flags blocks (blended, additive, opaque, fur and distance-fade cases), and the viewport and export wiring. With `RCRA_GAME` it checks that Ratchet's head lists only `compositeshell` as undrawn, and that the texture entries mark its slot. `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores). It skips without the DLL. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.

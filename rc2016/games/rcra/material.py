@@ -129,6 +129,55 @@ def material_blend(data):
     return mode
 
 
+# Material alpha: f32 5 of section 0xE1275683. The loader copies it to the material object's +0x70 (RiftApart.exe
+# 0x1410d16af), whose default is 1.0 (0x1410d162a). The main model-instance draw (0x1411212d0) tests it for a material on
+# the blended path: a = min(1 - LOD fade, instance alpha) x material alpha + distance fade (material flag 0x20000 only), and
+# when a <= 0 (0x141122c58) it moves on to the next mesh (0x141124adb) without allocating a draw packet. A fur material
+# (flag 0x4000) and an instance with effect-overlay records (the per-instance record's u16 +0xE count) skip the test.
+# The packet's MatDrawCB.m_AlphaOverrides takes a x 4096 in its low half. Evidence: Research/rift-apart/decodes/
+# 2026-11-18_rcra-compositeshell/.
+ALPHA_WORD, FUR_BIT, DISTANCE_FADE_BIT = 5, 0x4000, 0x20000
+NOT_DRAWN_NOTE = ('Not drawn: the game issues no draw for this material on a plain model instance. Its material alpha '
+                  '(flags block f32 5) is %g, and the instance draw skips a blended material whose instance alpha x '
+                  'material alpha is not above 0. Assumed: full instance alpha, no LOD fade and no per-instance effect '
+                  'overlay, which would skip the test.')
+
+
+def material_alpha(data):
+    """The material alpha (f32 5 of section 0xE1275683), or the loader's default 1.0 without it."""
+    table = sections(data[36:])
+    if FLAGS not in table or table[FLAGS][1] < 4 * (ALPHA_WORD + 1):
+        return 1.0
+    return struct.unpack_from('<f', data, 36 + table[FLAGS][0] + 4 * ALPHA_WORD)[0]
+
+
+def draw_skip_note(data):
+    """NOT_DRAWN_NOTE when the plain model-instance draw (full instance alpha, no fade or overlay) issues no draw for the
+    material, else None."""
+    flags = flags_word(data)
+    if flags is None or material_blend(data) == 'opaque' or flags & (FUR_BIT | DISTANCE_FADE_BIT):
+        return None
+    alpha = material_alpha(data)
+    return None if alpha > 0 else NOT_DRAWN_NOTE % alpha   # NaN fails the engine's test too (comiss: unordered)
+
+
+def undrawn_materials(source, materials):
+    """{material path: NOT_DRAWN_NOTE} of the model's materials that the plain instance draw never draws."""
+    out = {}
+    for material in materials:
+        path = material.get('path')
+        key = _material_key(source, path) if path else None
+        if key is None or path in out:
+            continue
+        try:
+            note = draw_skip_note(source.asset_data(key))
+        except (ValueError, KeyError, OSError, struct.error):
+            continue
+        if note:
+            out[path] = note
+    return out
+
+
 def material_parameters(data):
     """{parameter key: tuple of floats} of a material's section 0xF5260180: records (u16 offset, u16 byte size, u32 key) from byte
     40, their values in a block that starts at header word 2."""
@@ -343,7 +392,8 @@ def material_textures(source, materials, cache, translations=None, hd=False):
     '_c' and '_n' loaded from their slots, every other role None, neutral parameters. A gbl_arch_glass material instead gets its
     decoded forward glass rule (``forward``) and the four graph units as the roles _pick, _window_c, _n and _window_g. A
     material whose graph translates also carries the translated program (``native_translation``, _translated), which the
-    Shaded mode draws when the viewer's native translation is on."""
+    Shaded mode draws when the viewer's native translation is on. ``not_drawn`` holds draw_skip_note: the viewport leaves
+    out the batches of a material the game never draws on a plain instance."""
     from rc2016.viewer.textures import ROLES
     result = {}
     for material in materials:
@@ -365,6 +415,10 @@ def material_textures(source, materials, cache, translations=None, hd=False):
                     if slots.get(slot):
                         entry[role] = _load(source, slots[slot], cache, hd)
             _translated(source, key, entry, hd)
+            try:
+                entry['not_drawn'] = draw_skip_note(source.asset_data(key))   # the viewport leaves its batches out
+            except (ValueError, KeyError, OSError, struct.error):
+                pass
         if translations is not None and material.get('path'):
             translations[material['path']] = None
         result[material['index']] = entry

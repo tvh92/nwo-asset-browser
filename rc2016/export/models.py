@@ -852,6 +852,13 @@ class ModelExporter:
         if casters and len(casters) < len(meshes):
             meshes = [m for m in meshes if not any(m is c for c in casters)]
             notes.append(f'{len(casters)} shadow-cast-only mesh(es) left out: the game never draws them (material flags bit 0x80).')
+        undrawn = decoded.get('undrawn_materials') or {}   # Rift Apart: no draw is issued (rcra.material.draw_skip_note)
+        skipped = [m for m in meshes if material_paths.get((m.get('material') or {}).get('index')) in undrawn]
+        if skipped and len(skipped) < len(meshes):
+            meshes = [m for m in meshes if not any(m is s for s in skipped)]
+            names = dict.fromkeys(Path(material_paths[m['material']['index']]).stem for m in skipped)
+            notes.append(f"{len(skipped)} mesh(es) left out ({', '.join(names)}): "
+                         + next(undrawn[material_paths[m['material']['index']]] for m in skipped))
         shown = {m['index'] for m in meshes}
         moved = {}
         for row in decoded.get('vertex_programs') or ():   # Rift Apart vertex programs (rc2016.games.rcra.vertex)
