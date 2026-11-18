@@ -50,7 +50,12 @@ GEOMETRY = {'TEXCOORD.x': 'vUV.x', 'TEXCOORD.y': 'vUV.y', 'TEXCOORD1.x': 'vUV1.x
             'CAMERA.x': 'rcraCamera.x', 'CAMERA.y': 'rcraCamera.y', 'CAMERA.z': 'rcraCamera.z',
             # The scene behind (surface.forward's scene mode): the frame copy at the pixel (viewport._scene_copies).
             'BACKGROUND.r': 'rcraScene.r', 'BACKGROUND.g': 'rcraScene.g', 'BACKGROUND.b': 'rcraScene.b',
-            'BACKGROUND.a': 'rcraScene.a'}
+            'BACKGROUND.a': 'rcraScene.a',
+            # Fur shells (rc2016.games.rcra.fur.SHELL_INPUTS): the shell vertex program's per-vertex values (shell_vertex_source).
+            'FURSHELL.z': 'vFurShell.x', 'FURSHELL.offset': 'vFurShell.y', 'FURSHELL.base': 'vFurShell.z'}
+SHELL_BLEND = 'fur_shell'
+SHELL_UNIFORMS = ('uFurLayer', 'uFurInverse', 'uFurLength', 'uFurOffsetScale')
+SHELL_CONTROL = 'g_FurControlMap'   # the shell vertex program's offset scale (blue), read in the vertex stage
 SCENE_UNIFORMS = ('uSceneColour', 'uHasSceneColour', 'uSceneDepth', 'uHasSceneDepth', 'uSceneDepthInfo')
 LIMITATION = ('Viewer: the draw is unmirrored (render flag 0x10000 clear); vertex colour is the '
               'model\'s colour section squared, as the engine squares it, with its bytes read in R, G, B, A order (the '
@@ -229,6 +234,35 @@ def vertex_source():
             'void main() {\n    %s = aRcraColour * aRcraColour;' % (COLOUR_VARYING, COLOUR_VARYING) + body)
 
 
+SHELL_VERTEX = '''
+    { // Fur shell layer uFurLayer (RiftApart.exe VS_ModelFurShellGBufferDeferred, rc2016.games.rcra.fur)
+        vec4 rcraEye = gl_ModelViewMatrix * p;
+        float rcraT = uFurLayer * uFurInverse;
+        float rcraFacing = dot(normalize(gl_NormalMatrix * n), normalize(-rcraEye.xyz));
+        float rcraS = 1.0 - clamp(rcraFacing - 0.0065 * abs(aTangent.w) - 0.1, 0.0, 1.0);
+        rcraS = min(rcraS * rcraS + 0.1, 1.0);
+        float rcraF = rcraT / rcraS, rcraTp = clamp(rcraF, 0.0, 1.0);
+        float rcraControl = texture2DLod(%s, gl_MultiTexCoord0.xy, 0.0).b;
+        p.xyz += normalize(n) * (rcraControl * rcraTp * uFurLength);
+        vFurShell = vec4(32.0 * rcraTp, (rcraTp * rcraTp + 0.4 * rcraTp) * uFurLength * uFurOffsetScale,
+                         uFurLayer == 0.0 ? 1.0 : 0.0, rcraTp < rcraF ? 1.0 : 0.0);
+    }
+'''
+
+
+@functools.lru_cache(maxsize=1)
+def shell_vertex_source():
+    """The fur shell vertex program: vertex_source() with the game's shell stage after skinning. Layer uFurLayer of
+    1 / uFurInverse sits at t = k / L, spread by the view as the game does (t' = sat(t / s), the layer culled where t / s
+    passes 1), moved along the skinned normal by the control map's blue x t' x uFurLength (metres, as the payload), and
+    passes the writer its TEXCOORD.z, TEXCOORD2.w and TEXCOORD3.w in vFurShell."""
+    head, body = vertex_source().split('    vTangent = gl_NormalMatrix * tn;', 1)
+    declarations = ('uniform float %s; uniform sampler2D %s; varying vec4 vFurShell;   // fur shells (rcra_glsl)\n'
+                    % (', '.join(SHELL_UNIFORMS), uniform(SHELL_CONTROL)))
+    head = head.replace('void main() {', declarations + 'void main() {', 1)
+    return head + SHELL_VERTEX % uniform(SHELL_CONTROL) + '    vTangent = gl_NormalMatrix * tn;' + body
+
+
 def _prefix():
     from rc2016.viewer.shading import FRAGMENT
     prefix = FRAGMENT.split('void main() {', 1)[0]
@@ -269,10 +303,13 @@ def fragment_source(receipt):
     scene = bool(receipt.get('forward')) and reads_scene(receipt['forward'])
     if scene:
         body.append('    vec4 rcraScene = texture2D(uSceneColour, gl_FragCoord.xy / uSceneDepthInfo.xy);')
-    surface = forward = None
+    surface = forward = coverage = None
+    blend = receipt.get('blend', 'opaque')
     if receipt.get('surface'):
         surface = _Emitter(receipt['surface'], layouts, 'g')
         _surface(surface, discard=not receipt.get('forward'))
+        if blend == SHELL_BLEND:   # emitted here so its declarations join surface.lines
+            coverage = surface.term('coverage')
         body += surface.lines
     if receipt.get('forward'):
         forward = _Emitter(receipt['forward'], layouts, 'f')
@@ -287,13 +324,17 @@ def fragment_source(receipt):
             forward.lines.append('    rcraBackground += %s * rcraDiffuse(%s, vec3(1.0), 1.0);'
                                  % (lit_tint, 'rcraNormal' if surface else 'N'))
         body += forward.lines
-    blend = receipt.get('blend', 'opaque')
+    if blend == SHELL_BLEND:   # the layer is culled past the strand (vFurShell.w), its coverage is its alpha
+        body.insert(0, '    if (vFurShell.w > 0.5) discard;')
     lit = ('rcraDiffuse(rcraNormal, rcraAlbedo, rcraOcclusion) + rcraSpecular(rcraNormal, V, rcraF0, rcraGloss)'
            if surface else 'vec3(0.0)')
     if blend == 'opaque':
         if surface is None:
             raise ValueError('An opaque receipt needs a surface recipe')
         body.append('    sceneOutput(vec4(displayFog(%s + rcraAlbedo * rcraEmission), 1.0));' % lit)
+    elif blend == SHELL_BLEND:
+        body.append('    sceneOutput(vec4(displayFog(%s + rcraAlbedo * rcraEmission), clamp(%s, 0.0, 1.0)));'
+                    % (lit, coverage))
     elif blend == 'modulate':
         body.append('    sceneOutput(vec4(mix(vec3(1.0), rcraColour, rcraAlpha), 1.0));')
     else:
@@ -305,6 +346,8 @@ def fragment_source(receipt):
     declarations = '\n'.join('uniform %s %s;' % ('samplerCube' if layouts[b]['kind'] == 'cube' else 'sampler2D', uniform(b))
                              for b in sorted(layouts))
     declarations += '\nuniform int %s;\n' % PASS_UNIFORM
+    if blend == SHELL_BLEND:
+        declarations += 'varying vec4 vFurShell;   // shell_vertex_source: 32 t\', offset term, base flag, culled\n'
     if scene:
         declarations += 'uniform sampler2D uSceneColour; uniform vec4 uSceneDepthInfo;   // frame copy, viewport size\n'
     if any('rcraInf' in line or 'rcraNan' in line for line in body):

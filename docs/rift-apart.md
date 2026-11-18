@@ -430,7 +430,7 @@ The viewer draws a labelled **Rift Apart preview** (`rule_kind 'rift apart previ
 - **`_g` and `_m` maps:** the preview does not read them. Their channels ([above](#_g-and-_m-channels)) reach the viewer through the translated programs, which apply each graph's own form.
 - **Material graphs:** the preview translates no graph shader. Architecture glass keeps its hand decode (next section) as the fallback of the translated program. 1,474 graphs exist; 1,386 are bound by materials and 29 materials bind none.
 - **Gloss, metal, emission and blending:** these are review values, not game data.
-- **Fur shells:** not drawn. A fur material's preview takes the base colour and normal from its fur record ([Fur materials](#fur-materials)).
+- **Fur shells:** the preview does not draw them; it takes a fur material's base colour and normal from its fur record. The translated fur program draws the shells ([Fur materials](#fur-materials)).
 
 ### Architecture glass (`gbl_arch_glass`)
 
@@ -768,9 +768,22 @@ It binds the base, normal, gloss and control maps at t5, t6, t8 and t9. The shel
 
 The generator saves and restores the global random state, so the map is the same on every run.
 
-What is not decoded, and labelled (`fur.FUR_NOTE`):
+**Shells.** The fur draw renders the fur meshes `Fur_LayerCount` (L) times, instanced. The shell vertex program (`VS_ModelFurShellGBufferDeferred`) gives each instance a layer k at height t = k / L and spreads the layers by the view:
+- **Spacing:** t' = sat(t / s), with s = min((1 − sat(N·(−V) − 0.0065 q − 0.1))² + 0.1, 1), q the stored `TEXCOORD3.w` magnitude. A layer whose t / s exceeds 1 is culled. Facing the camera a few layers span the strand; at the silhouette (s = 1) every layer is drawn at t' = t.
+- **Position:** the vertex moves along its normal by control.b × t' × `Fur_Length` (the control map point-sampled at UV0, mip 0).
+- **Interpolants:** `TEXCOORD.z` = 32 t', `TEXCOORD1.w` = `Fur_OffsetScale` (signed by the bitangent), `TEXCOORD2.w` = (t'² + 0.4 t') `Fur_Length` `Fur_OffsetScale`, and `TEXCOORD3.w` = 1 on the base layer (k = 0), else 0 (`fur.shell_layer`).
+
+The writer cuts each layer. It reads the layer map at slice round(`TEXCOORD.z`) and at uv0 × `Fur_Density`, shifted along the control map's comb direction ((control.rg × 2 − 1) × |`TEXCOORD1.w`|) by `TEXCOORD2.w`. It keeps the pixel when sat(layer × base.a + `TEXCOORD3.w`) × sat(1 − t' / 2) exceeds a screen-space dither threshold. The game's temporal filter averages the dither, so both renderers draw that product as the surface's `coverage` term (`fur.shell_coverage`). A layer's occlusion is lerp(control.a, 1, t' / 2); its other terms are the base surface's. Layer 0 is the base surface (coverage 1).
+
+- **Viewer:** `viewer_materials.shell_receipt` translates the writer once with the interpolants as renderer inputs (`fur.shell_symbolic_program`). After the opaque batches, `rcra_glsl.shell_vertex_source` draws each fur batch again for layers 1 to L − 1, inner layer first, with the view spacing, cull and displacement per vertex. Each layer is blended over by its coverage without depth writes.
+- **Blender:** `rcra_blender.build_fur_shells` gives every fur object one linked copy of its fur faces per layer 1 to L − 1, each with that layer's material (`fur.shell_layer` values as constants) and a Displace modifier ahead of the rig (the control map's blue at UV0 times t × `Fur_Length`). Coverage is the material's alpha. Every layer is drawn at the silhouette spacing, because a Blender material cannot move its own vertices by the view.
+
+What is not decoded, and labelled (`fur.FUR_NOTE`, `fur.SHELL_NOTE`, `fur.SHELL_VIEW_NOTE`):
 - **Wetness at run time:** gameplay can raise `Fur_Wetness` through the override pass and the FurWetness settings, for example in rain. The material keeps the record's dry value.
-- **Shells:** the shells are layers extruded along the normal by the shell vertex programs and cut by the layer map. They are not drawn, so the material is its base surface. The writer's discard, sat(layer term + TEXCOORD3.w) < 0.5, is that cut and is not applied.
+- **Layer map mip:** both renderers read the layer map at its top mip. The writer's view-dependent mip bias is not applied.
+- **Control map filter:** the viewer reads the control map bilinear in the vertex stage, where the game point-samples it.
+- **Distance and wind:** `Fur_LoDReduction` and the wind terms are not applied; every layer is drawn and the strands are at rest.
+- **Other formats:** glTF, OBJ, FBX and USD keep the base layer only; the shells are in the `.blend` alone.
 
 ## Blender materials
 

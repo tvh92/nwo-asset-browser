@@ -3006,6 +3006,22 @@ class Shading:
             self.programs[key] = self._link(vertex, source, attributes, names)
         return self.programs[key]
 
+    def fur_shell_program(self, receipt, srgb):
+        """A Rift Apart fur material's shell program (rcra_glsl.shell_vertex_source and its SHELL_BLEND receipt)."""
+        from rc2016.viewer import rcra_glsl
+        vertex = rcra_glsl.shell_vertex_source()
+        key = ('fur_shell', rcra_glsl.EMITTER_VERSION, receipt['translation_sha256'], tuple(sorted(srgb.items())), FRAGMENT,
+               vertex)
+        if key not in self.programs:
+            surface = rcra_glsl.fragment_source(receipt)
+            names = (*OPAQUE_UNIFORMS, *surface['samplers'], rcra_glsl.PASS_UNIFORM, *rcra_glsl.SCENE_UNIFORMS,
+                     *rcra_glsl.SHELL_UNIFORMS)
+            attributes = dict(ATTRIBUTES, aRockAlpha=ROCK_ALPHA_ATTRIBUTE, aGroundBlend=GROUND_BLEND_ATTRIBUTE,
+                              aStaticPackedVector=STATIC_VECTOR_ATTRIBUTE, aTangent=TANGENT_ATTRIBUTE, aUV1=UV1_ATTRIBUTE,
+                              aRcraColour=RCRA_COLOUR_ATTRIBUTE)
+            self.programs[key] = self._link(vertex, surface['source'], attributes, names)
+        return self.programs[key]
+
     def glass_program(self):
         """The forward (glass) program: same vertex shader and attributes, GLASS_FRAGMENT."""
         if "glass" not in self.programs:

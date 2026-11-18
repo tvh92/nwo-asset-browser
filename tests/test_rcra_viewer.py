@@ -393,6 +393,28 @@ class ViewportDrawTests(unittest.TestCase):
             self.assertIn('g_BaseMap', receipt['layouts'])
         self._link('material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material', check)
 
+    def test_fur_shell_program_links(self):
+        """The fur material's shell receipt (viewer_materials.shell_receipt) links with the shell vertex program."""
+        from rc2016.games.rcra.material import _material_key
+        from rc2016.games.rcra.source import RcraSource
+        from rc2016.games.rcra.viewer_materials import SHELL_BLEND, shell_receipt
+        path = 'material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material'
+
+        def check(view, _receipt, _textures):
+            with tempfile.TemporaryDirectory() as out:
+                source = RcraSource(GAME, out)
+                try:
+                    shells, _shell_textures = shell_receipt(source, _material_key(source, path))
+                finally:
+                    source.close()
+            self.assertEqual(shells['blend'], SHELL_BLEND)
+            self.assertIn('g_FurLayerMap', shells['layouts'])
+            self.assertGreater(shells['fur']['layers'], 1)
+            program, uniforms = view._shading.fur_shell_program(shells, {})
+            self.assertTrue(program)
+            self.assertIn('uFurLayer', uniforms)
+        self._link(path, check)
+
     def test_viewer_program_matches_its_recipe(self):
         """rcra_check: jn_glass_01_opaque (parallax loop) and the laser tube (cube map) drawn by the viewer's emitted terms
         match the recipes evaluated on the uploaded texels."""

@@ -258,11 +258,10 @@ def _slice(texture, path, index):
     return dict(texture, pixels=slices[index], path='%s#slice%d' % (path, index))
 
 
-def material_receipt(source, material_key, hd=False):
-    """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason."""
+def _load_bindings(source, recipes, paths, hd, limitations):
+    """({binding: layout}, {binding: viewer texture dict}) of the textures ``recipes`` sample."""
     from rc2016.games.rcra.texture import load_texture, load_texture_full
-    surface, forward, blend, limitations, paths = translate(source, material_key)
-    kinds = _layouts([r for r in (surface, forward) if r])
+    kinds = _layouts(recipes)
     if len(paths) > MAX_BINDINGS:
         raise NotTranslated('%d texture bindings, the viewer has %d units' % (len(paths), MAX_BINDINGS))
     layouts, textures = {}, {}
@@ -290,12 +289,82 @@ def material_receipt(source, material_key, hd=False):
         else:
             textures[binding] = _slice(texture, path, index)
             layouts[binding] = dict(kind='slice')
+    return layouts, textures
+
+
+def material_receipt(source, material_key, hd=False):
+    """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason."""
+    surface, forward, blend, limitations, paths = translate(source, material_key)
+    layouts, textures = _load_bindings(source, [r for r in (surface, forward) if r], paths, hd, limitations)
     emission = surface['terms']['emission'] if surface else forward['terms']['colour.r']
     recipe = surface or forward
     receipt = dict(kind='rcra', status='ready', blend=blend, surface=surface, forward=forward, layouts=layouts,
                    limitations=limitations, nodes=recipe['nodes'], outputs=dict(emission=emission),
                    translation_sha256=rcra_glsl.receipt_sha256(surface, forward, blend, layouts))
     return receipt, textures
+
+
+SHELL_BLEND = 'fur_shell'   # rcra_glsl: the surface lit, its ``coverage`` as alpha
+
+
+def translate_shell(source, material_key):
+    """A fur material's shell recipe, every layer at once (rc2016.games.rcra.fur.shell_symbolic_program): (recipe, fur
+    values, limitations, textures), or None for a material without a fur record. Cached on disk as translate."""
+    from rc2016.games.rcra.fur import fur_record, shell_symbolic_program
+    from rc2016.games.rcra.texture import texture_size
+    data = source.asset_data(material_key)
+    if fur_record(data) is None:
+        return None
+    try:
+        program = shell_symbolic_program(source, data)
+    except (ValueError, OSError) as error:
+        raise NotTranslated(str(error)) from error
+    disk = getattr(source, 'translation_disk_cache', None)
+    key = disk.key(bytes(data), [program['key']], 'rcra-viewer-shell:%s' % CODE_SHA256) if disk is not None and CODE_SHA256 \
+        else None
+    stored = _floats(disk.get(key), decode=True) if key else None
+    if stored is not None:
+        if 'error' in stored:
+            raise NotTranslated(stored['error'])
+        return stored['recipe'], stored['fur'], stored['limitations'], stored['textures']
+    try:
+        result = rsurface.surface(None, data, program=program, texture_sizes=lambda path: texture_size(source, path))
+    except (rsurface.Unsupported, ValueError, KeyError) as error:
+        if key:
+            disk.put(key, dict(error=str(error)))
+        raise NotTranslated(str(error)) from error
+    bexp.replace_missing(source, None, result)
+    out = rsurface.fold_nan(rsurface.export_recipe(result)), program['fur'], result['limitations'], result['textures']
+    if key:
+        disk.put(key, _floats(dict(zip(('recipe', 'fur', 'limitations', 'textures'), out))))
+    return out
+
+
+def shell_receipt(source, material_key, hd=False):
+    """(receipt, textures) of a fur material's shells (blend SHELL_BLEND, ``fur`` the shell vertex program's values), or
+    None without a fur record; raises NotTranslated."""
+    out = translate_shell(source, material_key)
+    if out is None:
+        return None
+    recipe, fur, limitations, paths = out
+    limitations = [rcra_glsl.LIMITATION] + list(limitations)
+    layouts, textures = _load_bindings(source, [recipe], paths, hd, limitations)
+    receipt = dict(kind='rcra', status='ready', blend=SHELL_BLEND, surface=recipe, forward=None, layouts=layouts,
+                   limitations=limitations, nodes=recipe['nodes'], outputs=dict(emission=recipe['terms']['emission']),
+                   fur=fur, translation_sha256=rcra_glsl.receipt_sha256(recipe, None, SHELL_BLEND, layouts))
+    return receipt, textures
+
+
+def cached_shell_receipt(source, material_key, hd=False):
+    """shell_receipt memoised on the source: (receipt, textures), (None, reason), or None for a material without fur."""
+    memo = source.__dict__.setdefault('_rcra_viewer_shells', {})
+    key = (material_key, bool(hd))
+    if key not in memo:
+        try:
+            memo[key] = shell_receipt(source, material_key, hd)
+        except NotTranslated as error:
+            memo[key] = (None, str(error))
+    return memo[key]
 
 
 def cached_receipt(source, material_key, hd=False):

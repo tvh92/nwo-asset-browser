@@ -870,6 +870,8 @@ class ModelViewport(_TkFrame):
                         for role in ("_c", "_g", "_n", "_pick", "_h", "_bng_detail", "_vehicle_p2", "_tint_detail",
                                      "_window_mask", "_window_n1", "_window_n2", "_window_c", "_window_g") if entry.get(role)})
             ids.extend({texture[0] for entry in self._gl_textures.values() for texture in entry.get('native_textures', {}).values()})
+            ids.extend({texture[0] for entry in self._gl_textures.values()
+                        for texture in entry.get('fur_shell_textures', {}).values()})
             ids.extend({texture[0] for entry in self._gl_textures.values() for texture in entry.get('graph_rule_textures', {}).values()})
             ids = list(set(ids))
             ids.extend(entry['_rock_volume'][0] for entry in self._gl_textures.values() if entry.get('_rock_volume'))
@@ -967,7 +969,7 @@ class ModelViewport(_TkFrame):
                 by_path[key] = (name, bool(texture.get("srgb"))) if name else None
             if by_path[key]:
                 uploaded[role] = by_path[key]
-        for receipt_key, texture_key in (('native_translation','native_textures'), ('experimental_preview','experimental_textures'), ('graph_rule_surface','graph_rule_textures')):
+        for receipt_key, texture_key in (('native_translation','native_textures'), ('experimental_preview','experimental_textures'), ('graph_rule_surface','graph_rule_textures'), ('fur_shell_translation','fur_shell_textures')):
             if not entry.get(receipt_key): continue
             receipt = entry[receipt_key]
             if receipt_key == 'experimental_preview' and hasattr(self, 'ground_preview_controls'):
@@ -1562,6 +1564,10 @@ class ModelViewport(_TkFrame):
                     gl.glDepthMask(1); gl.glDisable(self.GL_BLEND); gl.glDisable(self.GL_CULL_FACE)
                 if reticle and reticle.get('blend') == 'additive':
                     gl.glDepthMask(1); gl.glDisable(self.GL_BLEND); gl.glDisable(self.GL_CULL_FACE)
+            shells = [b for b in opaque if self.native_translation and level == 2
+                      and ((self._gl_textures or {}).get(b[0]) or {}).get('fur_shell_translation')]
+            if shells:
+                self._draw_fur_shells(index_array, shells, skin)
             program, u = base_program, base_u
             sh.glUseProgram(program)
             if glass:
@@ -1585,6 +1591,34 @@ class ModelViewport(_TkFrame):
         self._unbind_material_units()
         self._disable_shader_arrays()
         sh.glUseProgram(0)
+
+    def _draw_fur_shells(self, index_array, batches, skin):
+        """Rift Apart fur shells (rc2016.games.rcra.fur): after every opaque batch, each fur batch again once per shell layer
+        1 .. L - 1 with its shell program (rcra_glsl.shell_vertex_source), inner layer first, blended over by its coverage
+        without depth writes, both faces."""
+        from rc2016.viewer.shading import BONE_TEXTURE_UNIT
+        gl, sh = self._gl, self._shading
+        gl.glBlendFunc.argtypes = [ctypes.c_uint, ctypes.c_uint]; gl.glDepthMask.argtypes = [ctypes.c_ubyte]
+        for slot, first, count in batches:
+            entry = (self._gl_textures or {}).get(slot) or {}
+            receipt, textures = entry['fur_shell_translation'], entry['fur_shell_textures']
+            program, u = sh.fur_shell_program(receipt, {api: texture[1] for api, texture in textures.items()})
+            sh.glUseProgram(program); self._apply_lighting(u)
+            sh.glUniform1i(u['uSkin'], int(skin))
+            sh.glUniform1i(u['uBoneTex'], BONE_TEXTURE_UNIT)
+            sh.glUniform1f(u['uBoneWidth'], float(4 * (self._bone_count or 1)))
+            sh.glUniform1i(u['uMode'], 2)
+            sh.glUniform3f(u['uColor'], 0.72, 0.74, 0.78)
+            self._apply_material(u, dict(native_translation=receipt, native_textures=textures), 2)
+            fur = receipt['fur']
+            sh.glUniform1f(u['uFurInverse'], 1.0 / float(fur['layers']))
+            sh.glUniform1f(u['uFurLength'], float(fur['length']))
+            sh.glUniform1f(u['uFurOffsetScale'], float(fur['offset_scale']))
+            gl.glEnable(self.GL_BLEND); self._blend_over(); gl.glDepthMask(0); gl.glDisable(self.GL_CULL_FACE)
+            for layer in range(1, int(fur['layers'])):
+                sh.glUniform1f(u['uFurLayer'], float(layer))
+                self._draw_range(index_array, first, count)
+            gl.glDepthMask(1); gl.glDisable(self.GL_BLEND)
 
     def _disable_shader_arrays(self):
         """Turn every generic vertex attribute array the shaded path can enable off again. A shaded draw that raises

@@ -384,6 +384,13 @@ def _translated(source, key, entry, hd):
         entry['rcra_translation_error'] = textures
         return
     entry['native_translation'], entry['native_textures'] = receipt, textures
+    from rc2016.games.rcra.viewer_materials import cached_shell_receipt
+    shells = cached_shell_receipt(source, key, hd)   # a fur material's shell layers (rc2016.games.rcra.fur)
+    if shells is not None:
+        if shells[0] is None:
+            entry['fur_shell_error'] = shells[1]
+        else:
+            entry['fur_shell_translation'], entry['fur_shell_textures'] = shells
     if receipt['blend'] != 'opaque':
         from rc2016.viewer.rcra_glsl import reads_scene
         entry['forward'] = dict(kind=TRANSLATED_KIND, blend=receipt['blend'], two_sided=False, fallback=entry.get('forward'),
