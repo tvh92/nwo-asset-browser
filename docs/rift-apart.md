@@ -658,13 +658,13 @@ The main model-instance draw (`0x1411212d0`, the packet word stored at `0x141122
 | `0x1` | The base, from the view's per-pass word (`0x101` under the same global option that sets `0x100` above) |
 | `0x400`, `0x4000000`, `0x100` | The material bits above; here the lit bit has no pass-id test, and `0x4000` is not added |
 | `0x8000` | The instance's geometry override (instance `+0x90`, a 128-byte record in a global table, freed by `ModelInst::FreeGeometryOverride`, `0x1410fb160`) is of kind 10 |
-| `0x10000` | Bit 2 of the instance's byte `+0x5C` |
+| `0x10000` | The instance's world matrix is mirrored: its 3 × 3 determinant is negative. The instance set-up (`0x1410fc6b0`) stores the transform's class in the low bits of `+0x5C` (`0x141629e60`: `4` for a negative determinant, `0x10` for non-uniform scale, bits 0 and 1 for the axis with the largest scale), and the draw takes bit 2. |
 | `0x80`, `0x40`, `0x8000000` | Instance flags (`+0x80` bits 25, 8 and 26), and `0x80` again when the packet has a second record |
 
 Nothing in either function sets `0x800`. The programs read the three per-instance bits this way:
 - **`0x8000`:** set, the colour comes from `g_MainColorVBView` at half the subset's colour index; clear, from `g_MainPaintVBView` at the index.
 - **`0x800`:** with no colour stream, the colour is 0 when set and 1 when clear.
-- **`0x10000`:** negates `TEXCOORD3.w`.
+- **`0x10000`:** negates `TEXCOORD3.w`, so the bitangent stays right-handed under a mirrored transform.
 
 **Where the colour lives.** Every model stream sits in one shared geometry buffer, allocated through one allocator (`0x1465a4260`) and read through the typed views of [Vertex colour](#in-the-viewer). The model loader (`0x1410e7ec0`) uploads, per model:
 - the vertices, 16 bytes each
@@ -673,9 +673,7 @@ Nothing in either function sets `0x800`. The programs read the three per-instanc
 
 The colour section is RGBA8 there, and the subset's `m_VertexColorIndex` counts 4-byte elements. So a plain instance, with `0x8000` clear, reads the model's own colour section through `g_MainPaintVBView`, the RGBA8 view. Per-instance vertex paint (`VertexPaint`, `0x141103d30`, for models of kind 4) is allocated as RGBA8 in the same buffer. The `0x8000` path halves the index, so `g_MainColorVBView` is an 8-byte view, where kind-10 geometry overrides keep their colours.
 
-Still open:
-- What writes the instance's mirror byte.
-- Which pass ids are the G-buffer and forward passes.
+Still open: which pass ids are the G-buffer and forward passes.
 
 So the translations bind the plain instance draw: base `0x1`, `0x8000` clear, and the lit bit in both passes (`material.draw_flags`). `0x800` stays clear as in the main draw, and `0x10000` stays clear for an unmirrored draw ([Vertex programs](#vertex-programs)).
 
