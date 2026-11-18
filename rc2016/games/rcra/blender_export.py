@@ -21,6 +21,12 @@ the two slices around the depth coordinate and mixes them (trilinear, wrapping i
 A cube map (``cube_equirect``) is written as one equirectangular image of 4 x face size by 2 x face size, which Blender's
 Environment Texture node reads with the game direction as its Vector: every pixel holds the D3D cube lookup of its direction
 (a cube array's constant slice picks the cube). A cube whose alpha is not 1 gets a second image of its alpha.
+
+A fur material (rc2016.games.rcra.fur) also gets ``shells``: one entry per shell layer 1 .. Fur_LayerCount - 1 (layer 0
+is the material itself), each with its own recipe (fur.shell_program: the writer at the layer's height, with a
+``coverage`` term), its images, its height t and ``displace``, the metres the layer moves along the normal per unit of
+``shell_height`` (the control map's blue channel, the shell vertex program's point-sampled offset scale). The Blender
+side (rc2016/export/rcra_blender.py build_fur_shells) draws each layer as a copy of the fur faces moved by that much.
 """
 import json
 import math
@@ -38,7 +44,7 @@ SRGB_FORMATS = frozenset({29, 72, 75, 78, 91, 93, 99})
 FLOAT_FORMATS = {2: ('<f4', 4), 10: ('<f2', 4), 16: ('<f4', 2), 34: ('<f2', 2), 41: ('<f4', 1), 54: ('<f2', 1),
                  11: ('<u2', 4), 35: ('<u2', 2), 56: ('<u2', 1)}
 UNORM16 = frozenset({11, 35, 56})
-ENTRY_SCHEMA = 'rcra-blender-materials-v2'
+ENTRY_SCHEMA = 'rcra-blender-materials-v3'
 # How each blend mode is composed over what is behind it. The engine names the modes ("Additive", "Lerp", "Modulate"
 # blending into the alpha layer); the blend factors themselves are pipeline state outside the files, so these are the
 # standard factors for those names, not decoded values.
@@ -468,7 +474,58 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
     entry = dict(graph=graph_path, blend=blend if 'forward' in results else 'opaque', game_blend=blend, images=images,
                  limitations=limitations)
     entry.update(recipes)
+    if program is not None:
+        try:
+            entry.update(fur_shells(source, data, folder, texture_cache))
+        except (rsurface.Unsupported, ValueError, KeyError, OSError) as error:
+            entry['shell_error'] = '%s: %s' % (type(error).__name__, error)
+            entry['limitations'] = limitations + ['Fur shells are not drawn: %s' % entry['shell_error']]
     return entry
+
+
+def shell_height(source, control_path, folder, cache=None):
+    """The control map's blue channel as a grey image row: the shell vertex program's offset scale per texel."""
+    from rc2016.games.rcra.texture import load_texture_full
+    key = ('shell_height', control_path)
+    if cache is not None and key in cache:
+        return cache[key]
+    texture = load_texture_full(source, control_path)
+    data = texel_array(texture, 0)
+    grey = np.repeat(data[..., 2:3], 3, axis=2)
+    grey = np.concatenate([grey, np.ones_like(grey[..., :1])], axis=2)
+    row = _save(grey, dict(texture, format=28), Path(control_path).stem + '_shell_height', folder, control_path,
+                colourspace='Non-Color')
+    if cache is not None:
+        cache[key] = row
+    return row
+
+
+def fur_shells(source, data, folder, texture_cache=None):
+    """dict(shells [layer entries], shell_height row, shell_length) of a fur material (rc2016.games.rcra.fur)."""
+    from rc2016.games.rcra import fur
+    record = fur.fur_record(data)
+    layers = []
+    for k in range(1, fur.layer_count(record)):
+        program = fur.shell_program(source, data, k)
+        result = rsurface.surface(None, data, program=program, texture_sizes=lambda path: texture_size(source, path))
+        replace_missing(source, None, result)
+        recipe = rsurface.blender_recipe(rsurface.export_recipe(result))
+        if len(recipe['nodes']) > MAX_RECIPE_NODES:
+            raise rsurface.Unsupported('Fur layer %d has %d operations' % (k, len(recipe['nodes'])))
+        layer = program['shell']
+        layers.append(dict(layer=k, layers=layer['layers'], t=layer['t'], displace=layer['displace'], recipe=recipe,
+                           images=_images(source, [(recipe, result)], folder, texture_cache),
+                           limitations=result['limitations']))
+    control = fur_control_path(source, data)
+    return dict(shells=layers, shell_height=shell_height(source, control, folder, texture_cache) if layers else None)
+
+
+def fur_control_path(source, data):
+    """The fur control map the shell vertex program reads, after the missing-texture rule (replace_missing)."""
+    from rc2016.games.rcra import fur
+    result = dict(textures={fur.CONTROL_BINDING: fur.fur_record(data)[2][3]}, limitations=[])
+    replace_missing(source, None, result)
+    return result['textures'][fur.CONTROL_BINDING]
 
 
 def blender_materials(source, materials, folder):

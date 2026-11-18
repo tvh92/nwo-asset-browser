@@ -860,7 +860,7 @@ class ModelExporter:
         notes += [f"{', '.join(dict.fromkeys(names))}: {note}" for note, names in moved.items()]
         if not meshes:
             raise ValueError('The selected look/LOD has no geometry')
-        need_gltf = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd'))
+        need_gltf = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd', 'blend'))   # Blender imports the GLB
         parts = []
         for mesh in meshes:
             material = (mesh.get('material') or {}).get('index')
@@ -920,7 +920,7 @@ class ModelExporter:
         file_stem = stem + options.file_suffix
         doc = blob = None
         tex_dir = folder / 'textures'
-        need_gltf = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd'))
+        need_gltf = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd', 'blend'))   # Blender imports the GLB
         texture_files = {}
         if options.textures and any(f in options.formats for f in ('gltf', 'obj')):
             tex_dir.mkdir(exist_ok=True)

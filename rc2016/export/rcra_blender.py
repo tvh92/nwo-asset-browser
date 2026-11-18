@@ -629,7 +629,11 @@ def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpol
     for socket, term in (('Gloss', 'gloss'), ('Occlusion', 'occlusion'), ('Emission', 'emission')):
         em.feed(terms[term], out.inputs[socket])
     clip = terms['clip']
-    em.feed(em.math('SUBTRACT', 1.0, clip) if not isinstance(clip, float) else 1.0 - clip, out.inputs['Alpha'])
+    keep = em.math('SUBTRACT', 1.0, clip) if not isinstance(clip, float) else 1.0 - clip
+    if 'coverage' in terms:   # the fraction of the surface the program keeps (fur shells): alpha, cut by the discard
+        cover = terms['coverage']
+        keep = cover * keep if isinstance(cover, float) and isinstance(keep, float) else em.math('MULTIPLY', cover, keep)
+    em.feed(keep, out.inputs['Alpha'])
     out.location = ((em.count // 40 + 1) * 200, 0)
     return group
 
@@ -731,7 +735,8 @@ def _surface_shader(tree, entry, images, uv_maps, colour_attribute, blended, tan
     for socket in ('Albedo', 'F0', 'Gloss', 'Normal', 'Occlusion') + (() if blended else ('Emission',)):
         tree.links.new(s.outputs[socket], b.inputs[socket])
     clip = recipe['nodes'][recipe['terms']['clip']]
-    if clip['op'] != 'const' or clip['value']:   # alpha-tested: the writer's discard becomes a transparent mix
+    if clip['op'] != 'const' or clip['value'] or 'coverage' in recipe['terms']:
+        # alpha-tested (the writer's discard) or partly covered (a fur shell): a transparent mix
         mix = tree.nodes.new('ShaderNodeMixShader')
         clear = tree.nodes.new('ShaderNodeBsdfTransparent')
         mix.location, clear.location = (560, 0), (300, -250)
@@ -926,3 +931,76 @@ def validate_material(material):
         else:
             problems += _images_missing(material, forward.node_tree)
     return problems
+
+
+SHELL_LAYER_PROPERTY = 'rc_rcra_fur_layer'
+
+
+def _fur_mesh(obj, material):
+    """A copy of ``obj``'s mesh holding only the faces that use ``material`` (the fur), with their vertices."""
+    import bmesh
+    slots = {i for i, slot in enumerate(obj.material_slots) if slot.material == material}
+    mesh = obj.data.copy()
+    mesh.name = obj.data.name + ' fur'
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.material_index not in slots], context='FACES')
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context='VERTS')
+    bm.to_mesh(mesh)
+    bm.free()
+    return mesh
+
+
+def build_fur_shells(entries):
+    """Draw the shell layers of every translated fur material (entry ``shells``, rc2016.games.rcra.blender_export
+    fur_shells). Each object that uses the material gets, per layer, a linked copy of its fur faces that the layer's
+    material shades, moved along the vertex normal by a Displace modifier ahead of the rig (the control map's blue channel,
+    point-sampled at UV0, times the layer's ``displace`` metres), so the shells follow the skin. Returns the most layers
+    one fur material draws (0 without fur): every one is a transparent surface a ray may cross."""
+    most = 0
+    for name, entry in entries.items():
+        shells = entry.get('shells')
+        base = bpy.data.materials.get(name)
+        if not shells or base is None or not translated(base) or not entry.get('shell_height'):
+            continue
+        users = [o for o in list(bpy.data.objects)
+                 if o.type == 'MESH' and any(slot.material == base for slot in o.material_slots)]
+        if not users:
+            continue
+        mesh = users[0].data
+        uv_maps = [layer.name for layer in mesh.uv_layers]
+        if not uv_maps:
+            continue
+        colour = mesh.color_attributes[0].name if len(mesh.color_attributes) else None
+        height = bpy.data.textures.new(name + ' fur shell height', 'IMAGE')
+        height.image = _load_row(entry['shell_height'])
+        height.use_interpolation, height.extension = False, 'REPEAT'   # point-sampled; a modifier reads the top mip
+        materials = []
+        for layer in shells:
+            material = bpy.data.materials.new('%s fur %02d' % (name, layer['layer']))
+            apply_recipe(material, dict(blend='opaque', recipe=layer['recipe'], images=layer['images'],
+                                        limitations=layer['limitations']), uv_maps, colour,
+                         tangent=TANGENT_FRAME in mesh.attributes)
+            material[SHELL_LAYER_PROPERTY] = int(layer['layer'])
+            materials.append(material)
+        for obj in users:
+            fur = _fur_mesh(obj, base)
+            scale = sum(obj.matrix_world.to_scale()) / 3.0 or 1.0
+            for layer, material in zip(shells, materials):
+                copy = obj.copy()
+                copy.data = fur
+                copy.name = '%s fur %02d' % (obj.name, layer['layer'])
+                for collection in obj.users_collection:
+                    collection.objects.link(copy)
+                for slot in copy.material_slots:
+                    slot.link = 'OBJECT'
+                    slot.material = material
+                displace = copy.modifiers.new('Fur shell %d' % layer['layer'], 'DISPLACE')
+                displace.texture, displace.texture_coords, displace.uv_layer = height, 'UV', uv_maps[0]
+                displace.direction, displace.space, displace.mid_level = 'NORMAL', 'LOCAL', 0.0
+                displace.strength = float(layer['displace']) / scale
+                copy.modifiers.move(len(copy.modifiers) - 1, 0)   # before the armature: displaced at rest, then skinned
+                copy[SHELL_LAYER_PROPERTY] = int(layer['layer'])
+        most = max(most, len(shells) + 1)
+        print('FUR SHELLS', name, len(shells), 'layers on', len(users), 'objects', flush=True)
+    return most

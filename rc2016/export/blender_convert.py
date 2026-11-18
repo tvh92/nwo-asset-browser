@@ -5,7 +5,8 @@
     blender --background --factory-startup --python blender_convert.py -- --validate file.blend
 
 ``--materials`` (rc2016.games.rcra.blender_export) replaces each named imported material with the game's translated
-material (rc2016.export.rcra_blender) before any file is written. ``--validate`` reopens a written .blend and checks
+material (rc2016.export.rcra_blender) before any file is written, and draws fur shells in the .blend only
+(build_fur_shells, after FBX and USD are written; the .blend's Cycles transparent bounces are raised to cross them). ``--validate`` reopens a written .blend and checks
 every translated material (its surface group, the BRDF group and its images); it exits non-zero on a problem.
 
 Factory settings, nothing saved to the user's preferences. The .blend gets the repository's
@@ -50,9 +51,10 @@ actions = list(bpy.data.actions)
 for action in actions:
     action.use_fake_user = True   # every clip stays in the file, not only the active one
 
+entries = None
 if args.materials:
     import json
-    from rc2016.export.rcra_blender import TANGENT_FRAME, apply_recipe, store_tangent_frame
+    from rc2016.export.rcra_blender import TANGENT_FRAME, apply_recipe, build_fur_shells, store_tangent_frame
     entries = json.loads(Path(args.materials).read_text(encoding='utf-8'))['materials']
     users = {}
     for mesh in bpy.data.meshes:   # the decoded tangent as coordinates in the UV0 frame, before any material reads it
@@ -84,6 +86,11 @@ if args.blend:
     from rc2016.pipeline.scene_defaults import apply_new_scene_defaults
     # Plain scene/render defaults only: no shared-lighting world (HDRI load) and no OptiX device setup.
     apply_new_scene_defaults(bpy.context.scene, configure_world=False, configure_gpu=False)
+    # Fur shells go into the .blend only, after FBX and USD are written: those formats keep no coverage alpha.
+    shell_layers = build_fur_shells(entries) if entries else 0
+    cycles = getattr(bpy.context.scene, 'cycles', None)
+    if shell_layers and cycles is not None:   # a ray crosses every fur shell twice (front and back of the strand layer)
+        cycles.transparent_max_bounces = max(cycles.transparent_max_bounces, 2 * shell_layers + 8)
     for obj in bpy.data.objects:   # rigs stay in the file (they drive the clips) but start hidden, as the pipeline's skeletons do
         if obj.type == 'ARMATURE':
             obj.hide_set(True)
