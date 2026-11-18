@@ -1,5 +1,7 @@
 # Liquid-like material graph inventory
 
+> **Status:** R&C 2016 reference. This game's work is parked; the active game is Rift Apart ([Rift Apart](rift-apart.md)).
+
 This inventory covers persistent water, lava, goo, slime, quicksand, puddle, and flowing-sheet surfaces, including waterfall and test surfaces. Transient splashes, bubbles, steam, liquid mist, screen transitions, wet/decal overlays, and unrelated energy effects are outside this surface inventory. The 739-graph archive scan used lexical names only to seed a wider code/resource review; a name or shared texture is not treated as proof of a surface shader family.
 
 The table reports **raw identifiers**: graph texture slot hashes are the low 32-bit keys from the graph texture-slot table (`0x1CAFE804`), and parameter hashes are the pass-table key hashes. The lists are per serialized pass contract, with no semantic labels implied. Native shader IDs are program identities, not writer roles by themselves; writer/pass claims below are marked where source decoding or a bounded contract join supports them. Materials and model counts are archive reference totals for the graph, not render or runtime draw counts.

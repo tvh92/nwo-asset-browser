@@ -1,5 +1,7 @@
 # Levels, zones and the level viewer
 
+> **Status:** R&C 2016 reference. This game's work is parked; the active game is Rift Apart ([Rift Apart](rift-apart.md)).
+
 Reference for the `.level` and `.zone` formats as decoded in `rc2016/levels/`, and for the level viewer built on them. The viewer reads levels, zones, models, materials and textures straight from the game archive; it does not use the export pipeline or Blender. See also [viewer](viewer.md) (model viewer, whose viewport, shading and material rules the level viewer reuses) and [pipeline](pipeline.md).
 
 Blender level assembly (placing pipeline-built models as collection instances, a Blender sky dome port) was done in the research notes and is not included in this repository. Everything below was validated against the EUR `Image0` archive; corpus counts come from those research notes (not included).

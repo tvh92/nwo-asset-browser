@@ -1,5 +1,7 @@
 # Asset browser and viewer
 
+> **Status:** R&C 2016 reference. This game's work is parked; the active game is Rift Apart ([Rift Apart](rift-apart.md)).
+
 Reference for the Tk asset browser (`python -m rc2016`) and its Windows OpenGL viewer. The browser reads the game archive directly: selecting an asset decodes only that asset's bytes in a background worker. Blender is optional and only needed for FBX/USD/`.blend` export, the research Blender build, and isolated scene proofs.
 
 Related documents:

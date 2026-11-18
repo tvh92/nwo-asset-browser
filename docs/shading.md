@@ -1,5 +1,7 @@
 # Shading, render state and lighting
 
+> **Status:** R&C 2016 reference. This game's work is parked; the active game is Rift Apart ([Rift Apart](rift-apart.md)).
+
 Reference for how the pipeline shades Ratchet & Clank (PS4, 2016) materials in Blender, which parts come from recovered game data, and which are approximations. Pipeline stages are described in [pipeline](pipeline.md); the in-app viewer's own GL shading is described in [viewer](viewer.md).
 
 The equations below were read from the SPIR-V of a RenderDoc capture of the game (recorded with shadPS4) instead of being traced from GCN microcode. The capture analysis, capture IDs and dump scripts live in the research notes and are not part of this repository. Facts that depend on the capture are marked as such.

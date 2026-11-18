@@ -1,5 +1,7 @@
 # Animation
 
+> **Status:** R&C 2016 reference. This game's work is parked; the active game is Rift Apart ([Rift Apart](rift-apart.md)).
+
 How packed skeletal animation is stored in Ratchet & Clank (PS4, 2016), how this repository decodes it, and how decoded clips become Blender Actions. Supported scope is the inspected PS4 clip layout, built-header versions 15 (animsets), 21 (real-time cutscene clips) and 143 (Mrs. Zurkon's boss clips), all with the same sample layout: not other codecs or versions, and not shader or VFX animation.
 
 Related documents: [pipeline](pipeline.md) (how the build uses the baker, clip selection, NLA and controls), [viewer](viewer.md) (animation preview in the browser).

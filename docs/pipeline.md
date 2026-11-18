@@ -1,5 +1,7 @@
 # Blender pipeline
 
+> **Status:** R&C 2016 reference. This game's work is parked; the active game is Rift Apart ([Rift Apart](rift-apart.md)).
+
 The pipeline turns assets from an already-extracted European Ratchet & Clank (PS4, 2016) release into one portable, validated Blender file per selected model. It is specific to that game and release: it does not extract PKGs and does not support other games or the Rift Apart PC format.
 
 For each model it:
