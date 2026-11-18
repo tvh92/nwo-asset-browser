@@ -38,12 +38,14 @@ def glass_graph():
     return struct.pack('<III', 0x1592401A, len(body), 0) + bytes(24) + body
 
 
-def glass_material(values, slots):
-    """A material with the dome's parameter records (key, offset in the value block) and texture slots."""
+def glass_material(values, slots, switches=()):
+    """A material with the dome's parameter records (key, offset in the value block), (value, key) switches and texture slots."""
     names = list(values)
     records = b''.join(struct.pack('<HHI', 4 * i, 4, KEYS[name]) for i, name in enumerate(names))
     block = struct.pack('<%df' % len(names), *(values[name] for name in names))
     base = 40 + len(records)
+    value_end = base + len(block)
+    block += b''.join(struct.pack('<II', value, key) for value, key in switches)
     start = base + len(block)
     textures = b''.join(struct.pack('<II', 0, key) for key, _ in slots)
     end = start + len(textures)
@@ -51,7 +53,7 @@ def glass_material(values, slots):
     for key, path in slots:
         patched += struct.pack('<II', len(strings), key)
         strings += path.encode() + b'\0'
-    head = struct.pack('<10I', end + len(strings), len(names), base, (len(names) + 3) // 4, start, len(slots), start, end, 0, 0)
+    head = struct.pack('<10I', end + len(strings), len(names), base, len(switches), value_end, len(slots), start, end, 0, 0)
     body = dat1(rmat.MATERIAL_MAGIC, {rmat.FLAGS: struct.pack('<I', 0) + bytes(36),
                                       rmat.SERIALIZED: head + records + block + patched + strings})
     return struct.pack('<III', rmat.MATERIAL_MAGIC, len(body), 0) + bytes(24) + body
@@ -91,6 +93,21 @@ class GlassReaderTests(unittest.TestCase):
     def test_bad_graph_is_rejected(self):
         with self.assertRaises(ValueError):
             rmat.graph_layout(glass_material(DOME, []))
+
+    def test_switches_sit_between_the_values_and_the_textures(self):
+        material = glass_material(DOME, [(rmat.SLOT_BASE_COLOUR, 'm/dome_c.texture')], switches=[(1, 0x04CF6B87), (0, 0x0C93C1B3)])
+        self.assertEqual(rmat.material_switches(material), {0x04CF6B87: 1, 0x0C93C1B3: 0})
+        self.assertEqual(rmat.material_slots(material), [(rmat.SLOT_BASE_COLOUR, 'm/dome_c.texture')])
+        self.assertAlmostEqual(rmat.material_parameters(material)[KEYS['emission']][0], 15.0)
+        self.assertEqual(rmat.material_switches(self.material), {})
+
+    def test_graph_switches(self):
+        slots = struct.pack('<4I', 0, 0x04CF6B87, 1, 0x36747B7B) + bytes(8 * 30)
+        tail = struct.pack('<6I', 2, 5, 0x18011010, 0, 0x40800000, 0)
+        body = dat1(0x1592401A, {rmat.GRAPH_SWITCHES: slots + tail})
+        graph = struct.pack('<III', 0x1592401A, len(body), 0) + bytes(24) + body
+        self.assertEqual(rmat.graph_switches(graph), {0x04CF6B87: 0, 0x36747B7B: 1})
+        self.assertEqual(rmat.graph_switches(self.graph), {})
 
 
 class GlassEntryTests(unittest.TestCase):
@@ -173,6 +190,29 @@ class RealGlassTests(unittest.TestCase):
         params = rmat.arch_glass_params(self.graph(), self.source.asset_data(self.source.resolve(dome)[0]))
         for name, key in zip(rmat.ARCH_GLASS_PARAMS, ('soft', 'adapt', 'gloss', 'rim', 'colour', 'mode', 'emission', 'floor')):
             self.assertAlmostEqual(params[name], DOME[key], places=5)
+
+    def test_serialized_header_words(self):
+        """Every installed material's header: values, switches and textures follow each other, words 8 and 9 are 0."""
+        from rc2016.games.rcra.toc import sections
+        checked = 0
+        for key in self.source.ids_of_type('material'):
+            data = bytes(self.source.asset_data(key))
+            table = sections(data[36:])
+            if rmat.SERIALIZED not in table:
+                continue
+            offset, size = table[rmat.SERIALIZED]
+            section = data[36:][offset:offset + size]
+            w = dict(zip(rmat.SERIALIZED_HEADER, struct.unpack_from('<10I', section)))
+            widths = [struct.unpack_from('<HH', section, 40 + 8 * i) for i in range(w['parameter_count'])]
+            self.assertEqual(w['size'], size)
+            self.assertEqual(w['value_start'], 40 + 8 * w['parameter_count'])
+            self.assertEqual(w['value_end'], w['value_start'] + sum(width for _, width in widths))
+            self.assertEqual(w['texture_start'], w['value_end'] + 8 * w['switch_count'])
+            self.assertEqual(w['texture_end'], w['texture_start'] + 8 * w['texture_count'])
+            self.assertEqual((w['zero_8'], w['zero_9']), (0, 0))
+            self.assertTrue(set(rmat.material_switches(data).values()) <= {0, 1})
+            checked += 1
+        self.assertGreater(checked, 5000)
 
     def test_swarmer_dome_is_glass_and_its_other_materials_are_not(self):
         from rc2016.games.rcra.model import decode_model

@@ -39,10 +39,10 @@ Rift Apart's capabilities are `models`, `textures`, `export` and `animation`:
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
 
-The export writes only what is decoded, through `rc2016/games/rcra_export.py`:
+The portable export (GLB, glTF, OBJ) writes only what is decoded, through `rc2016/games/rcra_export.py`. Blender formats replace these materials with the translated ones ([Blender materials](#blender-materials)):
 
 - Each material's base colour and its normal map, at full resolution.
-- Every material is opaque, single-sided, non-metallic and fully rough, and its notes say so.
+- Every portable material is opaque, single-sided, non-metallic and fully rough, and its notes say so.
 - A texture stored in a float or 16-bit data format is left out with a note, because its 8-bit conversion is not decoded. One example is the 4×4 `R32G32_FLOAT` `default_pink_shader_n` placeholder.
 
 ## Install layout
@@ -342,17 +342,22 @@ The clip notes take about 8 s to compute, off the Tk thread.
 ### Layout
 
 - **Asset header:** a material asset is the 36-byte toc header (type `0x88730155`) and a DAT1 of the same type.
-- **Section `0xF5260180`** begins with ten u32:
-  1. section size
-  2. parameter count
-  3. unknown
-  4. unknown
-  5. parameter batch end
-  6. texture count
-  7. texture batch start
-  8. texture batch end
-  9. unknown
-  10. unknown
+- **Section `0xF5260180`** begins with ten u32 (`SERIALIZED_HEADER`; every relation holds in all 5,701 installed materials that have the section):
+
+  | Word | Field |
+  | --- | --- |
+  | 0 | Section size |
+  | 1 | Parameter count |
+  | 2 | Value block start, `40 + 8 × count` |
+  | 3 | Switch count |
+  | 4 | Value block end: the start plus every parameter's byte size. The switch batch starts here |
+  | 5 | Texture count |
+  | 6 | Texture batch start, `word 4 + 8 × switches` |
+  | 7 | Texture batch end, `word 6 + 8 × textures` |
+  | 8, 9 | 0 in every material |
+
+- **Parameter records** follow the header: (u16 offset in the value block, u16 byte size, u32 key). See [Architecture glass](#architecture-glass-gbl_arch_glass) for how they fill `cb2`.
+- **Switches** (`material_switches`): (u32 value, u32 key) records, values 0 or 1, in 1,557 materials. They override the graph's switch defaults in section `0xBC93FB5E` (`graph_switches`: 32 slots, or 64 in the graphs with 36 pass records, of (u32 value, u32 key), then six u32 whose first is the count in use). 706 records name a key their graph does not declare. No shipped program reads a switch: 15 switch keys are also `cb2` parameters (the `gbl_rgb_blend` family, water foam, a shockwave), and no pass of their graph reads those `cb2` dwords. So the material binding ignores the switches, although 350 materials set one to a value other than the graph's `cb2` default. Whether the engine reads any of them elsewhere is not known.
 - **Texture records:** each is (u32 string offset from the batch end, u32 slot key). The strings follow the batch.
 - **Section `0xE1275683`** is the 40-byte flags block. Its third u32 is the material flags word ([Flags word](#flags-word)).
 - **Fur materials** have no `0xF5260180` section, so they bind no textures.

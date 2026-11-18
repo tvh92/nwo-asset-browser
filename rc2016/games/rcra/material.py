@@ -1,11 +1,12 @@
 """Rift Apart (PC) ``.material`` texture slots and the labelled viewer preview built from them.
 
 A material asset is the 36-byte toc header (u32 type 0x88730155) and a DAT1 of the same type.
-Section 0xF5260180 (ALERT "Material Serialized Data") starts with ten u32: section size, parameter
-count, 2 unknown, parameter batch end, texture count, texture batch start, texture batch end,
-2 unknown. Each texture record is (u32 string offset from the batch end, u32 slot key); the
-strings follow the batch. Section 0xE1275683 is the 40-byte flags block; its third u32 is the material flags word
-(``material_blend``).
+Section 0xF5260180 (ALERT "Material Serialized Data") starts with ten u32 (SERIALIZED_HEADER): section size, parameter
+count, value block start, switch count, value block end (the switch batch start), texture count, texture batch start,
+texture batch end, and two words that are 0 in every installed material. The parameter records follow the header, then
+their values, the switches (``material_switches``) and the texture records. Each texture record is (u32 string offset
+from the batch end, u32 slot key); the strings follow the batch. Section 0xE1275683 is the 40-byte flags block; its third
+u32 is the material flags word (``material_blend``).
 
 Slot keys are the low 32 bits of the 2016 game's 0x49A7866B........ slot hashes, and the corpus
 binds them to the same texture suffixes (5,721 materials): ABDAD780 holds the base colour (_c in
@@ -140,6 +141,46 @@ def material_parameters(data):
             raise ValueError('Material parameter value outside its section')
         values[key] = struct.unpack_from('<%df' % (width // 4), section, base + at)
     return values
+
+
+SERIALIZED_HEADER = ('size', 'parameter_count', 'value_start', 'switch_count', 'value_end', 'texture_count', 'texture_start',
+                     'texture_end', 'zero_8', 'zero_9')
+GRAPH_SWITCHES = 0xBC93FB5E
+
+
+def material_switches(data):
+    """{switch key: u32 value} of a material's section 0xF5260180: (u32 value, u32 key) records from header word 4.
+
+    They override the graph's switch defaults (``graph_switches``). Their values are 0 or 1. No shipped program reads them:
+    the 15 switch keys that are also cb2 parameters sit at dwords no pass of their graph reads, so the material binding
+    ignores them. Some name keys their graph does not declare (706 records), as stale material keys do."""
+    table = sections(data[36:])
+    if SERIALIZED not in table:
+        return {}
+    offset, size = table[SERIALIZED]
+    section = data[36:][offset:offset + size]
+    if len(section) < 40:
+        raise ValueError('Material serialized data is too short')
+    count, start = struct.unpack_from('<2I', section, 12)
+    if start + 8 * count > len(section):
+        raise ValueError('Material switches outside their section')
+    return {key: value for value, key in (struct.unpack_from('<II', section, start + 8 * i) for i in range(count))}
+
+
+def graph_switches(data):
+    """{switch key: u32 default} of a materialgraph's section 0xBC93FB5E: 32 or 64 (u32 value, u32 key) slots, then six u32
+    whose first is the count of slots in use."""
+    dat = data[36:]
+    table = sections(dat)
+    if GRAPH_SWITCHES not in table:
+        return {}
+    offset, size = table[GRAPH_SWITCHES]
+    if size < 24 or (size - 24) % 8:
+        raise ValueError('Material graph switch section has an unexpected size')
+    count = struct.unpack_from('<I', dat, offset + size - 24)[0]
+    if 8 * count > size - 24:
+        raise ValueError('Material graph switch count exceeds its slots')
+    return {key: value for value, key in (struct.unpack_from('<II', dat, offset + 8 * i) for i in range(count))}
 
 
 def graph_layout(data):
