@@ -657,23 +657,27 @@ The main model-instance draw (`0x1411212d0`, the packet word stored at `0x141122
 | --- | --- |
 | `0x1` | The base, from the view's per-pass word (`0x101` under the same global option that sets `0x100` above) |
 | `0x400`, `0x4000000`, `0x100` | The material bits above; here the lit bit has no pass-id test, and `0x4000` is not added |
-| `0x8000` | The instance's attachment (instance `+0x90`, a 128-byte record in a global table) is of kind 10 |
+| `0x8000` | The instance's geometry override (instance `+0x90`, a 128-byte record in a global table, freed by `ModelInst::FreeGeometryOverride`, `0x1410fb160`) is of kind 10 |
 | `0x10000` | Bit 2 of the instance's byte `+0x5C` |
 | `0x80`, `0x40`, `0x8000000` | Instance flags (`+0x80` bits 25, 8 and 26), and `0x80` again when the packet has a second record |
 
 Nothing in either function sets `0x800`. The programs read the three per-instance bits this way:
-- **`0x8000`:** set, the colour comes from `g_MainColorVBView` at half the subset's colour offset; clear, from `g_MainPaintVBView` at the offset.
+- **`0x8000`:** set, the colour comes from `g_MainColorVBView` at half the subset's colour index; clear, from `g_MainPaintVBView` at the index.
 - **`0x800`:** with no colour stream, the colour is 0 when set and 1 when clear.
 - **`0x10000`:** negates `TEXCOORD3.w`.
 
-The paint view holds per-instance vertex paint, RGBA8 allocated at run time (`VertexPaint`, `0x141103d30`, for models of kind 4).
+**Where the colour lives.** Every model stream sits in one shared geometry buffer, allocated through one allocator (`0x1465a4260`) and read through the typed views of [Vertex colour](#in-the-viewer). The model loader (`0x1410e7ec0`) uploads, per model:
+- the vertices, 16 bytes each
+- the two 4-byte streams, UV1 and the colour section
+- the R16 indices
+
+The colour section is RGBA8 there, and the subset's `m_VertexColorIndex` counts 4-byte elements. So a plain instance, with `0x8000` clear, reads the model's own colour section through `g_MainPaintVBView`, the RGBA8 view. Per-instance vertex paint (`VertexPaint`, `0x141103d30`, for models of kind 4) is allocated as RGBA8 in the same buffer. The `0x8000` path halves the index, so `g_MainColorVBView` is an 8-byte view, where kind-10 geometry overrides keep their colours.
 
 Still open:
-- Where a plain instance's colour offset points: at the model's colour section, or into the paint pool.
 - What writes the instance's mirror byte.
 - Which pass ids are the G-buffer and forward passes.
 
-So the translations still bind the lit bit in both passes (`material.draw_flags`) and leave the other bits clear, apart from the vertex programs' base and colour bits ([Vertex programs](#vertex-programs)). The model's colour section is drawn as the colour, `0x800` stays clear as in the main draw, and `0x10000` stays clear for an unmirrored draw.
+So the translations bind the plain instance draw: base `0x1`, `0x8000` clear, and the lit bit in both passes (`material.draw_flags`). `0x800` stays clear as in the main draw, and `0x10000` stays clear for an unmirrored draw ([Vertex programs](#vertex-programs)).
 
 ### Per-object values
 
@@ -695,12 +699,12 @@ The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain 
 | `g_MainVBPosView` | 2v | int16 x, y, z, w, scaled by the subset's `m_MetersPerUnit` (the model's position scale) |
 | `g_MainVBNrmTanView` | 4v + 2 | The normal word as four UNORM channels, 10, 10, 10 and 2 bits. The programs rebuild the normal from them as `model.unpack_normals` does. |
 | `g_MainVBUV0View` | 4v + 3 | int16 u, v, times the UV scale of `m_GeomLodAndUVScales` bits 0 to 3 (UV1: bits 4 to 7) |
-| `g_MainVBUV1View`, `g_MainColorVBView` | v | UV1 and the colour section |
+| `g_MainVBUV1View`, `g_MainPaintVBView` | v | UV1 and the colour section (a plain instance, [Render flags](#render-flags)) |
 
 The subset record (`g_ModelSubsetView`) gives the stream offsets, the scale and the UV-scale word; the paint and skinned streams are not read for a static subset.
 
 **Bindings** (`vertex.translate`; review values, labelled `REST_NOTE`):
-- **Draw:** `MatDrawCB.m_RenderFlags` holds 0x2 (a model draw's base, [Render flags](#render-flags)), 0x8000 and the material's lit bit. The programs test the two low bits only together and write no geometry when both are clear: all 583 material uses translate the same with 0x1. 0x8000 reads the model's colour section, as the viewer does.
+- **Draw:** `MatDrawCB.m_RenderFlags` holds the plain instance draw's 0x1 and the material's lit bit ([Render flags](#render-flags)). The programs test the two low bits only together and write no geometry when both are clear: all 583 material uses translate the same with 0x2. With 0x8000 clear they read the model's colour section through `g_MainPaintVBView`. All 583 read the colour, and their translations are the same as with 0x8000 set and the section bound as `g_MainColorVBView`.
 - **Object:** the neutral object of [Per-object values](#per-object-values), and the same transform as its previous one.
 - **Engine:** shader time 0 and every other engine constant 0: no wind, no ambient animation, no force fields (the per-tile force-field bitset is empty).
 - **View:** the camera at the origin with world axes and an identity world-to-clip matrix, so `SV_POSITION.xyz` is the moved position in model units and `TEXCOORD2.xyz` the world normal.
@@ -896,11 +900,11 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 **Viewer check.** `python -m rc2016.viewer.rcra_check --game <install> --output-root <folder> <material> ...` is the viewer's counterpart of `blender_check`. It emits a material's receipt with `rcra_glsl`'s own term emitter into a check program that draws the same UV window and inputs on a float target, four terms per pass, and compares each term with the recipe evaluated on the viewer's uploads (the driver's decoded top mip, read back with `glGetTexImage`; the unpadded tiles of an atlas; the D3D lookup of a cube's faces). `over` counts pixels whose difference exceeds 0.01, relative above 1. On 57 materials (one from each top-level folder, twelve forward materials, fur, a cube map, the lit background, a volume, the dome, NaN writers and the god-ray lookup tables), 54 have none and one has three, a threshold the GPU's rounding crosses; the Blender check of the same set has 53 within 0.01, the rest being the laser tube's resampled cube (0.058), the shield below, and the crowd. Otherwise terms agree within 8-bit steps, and a fresnel shield whose colour reaches 8 × 10⁵ under the neutral values agrees within 4 × 10⁻⁴ relative (GPU `exp2` and `log2`). The stadium crowd's two writers are undefined everywhere (their 0/0 frame). Screen derivatives are the quad's in GL and 0 in the reference.
 
 **Vertex colour.** The engine model vertex program loads a colour, squares it channel by channel and passes the square on as `TEXCOORD4`, so the square is interpolated. Which colour it loads depends on the draw:
-- **Model colour:** when the subset's colour offset (`g_ModelSubsetView` dword 1) is not negative, `g_MainColorVBView` at half that offset plus the vertex index with render flag 0x8000, else `g_MainPaintVBView` at the offset plus the vertex index.
+- **Model colour:** when the subset's colour index (`g_ModelSubsetView.m_VertexColorIndex`) is not negative, `g_MainPaintVBView` at that index plus the vertex index: the model's colour section, for a plain instance. With render flag 0x8000 (a kind-10 geometry override), `g_MainColorVBView`, an 8-byte view, at half the index.
 - **Object paint:** when the subset's paint offset (dword 3) plus the object's (`g_SceneObjectView` byte 0x4C) is positive, `g_MainPaintVBView` there, plus the vertex index, replaces it.
 - **No colour stream:** 1, or 0 with render flag 0x800.
 
-The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes in R, G, B, A order. The translated materials' vertex program (`rcra_glsl.vertex_source`, attribute `aRcraColour`) squares it. The engine's buffer manager (`D3DBufferManager::InitBuffer`) creates one typed view per format over the shared geometry buffer. Its only four-channel 8-bit view is `R8G8B8A8_UNORM`, and it creates no BGRA view, so the colour bytes are R, G, B, A in order, as the reader takes them. The other views are `R32G32B32A32_UINT`, `R16G16B16A16_SINT` and `_FLOAT`, `R10G10B10A2_UNORM`, `R32G32_UINT`, `R16G16_SINT`, `R16_UINT` and a raw view. A model without the section reads 1. Object paint and the paint stream are not drawn: the viewer takes render flag 0x8000 as set and 0x800 as clear.
+The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes in R, G, B, A order. The translated materials' vertex program (`rcra_glsl.vertex_source`, attribute `aRcraColour`) squares it. The engine's buffer manager (`D3DBufferManager::InitBuffer`) creates one typed view per format over the shared geometry buffer. Its only four-channel 8-bit view is `R8G8B8A8_UNORM`, the view a plain instance reads the colour through. It creates no BGRA view, so the colour bytes are R, G, B, A in order, as the reader takes them. The other views are `R32G32B32A32_UINT`, `R16G16B16A16_SINT` and `_FLOAT`, `R10G10B10A2_UNORM`, `R32G32_UINT`, `R16G16_SINT`, `R16_UINT` and a raw view. A model without the section reads 1. Object paint and geometry-override colours are not drawn: the viewer draws a plain instance, with render flags 0x8000 and 0x800 clear.
 
 `tests/test_rcra_viewer.py` draws the swarmer through the model viewport (Windows, `RCRA_GAME`) and checks that the translated programs link and draw. It also draws a pressure button whose material reads `TEXCOORD4.x`, and checks that its colour bytes reach the program: the frame changes when they are replaced by 1. The swarmer's materials read `TEXCOORD3`: its decoded tangent is uploaded, and the frame changes when the tangent is turned a quarter turn about the normal.
 

@@ -3,7 +3,7 @@
 A graph whose material moves its vertices (vertex-animation textures, wind sway, rotating debris, holograms) carries its own
 vertex programs in place of the engine model vertex program. They pull the vertex themselves: ``SV_VertexID`` indexes the
 model's vertex streams (``g_MainVBPosView`` 8-byte int16 x, y, z, w at element 2v, ``g_MainVBNrmTanView`` the packed
-normal word at 4v + 2, ``g_MainVBUV0View`` int16 u, v at 4v + 3, ``g_MainVBUV1View`` and ``g_MainColorVBView`` at v), scale
+normal word at 4v + 2, ``g_MainVBUV0View`` int16 u, v at 4v + 3, ``g_MainVBUV1View`` and ``g_MainPaintVBView`` at v), scale
 the position by the subset's ``m_MetersPerUnit``, move it, and write the clip position.
 
 ``translate`` translates the G-buffer pass's vertex program (``SLOT``) with the SM5 translator, with the streams bound as
@@ -15,11 +15,12 @@ that depends on the view, which is not applied. ``evaluate`` runs a translation 
 the GPU), reading the material's textures (``TextureReader``); ``deform_model`` applies it to a decoded model, so the viewer
 and every export draw the vertices where the game places them at that state. Motion over time stays a limitation.
 
-The draw's render flags (MatDrawCB) hold 0x2, 0x8000 and the material's lit bit. 0x2 is one packet kind's base
-(RiftApart.exe 0x141038b60); the main instance draw (0x1411212d0) and another packet kind use 0x1. The programs test the
-two low bits only together, writing no geometry when both are clear, and every installed vertex program translates the
-same with 0x1. 0x8000 reads the model colour stream, as the viewer does. The main draw sets it only for an instance with a
-kind-10 attachment, and otherwise reads the paint view at the colour offset; where that offset points is not decoded.
+The draw's render flags (MatDrawCB) are the plain instance draw's: base 0x1 and the material's lit bit (RiftApart.exe
+0x1411212d0; another packet kind uses 0x2, and the programs test the two low bits only together). 0x8000 is clear: the
+engine sets it only for an instance with a kind-10 geometry override, whose colours sit in an 8-byte view
+(``g_MainColorVBView`` at half the colour index). A plain instance reads the model's own colour section, which the loader
+(0x1410e7ec0) uploads as RGBA8 into the shared geometry buffer, through ``g_MainPaintVBView`` at ``m_VertexColorIndex``
+plus the vertex index.
 """
 from __future__ import annotations
 
@@ -36,14 +37,15 @@ from rc2016.shaders import sm5
 VERTEX_SLOTS = (3, 7, 10, 13, 17)
 SLOT = 7                    # the vertex program of the G-buffer pass (the five agree at rest: Research note)
 U32 = 0xFFFFFFFF
-DRAW_FLAGS = 0x2 | 0x8000   # see the module docstring
+DRAW_FLAGS = 0x1            # see the module docstring
 VERTEX_ID = 'VERTEX_ID'
 # Vertex streams: binding -> (input prefix, channel type, components, element index of vertex v).
 STREAMS = {'g_MainVBPosView': ('VB.POS', 'i', 4, lambda v: 2 * v), 'g_MainVBNrmTanView': ('VB.NRM', 'f', 4, lambda v: 4 * v + 2),
            'g_MainVBUV0View': ('VB.UV0', 'i', 2, lambda v: 4 * v + 3), 'g_MainVBUV1View': ('VB.UV1', 'i', 2, lambda v: v),
-           'g_MainColorVBView': ('VB.COLOUR', 'f', 4, lambda v: v)}
-# Streams the neutral draw never reads (static subset, no paint): reading one is an error of the bindings.
-UNREAD_STREAMS = ('g_MainPaintVBView', 'g_SkinVBNrmTanView', 'g_SkinVBPosView', 'g_SkinVBPosPrevView')
+           'g_MainPaintVBView': ('VB.COLOUR', 'f', 4, lambda v: v)}
+# Streams the neutral draw never reads (static subset, no geometry override, no object paint): reading one is an error
+# of the bindings.
+UNREAD_STREAMS = ('g_MainColorVBView', 'g_SkinVBNrmTanView', 'g_SkinVBPosView', 'g_SkinVBPosPrevView')
 FORCE_FIELDS = 'g_ForceFieldsBitsetView'   # per-tile bitset of force fields: empty, no force field reaches the vertex
 SUBSET_BUFFER, MATERIAL_BUFFER, DYNAMIC_BUFFER = 'g_ModelSubsetView', 'g_MaterialView', 'g_DynamicObjectView'
 VIEW, DRAW_BUFFER = 'GlobalViewportCBuffer.', 'MatDrawCB.'

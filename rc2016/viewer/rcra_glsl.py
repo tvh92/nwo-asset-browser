@@ -13,7 +13,7 @@ Inputs, in the viewer's varyings:
   negates the sign, is clear (an unmirrored draw). A mesh without a tangent stream gets the UV-derivative frame of
   native_glsl.FRAME_HELPERS, bitangent along the game's -v, the orientation the stored tangents have.
 - TEXCOORD4: vRcraColour, the vertex colour squared per channel in the vertex stage, as the engine model vertex program
-  does (``mul r13, r14, r14`` after its typed load of g_MainColorVBView). vertex_source(), the materials' vertex program,
+  does (``mul r13, r14, r14`` after its typed load of the colour: g_MainPaintVBView for a plain instance). vertex_source(), the materials' vertex program,
   reads the model's colour section as normalized bytes in R, G, B, A order (attribute aRcraColour at
   shading.RCRA_COLOUR_ATTRIBUTE); the game sets its view's format at run time, so that order is the reader's, not read
   from the game. A model without the section reads 1, the engine's value for a subset without a colour stream when render
