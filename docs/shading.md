@@ -223,14 +223,6 @@ The exact `basic_normal_two_color_gloss_metal` rule preserves the source diffuse
 
 `tests/test_two_color_metal.py` checks the eight saved source instances when `RC2016_RESEARCH` points to the private workspace. It verifies slot identity, raw overrides and defaults, zero values, stale self-lit suppression, exact graph matching, viewport payload transport and Blender front-end metadata. No source assets are stored in the repository.
 
-The hidden Windows GPU proof reads the selected model directly from the archive and removes only the exact rule in memory for its baseline. It checks geometry and camera preservation, unaffected material payloads, shader compilation and source hashes, and writes PNGs and a JSON report to an explicit external folder:
-
-```powershell
-python scripts/prove_two_color_metal.py --source '<game-root>' --research '<research-root>' --output '<external-proof-folder>'
-```
-
-The proof uses viewer lighting, no SSR or fog attenuation, and fixed normal fade, geometric AA and instance opacity. It is a rendering check, not a captured runtime draw comparison.
-
 ### Character glass
 
 `character_glass` (character visors, and glass graphs that share the shader) is decoded from its native forward pixel shader `34D5B21C`, which has no cached SPIR-V. `apply_character_glass` builds group "RC PS4 character_glass forward" (`GLASS_GROUP_VERSION` 6):
