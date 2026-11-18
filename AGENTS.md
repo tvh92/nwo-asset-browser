@@ -4,8 +4,9 @@ A Windows desktop tool that reads Ratchet & Clank game files directly: an asset 
 
 It reads two games. The folder picked as the source decides which one (`rc2016/games/`, [docs](docs/rift-apart.md#how-the-browser-picks-the-game)):
 
-- **Ratchet & Clank (PS4, 2016):** the extracted `CUSA01073` archive. Every feature, including levels, Flash UI, animation and the research pipeline, is built for this game.
-- **Ratchet & Clank: Rift Apart:** the PS5 game, read from its Steam PC install (`toc`, `dag`, `d/`). Models, textures, skeletal animation and model export. The viewer and Blender exports draw the game's own translated material programs ([docs](docs/rift-apart.md#in-the-viewer)), with a labelled preview where a program does not translate; everything else is greyed out ([docs](docs/rift-apart.md)).
+- **Ratchet & Clank: Rift Apart (active):** the PS5 game, read from its Steam PC install (`toc`, `dag`, `d/`). Models, textures, skeletal animation and model export. The viewer and Blender exports draw the game's own translated material programs ([docs](docs/rift-apart.md#in-the-viewer)), with a labelled preview where a program does not translate; everything else is greyed out ([docs](docs/rift-apart.md)).
+- **Ratchet & Clank (PS4, 2016) (maintained, no active work):** the extracted `CUSA01073` archive. It has every feature, including levels, Flash UI, animation and the research pipeline. The local archive is deleted, so its game-file tests cannot run (see Testing). Do not start new 2016 decode, capture or shader work unless asked.
+
  Its history and evidence live in the local-only `Research/` folder inside this checkout; it is gitignored and never committed (index and sorting rules: [Research/research.md](Research/research.md)).
 
 ## Layout
@@ -34,11 +35,12 @@ Before changing a subsystem, read the section of its doc that covers the code yo
 - Nothing writes into the tracked repository or the source folders. Runtime output goes to the user's output root, caches to `.cache/` (ignored), settings to `%APPDATA%/RC2016 Asset Browser/`. Scripts, smoke tests and manual runs must pass an explicit `--output-root` (or `APPDATA`), never the default: a folder under `Research/<category>/<YYYY-MM-DD>_<topic>/` (categories in [Research/research.md](Research/research.md)); Rift Apart research goes under `Research/rift-apart/<category>/<YYYY-MM-DD>_<topic>/`. The session scratchpad is too long a path for `run.py`.
 - Paths such as `Research/.../`, `decodes/...` or `*_DECODE.md` in code comments and evidence strings cite notes in the local `Research/` folder. They are provenance, not files in git; do not link them from tracked docs.
 - Never present an inferred shader or lighting value as decoded game data. Keep unknown parameters, runtime tints, time-driven terms and VFX as visible limitations.
-- Many tracked files are CRLF. Keep each file's line endings (check and write with Python, never `sed`); `git diff --stat` must show only the lines you meant to change.
+- Many tracked files are CRLF. Keep each file's line endings (check and write with Python, never `sed`); `git diff --stat` must show only the lines you meant to change. Count `b'\r\n'` against lone `b'\n'` in bytes (`grep -c` is unreliable here), open files for writing with `newline=''` or in binary mode, and write patch scripts with the Write tool rather than Bash heredocs (backslashes get mangled).
+- For GUI checks never screenshot the desktop (`ImageGrab`); check Tk widget geometry or use the viewer's GL `capture_png`.
 
-## Shading and textures
+## Shading and textures (R&C 2016 only)
 
-Equations, slot meanings and graph families are in [shading](docs/shading.md); these are the traps.
+Equations, slot meanings and graph families are in [shading](docs/shading.md); these are the traps. They apply to the 2016 game only; Rift Apart has its own rule below.
 
 - Texture colourspace follows the native DXGI format, not the filename; normals are always Non-Color; alpha is linear data.
 - `_c` alpha is a self-lit mask, never transparency. `_n` is a DirectX tangent normal at strength 1.0 without a green flip.
@@ -71,6 +73,7 @@ python -m ruff check rc2016 tests
 
 - Headless GUI smoke tests (Tkinter, background workers) run under a timeout, must not set the `'source'` setting (it starts a scan that can stall the run), and use a temporary `APPDATA`.
 - Tests that need game files read `RC2016_RESEARCH` (the R&C 2016 archive folder, `CUSA01073`) or `RCRA_GAME` (the Rift Apart install folder) and skip without them; tests that need saved evidence read `Research/` and skip when it is absent.
+- **The R&C 2016 archive is deleted.** Do not look for it or ask for it. When a change needs a real-archive 2016 check (the one-asset check, the scan, the pipeline build), append one line (date | commits | command | why) to `Research/rc2016-pending-tests.txt` and commit without that check. Read that file only to append. The `source` setting may still point at the old path.
 - Changes to the archive, index or model-listing code also need a scan (`python rc2016/pipeline/run.py --extracted-root <game> --output-root <folder> --blender <blender.exe> --list-models-json <file>`). Changes to the Rift Apart reader need `python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --summary --verify`.
 - Changes to shared code reached through the game seam (`viewer/loader.py`, `export/models.py`, `app/window.py`) need the tests for both games (`tests/test_games.py` and the `test_rcra_*` modules). Blender-side modules (`builder.py`, `game_shader.py`, weapon merges) only import inside Blender.
 

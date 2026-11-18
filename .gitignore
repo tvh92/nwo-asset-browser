@@ -16,3 +16,6 @@ __pycache__/
 
 # Local-only research archive (game-derived evidence, captures, binaries); see Research/research.md
 /Research/
+
+# Claude Code local worktrees and settings
+/.claude/

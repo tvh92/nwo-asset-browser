@@ -2,7 +2,7 @@
 
 A Windows desktop tool for browsing, viewing and exporting the assets of **Ratchet & Clank (PS4, 2016)** straight from the game's own archive. It also reads **Ratchet & Clank: Rift Apart** (the PS5 game, from its PC release) for models, textures, animation and model export; see [Rift Apart](#rift-apart).
 
-The features below are for R&C 2016.
+The features below are for R&C 2016, which is now in maintenance only; active development is on Rift Apart.
 
 - **Models:** a searchable tree of all ~7,000 models with an interactive 3D view (Shaded, Textured, Solid, Wireframe), looks/LODs, skeletal animation playback and model details: the viewer shading rule of each material, and which levels and zones place the model. Light it with a viewer rig or the shared review HDRI, which predicts the Blender review render. A Shading filter lists models whose material graphs have no decoded rule.
 - **Grid view:** the model list as a thumbnail grid of a folder or search result (rendered by a separate process and cached in the output folder); click a tile to open the model.
@@ -105,7 +105,7 @@ Documentation:
 py -m unittest discover -s tests -t .
 ```
 
-Tests that need game files skip unless `RC2016_RESEARCH` points at the R&C 2016 archive folder, or `RCRA_GAME` at the Rift Apart install.
+Tests that need game files skip unless `RC2016_RESEARCH` points at the R&C 2016 archive folder, or `RCRA_GAME` at the Rift Apart install. R&C 2016 is currently in maintenance only: its game-file tests need an extracted archive that is not on the development machine, so they skip.
 
 ## Packaging
 
