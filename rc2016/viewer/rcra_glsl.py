@@ -457,6 +457,10 @@ def fragment_source(receipt):
     if blend == 'opaque':
         if surface is None:
             raise ValueError('An opaque receipt needs a surface recipe')
+        own = receipt['surface'].get('own_specular')
+        if own:   # a forward technique's own specular term per review light (surface.forward_specular), 0 at LIGHT = 0
+            body += ['    vec3 rcraColour = vec3(0.0);'] + forward_light_lines(own, layouts)
+            lit = '(%s) + (uLightingEnabled ? rcraOwn : vec3(0.0))' % lit
         body.append('    sceneOutput(vec4(displayFog(%s + rcraAlbedo * rcraEmission), 1.0));' % lit)
     elif blend == SHELL_BLEND:
         body.append('    sceneOutput(vec4(displayFog(%s + rcraAlbedo * rcraEmission), clamp(%s, 0.0, 1.0)));'

@@ -130,6 +130,21 @@ class InstallDrawSkipTests(unittest.TestCase):
         out = rsurface.evaluate_recipe(recipe, values, lambda node, args: [0.6, 0.4, 0.2, 1.0])
         self.assertEqual([round(out['albedo.' + c], 6) for c in 'rgb'], [0.6, 0.4, 0.2])
 
+        # its own specular term: of the key light only, 0 without it, a bright highlight with N = L = -V
+        spec = rsurface.forward_specular(eye_graph, eye, texture_sizes=lambda p: texture_size(self.source, p))
+        self.assertIn(rsurface.FORWARD_SPECULAR_NOTE, spec['limitations'])
+        self.assertTrue({'L.x', 'LIGHT.r'} <= set(spec['inputs']))
+        self.assertFalse([n for n in spec['inputs'] if n.startswith('ENGINE.')])
+        recipe = rsurface.fold_nan(rsurface.export_recipe(spec))
+        values = {name: 0.0 for name in recipe['inputs']}
+        values.update({'TEXCOORD2.z': 1.0, 'TEXCOORD3.x': 1.0, 'TEXCOORD3.w': 1.0, 'VIEW.z': -2.0, 'L.z': 1.0,
+                       'SV_IsFrontFace': True})
+        for scale, check in ((1.0, lambda v: self.assertGreater(v, 1.0)), (0.0, lambda v: self.assertEqual(v, 0.0))):
+            values.update({'LIGHT.' + c: scale for c in 'rgb'})
+            out = rsurface.evaluate_recipe(recipe, values, lambda node, args: [0.5, 0.5, 0.5, 1.0])
+            for c in 'rgb':
+                check(out['colour.' + c])
+
     def test_emissive_forward_technique_stays_black(self):
         """A forward technique whose colour has an unlit part (an emissive eye) keeps the black stub, with the reason."""
         from rc2016.games.rcra import surface as rsurface

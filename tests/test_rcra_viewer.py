@@ -74,6 +74,17 @@ class EmitterTests(unittest.TestCase):
         for source in (blended, additive):
             self.assertIn('if (%s == 0)' % rcra_glsl.PASS_UNIFORM, source)
 
+    def test_opaque_own_specular_is_added_per_light(self):
+        receipt = _receipt('opaque', forward=False)
+        light = [dict(op='input', type='f', name='LIGHT.' + c, args=[]) for c in 'rgb']   # nodes 7, 8, 9: colour = LIGHT
+        own = _recipe({'colour.r': 7, 'colour.g': 8, 'colour.b': 9}, light)
+        receipt['surface'] = dict(receipt['surface'], own_specular=own)
+        source = rcra_glsl.fragment_source(receipt)['source']
+        self.assertIn('vec3 rcraColour = vec3(0.0);', source)
+        self.assertEqual(source.count('rcraOwn += '), len(rcra_glsl.FORWARD_LIGHTS))
+        self.assertIn('+ (uLightingEnabled ? rcraOwn : vec3(0.0))', source)
+        self.assertNotIn('rcraOwn', rcra_glsl.fragment_source(_receipt('opaque', forward=False))['source'])
+
     def test_lit_background_takes_the_rig_diffuse_light(self):
         receipt = _receipt('blended')
         terms = dict(receipt['forward']['terms'], **{'lit_background.' + c: 5 for c in 'rgb'})
@@ -392,6 +403,9 @@ class ViewportDrawTests(unittest.TestCase):
             from rc2016.games.rcra import surface as rsurface
             self.assertEqual(receipt['blend'], 'opaque')
             self.assertIn(rsurface.FORWARD_ALBEDO_NOTE, receipt['limitations'])
+            self.assertIn(rsurface.FORWARD_SPECULAR_NOTE, receipt['limitations'])
+            self.assertTrue(receipt['surface'].get('own_specular'))
+            self.assertIn('rcraOwn', rcra_glsl.fragment_source(receipt)['source'])
         self._link('material/characters/hero/hero_ratchet_eyes/ratchet_eye.material', check)
 
     def test_fur_material_links(self):

@@ -157,6 +157,15 @@ def _translate(graph, data, source, program=None):
             bexp.replace_missing(source, graph, lit)
             recipes['forward']['lit'] = rsurface.fold_nan(rsurface.export_recipe(lit))
             results['forward_lit'] = lit
+    if blend == 'opaque' and 'surface' in recipes and rsurface.FORWARD_ALBEDO_NOTE in results['surface']['limitations']:
+        try:   # a forward technique's own specular term, drawn once per review light (rcra_glsl)
+            own = rsurface.forward_specular(graph, data, texture_sizes=lambda path: texture_size(source, path))
+        except (rsurface.Unsupported, ValueError, KeyError) as error:
+            limitations.append('Viewer: the forward program\'s own specular term is not drawn (%s).' % error)
+        else:
+            bexp.replace_missing(source, graph, own)
+            recipes['surface']['own_specular'] = rsurface.fold_nan(rsurface.export_recipe(own))
+            results['own_specular'] = own
     textures = {}
     for result in results.values():
         textures.update(result['textures'])
@@ -304,7 +313,7 @@ def _load_bindings(source, recipes, paths, hd, limitations):
 def material_receipt(source, material_key, hd=False):
     """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason."""
     surface, forward, blend, limitations, paths = translate(source, material_key)
-    recipes = [r for r in (surface, forward, (forward or {}).get('lit')) if r]
+    recipes = [r for r in (surface, forward, (forward or {}).get('lit'), (surface or {}).get('own_specular')) if r]
     layouts, textures = _load_bindings(source, recipes, paths, hd, limitations)
     emission = surface['terms']['emission'] if surface else forward['terms']['colour.r']
     recipe = surface or forward
