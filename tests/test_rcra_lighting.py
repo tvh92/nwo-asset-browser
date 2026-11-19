@@ -16,6 +16,7 @@ from rc2016.games.rcra import lighting
 from rc2016.viewer import rcra_glsl
 
 GAME = os.environ.get('RCRA_GAME')
+BLENDER = os.environ.get('RC2016_BLENDER') or r'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe'
 CLOTH = 'required/materials/basic_normal_gloss_cloth.materialgraph'
 FOLIAGE = 'required/materials/basic_normal_gloss_foliage.materialgraph'
 FUR = 'material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material'
@@ -75,6 +76,147 @@ class ClassTests(unittest.TestCase):
             self.assertLessEqual(bits, 0xFFFFFFFF)
         word = lighting.pack_extra(2, (255, 3, 31, 0, 7))
         self.assertEqual((word & 0xFF, word >> 8 & 0xFF, word >> 16 & 31, word >> 27), (255, 3, 31, 7))
+
+    def test_cycles_anisotropic_keeps_the_class_4_alphas(self):
+        """Cycles' alpha_x = R^2 / sqrt(1 - 0.9 A) on its tangent, alpha_y = R^2 sqrt(1 - 0.9 A): the class-4 lobe's a_t
+        along the tangent and a_b across it, the tangent turned a quarter when a_b is the larger, up to the cap of 1."""
+        rng = random.Random(4)
+        capped = 0
+        for _ in range(500):
+            gloss, second, turn = rng.randrange(256) / 255.0, rng.randrange(128), rng.randrange(64)
+            a_t, a_b, angle = lighting.anisotropic_lobes(gloss, second, turn)
+            rough, aniso, rot1, rot2 = lighting.cycles_anisotropic(gloss, second, turn)
+            aspect = math.sqrt(1.0 - 0.9 * aniso)
+            ax, ay = rough * rough / aspect, rough * rough * aspect
+            self.assertAlmostEqual(ax * ay, a_t * a_b, delta=1e-9)
+            along, across = (a_b, a_t) if rot1 else (a_t, a_b)
+            self.assertGreaterEqual(along, across)
+            if aniso < lighting.CYCLES_MAX_ANISOTROPY:
+                self.assertAlmostEqual(ax / along, 1.0, delta=1e-9)
+                self.assertAlmostEqual(ay / across, 1.0, delta=1e-9)
+            else:
+                capped += 1
+                self.assertLess(ax / ay, along / across)
+            self.assertAlmostEqual((rot2 - rot1) * 2 * math.pi, angle, delta=1e-12)
+        self.assertLess(capped, 500)
+
+    def test_blender_constants_follow_the_reader(self):
+        text = (Path(__file__).resolve().parents[1] / 'rc2016' / 'export' / 'rcra_blender.py').read_text()
+        line = next(x for x in text.splitlines() if x.startswith('TANGENT_STEP, TANGENT_BIAS, ROTATION_STEP'))
+        values = [eval(v) for v in line.split('=', 1)[1].split(',')]   # noqa: S307 (the module's own literal line)
+        self.assertEqual(values, [lighting.TANGENT_STEP, lighting.TANGENT_BIAS, lighting.ROTATION_STEP,
+                                  lighting.SECOND_GLOSS_STEP])
+        self.assertIn('ANISOTROPIC_CLASS = %d' % lighting.ANISOTROPIC, text)
+
+    @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
+    def test_blender_anisotropic_group_renders_the_class_4_lobes(self):
+        """The Blender group, rendered in Cycles on a plane seen along its normal under one sun, against the analytic
+        Cycles lobes of lighting.cycles_anisotropic on the decoded tangent: the group feeds Cycles what the mapping says."""
+        import json
+        import subprocess
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / 'aniso.py'
+            script.write_text(ANISOTROPIC_SCRIPT)
+            run = subprocess.run([BLENDER, '--background', '--factory-startup', '--python-exit-code', '1', '--python',
+                                  str(script), '--', str(Path(__file__).resolve().parents[1]), folder,
+                                  json.dumps(ANISOTROPIC_CASES)], capture_output=True, text=True, timeout=600)
+        line = next((x for x in run.stdout.splitlines() if x.startswith('ANISO ')), None)
+        self.assertIsNotNone(line, run.stdout[-2000:] + run.stderr[-2000:])
+        for case, got in zip(ANISOTROPIC_CASES, json.loads(line[6:])):
+            gloss, second, turn, fx, fy, sign, theta, phi = case
+            g = lighting.anisotropic_tangent(fx, fy, sign)
+            tangent = (g[0], -g[2], g[1])   # game (x, y, z) -> Blender (x, -z, y)
+            t, p = math.radians(theta), math.radians(phi)
+            light = (math.sin(t) * math.cos(p), math.sin(t) * math.sin(p), math.cos(t))
+            rough, aniso, rot1, rot2 = lighting.cycles_anisotropic(gloss, second, turn)
+            want = 0.5 * (_cycles_lobe(rough, aniso, rot1, tangent, light) + _cycles_lobe(rough, aniso, rot2, tangent, light))
+            self.assertAlmostEqual(got, want, delta=1e-4 * max(want, 1.0), msg=str(case))
+
+    def test_anisotropic_tangent_is_unit(self):
+        for fx, fy in ((0, 0), (255, 255), (511, 0), (300, 211)):
+            for sign in (0, 1):
+                t = lighting.anisotropic_tangent(fx, fy, sign)
+                q = (fx * lighting.TANGENT_STEP + lighting.TANGENT_BIAS) ** 2 + (fy * lighting.TANGENT_STEP + lighting.TANGENT_BIAS) ** 2
+                if q < 2.0:   # inside the octahedral disc the writers fill
+                    self.assertAlmostEqual(sum(x * x for x in t), 1.0, delta=1e-9)
+                    self.assertEqual(t[2] < 0, bool(sign))
+
+
+# Cases for the Blender group render: (gloss, second gloss field, rotation field, tangent fields x, y, z sign, L theta, phi).
+ANISOTROPIC_CASES = ((0.3, 70, 0, 400, 255, 0, 25.0, 0.0), (0.3, 70, 10, 400, 255, 1, 35.0, 60.0),
+                     (0.6, 30, 40, 255, 255, 0, 30.0, 120.0), (0.6, 30, 0, 120, 255, 1, 20.0, -40.0),
+                     (0.9, 0, 25, 330, 255, 0, 30.0, 10.0))
+ANISOTROPIC_SCRIPT = r'''
+import json, math, os, sys
+import bpy
+import numpy as np
+root, out_dir, cases = sys.argv[sys.argv.index('--') + 1:]
+sys.path.insert(0, root)
+from rc2016.export.rcra_blender import build_anisotropic_group
+bpy.ops.wm.read_factory_settings(use_empty=True)
+scene = bpy.context.scene
+scene.render.engine = 'CYCLES'
+scene.cycles.device, scene.cycles.samples, scene.cycles.use_denoising, scene.cycles.max_bounces = 'CPU', 1, False, 0
+scene.render.resolution_x = scene.render.resolution_y = 4
+scene.render.image_settings.file_format, scene.render.image_settings.color_depth = 'OPEN_EXR', '32'
+scene.view_settings.view_transform = 'Standard'
+world = bpy.data.worlds.new('w')
+world.use_nodes = True
+world.node_tree.nodes['Background'].inputs['Strength'].default_value = 0.0
+scene.world = world
+bpy.ops.mesh.primitive_plane_add(size=100)
+material = bpy.data.materials.new('aniso')
+material.use_nodes = True
+tree = material.node_tree
+tree.nodes.clear()
+out = tree.nodes.new('ShaderNodeOutputMaterial')
+group = tree.nodes.new('ShaderNodeGroup')
+group.node_tree = build_anisotropic_group()
+tree.links.new(group.outputs['Shader'], out.inputs['Surface'])
+group.inputs['Albedo'].default_value = (0, 0, 0, 1)
+group.inputs['F0'].default_value = (1, 1, 1, 1)
+normal = tree.nodes.new('ShaderNodeCombineXYZ')
+normal.inputs[2].default_value = 1.0
+tree.links.new(normal.outputs[0], group.inputs['Normal'])
+bpy.context.object.data.materials.append(material)
+camera = bpy.data.objects.new('c', bpy.data.cameras.new('c'))
+camera.data.type, camera.data.ortho_scale, camera.location = 'ORTHO', 0.01, (0, 0, 5)
+scene.collection.objects.link(camera)
+scene.camera = camera
+sun = bpy.data.objects.new('s', bpy.data.lights.new('s', 'SUN'))
+sun.data.energy, sun.data.angle = 1.0, 0.0
+scene.collection.objects.link(sun)
+from mathutils import Vector
+values = []
+for gloss, second, turn, fx, fy, sign, theta, phi in json.loads(cases):
+    for name, value in (('Gloss', gloss), ('Second gloss field', second), ('Rotation field', turn), ('Tangent field x', fx),
+                        ('Tangent field y', fy), ('Tangent z sign', sign)):
+        group.inputs[name].default_value = value
+    t, p = math.radians(theta), math.radians(phi)
+    sun.rotation_euler = Vector((math.sin(t) * math.cos(p), math.sin(t) * math.sin(p), math.cos(t))).to_track_quat('Z', 'Y').to_euler()
+    scene.render.filepath = os.path.join(out_dir, 'aniso.exr')
+    bpy.ops.render.render(write_still=True)
+    image = bpy.data.images.load(scene.render.filepath)
+    values.append(float(np.array(image.pixels[:]).reshape(-1, 4)[:, 0].mean()))
+    bpy.data.images.remove(image)
+print('ANISO ' + json.dumps(values))
+'''
+
+
+def _cycles_lobe(rough, aniso, rotation, tangent, light):
+    """Cycles' anisotropic GGX (exact height-correlated Smith, F = 1) x N.L for V = N = +z, a unit sun of direction light."""
+    cs, sn = math.cos(2 * math.pi * rotation), math.sin(2 * math.pi * rotation)
+    t = (tangent[0] * cs - tangent[1] * sn, tangent[0] * sn + tangent[1] * cs)   # turned about +z, made orthogonal to it
+    x = _unit([t[0], t[1], 0.0])
+    y = (-x[1], x[0], 0.0)
+    aspect = math.sqrt(1.0 - 0.9 * min(max(aniso, 0.0), 1.0))
+    ax, ay = rough * rough / aspect, rough * rough * aspect
+    h = _unit([light[0], light[1], light[2] + 1.0])
+    hx, hy = sum(a * b for a, b in zip(h, x)), sum(a * b for a, b in zip(h, y))
+    d = (hx / ax) ** 2 + (hy / ay) ** 2 + h[2] ** 2
+    lx, ly = sum(a * b for a, b in zip(light, x)), sum(a * b for a, b in zip(light, y))
+    lam = (-1.0 + math.sqrt(1.0 + ((ax * lx) ** 2 + (ay * ly) ** 2) / light[2] ** 2)) / 2.0
+    return 1.0 / (math.pi * ax * ay * d * d) / (1.0 + lam) / 4.0
 
 
 def _light_recipe():
@@ -157,6 +299,39 @@ class RealLightingTests(unittest.TestCase):
             v = _inputs(rng, 0)
             for got, want in zip(lighting.evaluate(recipe, v), _game_brdf(v)):
                 self.assertAlmostEqual(got, want, delta=0.01 * max(abs(want), 1e-3))
+
+    def test_class_4_is_two_anisotropic_ggx_lobes(self):
+        """The class-4 recipe equals the reading lighting.py gives (and the Blender export maps onto Cycles): Lambert, plus
+        the average of two anisotropic GGX lobes on the tangent and on it turned by the rotation field."""
+        recipe = lighting.direct(GAME, 4)
+        rng = random.Random(9)
+        dot = lambda a, b: sum(x * y for x, y in zip(a, b))   # noqa: E731
+        cross = lambda a, b: (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])   # noqa: E731
+        checked = 0
+        while checked < 60:
+            v = _inputs(rng, 4)
+            n, light = [v['normal.' + c] for c in 'xyz'], [v['L.' + c] for c in 'xyz']
+            t = lighting.anisotropic_tangent(v['extra.0'], v['extra.1'], v['extra.2'])
+            if not all(math.isfinite(x) for x in t) or abs(dot(t, n)) > 0.99:
+                continue
+            view = _unit([-v['VIEW.' + c] for c in 'xyz'])
+            h = _unit([a + b for a, b in zip(view, light)])
+            nl, vh = max(min(dot(n, light), 1), 0), dot(view, h)
+            a_t, a_b, angle = lighting.anisotropic_lobes(v['gloss'], v['extra.4'], v['extra.3'])
+            nt, cs, sn = dot(n, t), math.cos(angle), math.sin(angle)
+            t2 = [ni * nt * (1 - cs) + ti * cs + ci * sn for ni, ti, ci in zip(n, t, cross(n, t))]
+            lobes = 0.0
+            for tk in (t, t2):
+                bk = _unit(cross(n, tk))
+                s = dot(h, n) ** 2 + dot(h, tk) ** 2 / (a_t * a_t) + dot(h, bk) ** 2 / (a_b * a_b)
+                lobes += 0.5 / (a_t * a_b * s * s)
+            k = (0.75 * min(a_t, a_b) + 0.25 * max(a_t, a_b)) * 0.353553295 + 0.353553295
+            vis = 0.25 / ((vh * (1 - k * k) + k * k) * (nl * (1 - k * k) + k * k))
+            want = [v['LIGHT.' + c] * (v['albedo.' + c] * nl + nl * lobes * vis *
+                                       (v['f0.' + c] + (1 - v['f0.' + c]) * (1 - vh) ** 5)) for c in 'rgb']
+            for got, w in zip(lighting.evaluate(recipe, v), want):
+                self.assertAlmostEqual(got, w, delta=0.01 * max(abs(w), 1e-3))
+            checked += 1
 
     def test_class_recipes_are_portable_and_read_their_fields(self):
         for cls in lighting.CLASSES:

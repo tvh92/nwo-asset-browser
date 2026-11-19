@@ -21,6 +21,7 @@ from rc2016.export import rcra_blender  # noqa: E402
 
 BAKES = (('albedo', 'Albedo'), ('f0', 'F0'), ('normal', 'Normal'), ('scalars', ('Gloss', 'Occlusion', 'Emission')),
          ('alpha', 'Alpha'), ('unlit', 'Unlit'))
+EXTRA_BAKES = (('extra_a', ('Extra 0', 'Extra 1', 'Extra 2')), ('extra_b', ('Extra 3', 'Extra 4')))   # class 4 fields
 FORWARD_BAKES = (('forward_colour', 'Colour'), ('forward_alpha', 'Alpha'), ('forward_background', 'Background'))
 
 
@@ -53,7 +54,9 @@ def main():
     images = rcra_blender.load_images(job['images'])
     groups = []
     if job.get('recipe'):
-        groups.append((rcra_blender.build_surface_group(job['recipe'], images, ['UVMap'], fixed=job.get('fixed')), BAKES))
+        fields = len(rcra_blender.ANISOTROPIC_INPUTS) if rcra_blender.anisotropic(job['recipe']) else 0
+        groups.append((rcra_blender.build_surface_group(job['recipe'], images, ['UVMap'], fixed=job.get('fixed'),
+                                                        extras=fields), BAKES + (EXTRA_BAKES if fields else ())))
     if job.get('forward'):
         groups.append((rcra_blender.build_forward_group(job['forward'], images, ['UVMap'], fixed=job.get('fixed')),
                        FORWARD_BAKES))

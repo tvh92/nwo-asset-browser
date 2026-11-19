@@ -37,6 +37,10 @@ BRDF group "RC RA Deferred BRDF", from the engine's class-0 deferred apply progr
 - **Occlusion:** the game applies it to ambient light only, which Cycles cannot separate. "Occlusion on diffuse" (default 0)
   multiplies the diffuse colour by it instead.
 
+Lighting class 4 (anisotropic) materials take "RC RA Anisotropic BRDF" instead: the same diffuse and self-lit terms, and the
+class-4 program's specular, the average of two anisotropic GGX lobes on the G-buffer tangent and on it turned by the
+rotation field (``build_anisotropic_group``). The other classes take the class-0 group (labelled by the export).
+
 Blended materials (entry ``blend`` additive, blended or modulate) carry a forward recipe: the colour and alpha the game
 blends, with every engine light source zero, and a background tint B where the program passes the scene behind it
 through (colour = A + B x background). ``apply_recipe`` composes it with a Transparent BSDF by the mode, and for 'blended'
@@ -90,16 +94,16 @@ def _socket(tree, name, in_out, kind, default=None):
     return socket
 
 
-def build_brdf_group():
-    """The shared "RC RA Deferred BRDF" group (rebuilt when its version changes)."""
-    group = bpy.data.node_groups.get(BRDF_GROUP)
-    if group is not None and group.get('rc_version') == GROUP_VERSION:
-        return group
+def _new_brdf_group(name, version, extra_inputs=()):
+    """The group ``name`` with the BRDF inputs and output, or None when it is current (``rc_version``)."""
+    group = bpy.data.node_groups.get(name)
+    if group is not None and group.get('rc_version') == version:
+        return None
     if group is None:
-        group = bpy.data.node_groups.new(BRDF_GROUP, 'ShaderNodeTree')
+        group = bpy.data.node_groups.new(name, 'ShaderNodeTree')
     group.nodes.clear()
     group.interface.clear()
-    group['rc_version'] = GROUP_VERSION
+    group['rc_version'] = version
     _socket(group, 'Albedo', 'INPUT', 'NodeSocketColor', (0.5, 0.5, 0.5, 1.0))
     _socket(group, 'F0', 'INPUT', 'NodeSocketColor', (0.04, 0.04, 0.04, 1.0))
     _socket(group, 'Gloss', 'INPUT', 'NodeSocketFloat', 0.5)
@@ -107,7 +111,43 @@ def build_brdf_group():
     _socket(group, 'Occlusion', 'INPUT', 'NodeSocketFloat', 1.0)
     _socket(group, 'Emission', 'INPUT', 'NodeSocketFloat', 0.0)
     _socket(group, 'Occlusion on diffuse', 'INPUT', 'NodeSocketFloat', 0.0)
+    for socket in extra_inputs:
+        _socket(group, socket, 'INPUT', 'NodeSocketFloat', 0.0)
     _socket(group, 'Shader', 'OUTPUT', 'NodeSocketShader')
+    return group
+
+
+def _metallic(nodes, links, inp, name):
+    """A Metallic BSDF, GGX, F82 with a white edge tint (Schlick with F90 = 1), on the group's F0 and Normal."""
+    spec = nodes.new('ShaderNodeBsdfMetallic')
+    spec.name = name
+    spec.distribution = 'GGX'
+    spec.fresnel_type = 'F82'
+    links.new(inp.outputs['F0'], spec.inputs['Base Color'])
+    spec.inputs['Edge Tint'].default_value = (1.0, 1.0, 1.0, 1.0)
+    links.new(inp.outputs['Normal'], spec.inputs['Normal'])
+    return spec
+
+
+def _node_math(nodes, links, operation, *args, name=None):
+    """A Math node of ``operation`` on sockets or numbers."""
+    node = nodes.new('ShaderNodeMath')
+    node.operation = operation
+    if name:
+        node.name = name
+    for k, a in enumerate(args):
+        if isinstance(a, (int, float)):
+            node.inputs[k].default_value = float(a)
+        else:
+            links.new(a, node.inputs[k])
+    return node.outputs[0]
+
+
+def build_brdf_group():
+    """The shared "RC RA Deferred BRDF" group (rebuilt when its version changes)."""
+    group = _new_brdf_group(BRDF_GROUP, GROUP_VERSION)
+    if group is None:
+        return bpy.data.node_groups[BRDF_GROUP]
     nodes, links = group.nodes, group.links
     inp, out = nodes.new('NodeGroupInput'), nodes.new('NodeGroupOutput')
     rough = nodes.new('ShaderNodeMath')
@@ -121,14 +161,15 @@ def build_brdf_group():
     square.name = 'Roughness r^2'
     links.new(rough.outputs[0], square.inputs[0])
     links.new(rough.outputs[0], square.inputs[1])
-    spec = nodes.new('ShaderNodeBsdfMetallic')
-    spec.name = 'Specular GGX Schlick F90 1'
-    spec.distribution = 'GGX'
-    spec.fresnel_type = 'F82'
-    links.new(inp.outputs['F0'], spec.inputs['Base Color'])
-    spec.inputs['Edge Tint'].default_value = (1.0, 1.0, 1.0, 1.0)
+    spec = _metallic(nodes, links, inp, 'Specular GGX Schlick F90 1')
     links.new(square.outputs[0], spec.inputs['Roughness'])
-    links.new(inp.outputs['Normal'], spec.inputs['Normal'])
+    _lambert_and_emission(group, inp, out, spec.outputs[0], (inp, rough, square, spec))
+    return group
+
+
+def _lambert_and_emission(group, inp, out, specular, placed):
+    """Lambert diffuse (with "Occlusion on diffuse"), the self-lit albedo x E and ``specular``, added into the output."""
+    nodes, links = group.nodes, group.links
     # Diffuse colour x (1 + f (occlusion - 1)), f = "Occlusion on diffuse".
     occ = nodes.new('ShaderNodeMath')
     occ.operation = 'SUBTRACT'
@@ -154,14 +195,91 @@ def build_brdf_group():
     links.new(inp.outputs['Emission'], emission.inputs['Strength'])
     add = nodes.new('ShaderNodeAddShader')
     links.new(diffuse.outputs[0], add.inputs[0])
-    links.new(spec.outputs[0], add.inputs[1])
+    links.new(specular, add.inputs[1])
     total = nodes.new('ShaderNodeAddShader')
     links.new(add.outputs[0], total.inputs[0])
     links.new(emission.outputs[0], total.inputs[1])
     links.new(total.outputs[0], out.inputs['Shader'])
-    for x, node in enumerate((inp, rough, square, spec, occ, scale, tint, diffuse, emission, add, total, out)):
+    for x, node in enumerate(tuple(placed) + (occ, scale, tint, diffuse, emission, add, total, out)):
         node.location = (x * 220, 0)
+
+
+# Lighting class 4 (anisotropic): the apply program's two anisotropic GGX lobes (rc2016.games.rcra.lighting, class 4 lobes),
+# each a Metallic BSDF with Cycles' anisotropy (lighting.cycles_anisotropic), averaged.
+ANISOTROPIC_GROUP = 'RC RA Anisotropic BRDF'
+ANISOTROPIC_VERSION = 1
+ANISOTROPIC_INPUTS = ('Tangent field x', 'Tangent field y', 'Tangent z sign', 'Rotation field', 'Second gloss field')
+ANISOTROPIC_CLASS = 4
+GROUP_VERSIONS = {BRDF_GROUP: GROUP_VERSION, ANISOTROPIC_GROUP: ANISOTROPIC_VERSION}
+# The class-4 field steps of rc2016.games.rcra.lighting (kept equal by tests/test_rcra_lighting.py)
+TANGENT_STEP, TANGENT_BIAS, ROTATION_STEP, SECOND_GLOSS_STEP = 0.00553508243, -1.41421354, 0.0498665534, 1.0 / 127.0
+
+
+def build_anisotropic_group():
+    """The shared "RC RA Anisotropic BRDF" group: class 0's diffuse and self-lit terms, and the class-4 specular.
+
+    The tangent is decoded from its fields as the apply program does (octahedral, game space) and turned into Blender
+    space. With r1 = r(gloss) and r2 = r(second gloss), both lobes take Roughness r1 r2 and Anisotropy
+    (1 - (min r / max r)^4) / 0.9, so Cycles' alpha_x alpha_y = r1^4 r2^4 and alpha_x / alpha_y = the game's ratio; lobe 1
+    sits on the tangent, lobe 2 on it turned by the rotation field, both a further quarter turn when r2 > r1 (Cycles has
+    no negative anisotropy). A mix at 0.5 averages them."""
+    group = _new_brdf_group(ANISOTROPIC_GROUP, ANISOTROPIC_VERSION, ANISOTROPIC_INPUTS)
+    if group is None:
+        return bpy.data.node_groups[ANISOTROPIC_GROUP]
+    nodes, links = group.nodes, group.links
+    inp, out = nodes.new('NodeGroupInput'), nodes.new('NodeGroupOutput')
+
+    def m(operation, *args, name=None):
+        return _node_math(nodes, links, operation, *args, name=name)
+    r1 = m('MULTIPLY_ADD', inp.outputs['Gloss'], -0.7514, 0.9725, name='r1 = 0.9725 - 0.7514 gloss')
+    r2 = m('MULTIPLY_ADD', inp.outputs['Second gloss field'], -0.7514 * SECOND_GLOSS_STEP, 0.9725,
+           name='r2 = 0.9725 - 0.7514 field / 127')
+    rough = m('MULTIPLY', r1, r2, name='Roughness r1 r2')
+    q = m('DIVIDE', m('MINIMUM', r1, r2), m('MAXIMUM', r1, r2))
+    q2 = m('MULTIPLY', q, q)
+    aniso = m('MULTIPLY_ADD', m('MULTIPLY', q2, q2), -1.0 / 0.9, 1.0 / 0.9, name='Anisotropy (1 - (min r / max r)^4) / 0.9')
+    quarter = m('MULTIPLY', m('LESS_THAN', r1, r2), 0.25, name='Quarter turn when r2 > r1')
+    turn = m('MULTIPLY_ADD', inp.outputs['Rotation field'], ROTATION_STEP / (2.0 * math.pi), quarter,
+             name='Lobe 2 turn: field x 0.04987 rad')
+    # Tangent: x, y = field x step + bias; q = x^2 + y^2; t = (x sqrt(1 - q/4), y sqrt(1 - q/4), +-(1 - q/2)) in game space.
+    x = m('MULTIPLY_ADD', inp.outputs['Tangent field x'], TANGENT_STEP, TANGENT_BIAS)
+    y = m('MULTIPLY_ADD', inp.outputs['Tangent field y'], TANGENT_STEP, TANGENT_BIAS)
+    qq = m('ADD', m('MULTIPLY', x, x), m('MULTIPLY', y, y))
+    k = m('SQRT', m('MULTIPLY_ADD', qq, -0.25, 1.0))
+    z = m('MULTIPLY', m('MULTIPLY_ADD', qq, -0.5, 1.0), m('MULTIPLY_ADD', inp.outputs['Tangent z sign'], -2.0, 1.0))
+    tangent = nodes.new('ShaderNodeCombineXYZ')   # game (x, y, z) -> Blender (x, -z, y)
+    tangent.name = 'Tangent (Blender space)'
+    links.new(m('MULTIPLY', x, k), tangent.inputs[0])
+    links.new(m('MULTIPLY', z, -1.0), tangent.inputs[1])
+    links.new(m('MULTIPLY', y, k), tangent.inputs[2])
+    lobes = []
+    for name, rotation in (('Lobe 1: tangent', quarter), ('Lobe 2: turned tangent', turn)):
+        spec = _metallic(nodes, links, inp, name)
+        links.new(rough, spec.inputs['Roughness'])
+        links.new(aniso, spec.inputs['Anisotropy'])
+        links.new(rotation, spec.inputs['Rotation'])
+        links.new(tangent.outputs[0], spec.inputs['Tangent'])
+        lobes.append(spec)
+    average = nodes.new('ShaderNodeMixShader')
+    average.name = 'Average of the lobes'
+    average.inputs['Fac'].default_value = 0.5
+    links.new(lobes[0].outputs[0], average.inputs[1])
+    links.new(lobes[1].outputs[0], average.inputs[2])
+    _lambert_and_emission(group, inp, out, average.outputs[0], (inp, tangent, lobes[0], lobes[1], average))
     return group
+
+
+def lighting_class(recipe):
+    """The constant lighting class of a surface recipe (term ``class``), 0 without one."""
+    i = recipe['terms'].get('class')
+    node = recipe['nodes'][i] if i is not None else None
+    return int(node['value']) if node is not None and node['op'] == 'const' else 0
+
+
+def anisotropic(recipe):
+    """True when the surface recipe is lit by class 4 and carries its five extra fields."""
+    return (lighting_class(recipe) == ANISOTROPIC_CLASS
+            and all('extra.%d' % k in recipe['terms'] for k in range(len(ANISOTROPIC_INPUTS))))
 
 
 # ----------------------------------------------------------------------------------------------- surface emitter
@@ -604,15 +722,19 @@ SURFACE_OUTPUTS = (('Albedo', 'NodeSocketColor'), ('F0', 'NodeSocketColor'), ('G
                    ('Alpha', 'NodeSocketFloat'), ('Unlit', 'NodeSocketColor'))
 
 
-def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear', fixed=None, tangent=False):
+def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear', fixed=None, tangent=False,
+                        extras=0):
     """A node group computing the recipe's surface terms (Albedo, F0, Gloss, Normal, Occlusion, Emission, Alpha, and Unlit:
-    a forward technique's unlit colour, rc2016.games.rcra.surface.forward_albedo, black without one)."""
+    a forward technique's unlit colour, rc2016.games.rcra.surface.forward_albedo, black without one), and with ``extras``
+    the lighting class's first ``extras`` G-buffer fields as Extra 0, Extra 1, ... (their integer values)."""
     digest = recipe_sha256(recipe)
     name = SURFACE_PREFIX + digest[:16]
     group = bpy.data.node_groups.new(name, 'ShaderNodeTree')
     group[RECIPE_PROPERTY] = digest
     for socket, kind in SURFACE_OUTPUTS:
         _socket(group, socket, 'OUTPUT', kind)
+    for k in range(extras):
+        _socket(group, 'Extra %d' % k, 'OUTPUT', 'NodeSocketFloat')
     out = group.nodes.new('NodeGroupOutput')
     em = _Emitter(group, recipe, images, uv_maps, colour_attribute, interpolation, fixed, tangent)
     terms = {k: em.value(i) for k, i in recipe['terms'].items()}
@@ -638,6 +760,8 @@ def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpol
     em.link(unit.outputs[0], out.inputs['Normal'])
     for socket, term in (('Gloss', 'gloss'), ('Occlusion', 'occlusion'), ('Emission', 'emission')):
         em.feed(terms[term], out.inputs[socket])
+    for k in range(extras):
+        em.feed(terms['extra.%d' % k], out.inputs['Extra %d' % k])
     clip = terms['clip']
     keep = em.math('SUBTRACT', 1.0, clip) if not isinstance(clip, float) else 1.0 - clip
     if 'coverage' in terms:   # the fraction of the surface the program keeps (fur shells): alpha, cut by the discard
@@ -737,13 +861,16 @@ def load_images(rows):
 def _surface_shader(tree, entry, images, uv_maps, colour_attribute, blended, tangent=False):
     """The surface group feeding the BRDF group; returns the shader socket (alpha clip applied when opaque)."""
     recipe = entry['recipe']
-    surface = build_surface_group(recipe, images, uv_maps, colour_attribute, tangent=tangent)
+    fields = len(ANISOTROPIC_INPUTS) if anisotropic(recipe) else 0
+    surface = build_surface_group(recipe, images, uv_maps, colour_attribute, tangent=tangent, extras=fields)
     s = tree.nodes.new('ShaderNodeGroup')
     s.node_tree, s.name, s.location = surface, 'Translated surface', (0, 0)
     b = tree.nodes.new('ShaderNodeGroup')
-    b.node_tree, b.name, b.location = build_brdf_group(), 'Game BRDF', (300, 0)
+    b.node_tree, b.name, b.location = build_anisotropic_group() if fields else build_brdf_group(), 'Game BRDF', (300, 0)
     for socket in ('Albedo', 'F0', 'Gloss', 'Normal', 'Occlusion') + (() if blended else ('Emission',)):
         tree.links.new(s.outputs[socket], b.inputs[socket])
+    for k, socket in enumerate(ANISOTROPIC_INPUTS[:fields]):
+        tree.links.new(s.outputs['Extra %d' % k], b.inputs[socket])
     body = b.outputs['Shader']
     if not blended and 'unlit.r' in recipe['terms']:   # a forward technique's unlit colour, added unlit
         glow = tree.nodes.new('ShaderNodeEmission')
@@ -935,7 +1062,8 @@ def validate_material(material):
         brdf = tree.nodes.get('Game BRDF') if tree else None
         if surface is None or surface.node_tree is None or surface.node_tree.get(RECIPE_PROPERTY) != digest:
             problems.append('%s: surface group missing or not its recipe' % material.name)
-        if brdf is None or brdf.node_tree is None or brdf.node_tree.get('rc_version') != GROUP_VERSION:
+        if (brdf is None or brdf.node_tree is None
+                or brdf.node_tree.get('rc_version') != GROUP_VERSIONS.get(brdf.node_tree.name)):
             problems.append('%s: BRDF group missing or out of date' % material.name)
         if surface is not None and surface.node_tree is not None:
             problems += _images_missing(material, surface.node_tree)

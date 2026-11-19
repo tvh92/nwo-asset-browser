@@ -36,6 +36,7 @@ adds them as albedo x (blurred diffuse) + specular, so the recipe is albedo x di
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import threading
@@ -409,4 +410,65 @@ def pack_extra(cls, fields):
     for (offset, width), value in zip(EXTRA_FIELDS.get(cls, ()), fields):
         word |= (int(value) & ((1 << width) - 1)) << offset
     return word
+
+
+# ------------------------------------------------------------------------------------------------ class 4 lobes
+# The class-4 (anisotropic) apply program, as its translation reads (0x37E5A7C): the specular is the average of two
+# anisotropic GGX lobes, D = 1 / (a_t a_b (h.n^2 + h.t^2 / a_t^2 + h.b^2 / a_b^2)^2) (no 1/pi, as every class), times a
+# separable visibility and Schlick Fresnel with F90 = 1; the diffuse is Lambert, as class 0's.
+# - lobe 1 on the G-buffer tangent t (extra fields 0, 1 and the z sign 2, decoded as the writers' octahedral normal) and
+#   b = normalize(n x t);
+# - lobe 2 on t turned about n by the rotation field x ROTATION_STEP radians (Rodrigues), and b' = normalize(n x t');
+# - both with a_t = r(gloss)^4 along the tangent and a_b = r(second gloss)^4 across it, r = 0.9725 - 0.7514 g, the second
+#   gloss being extra field 4 / 127;
+# - visibility 0.25 / ((v.h (1 - k^2) + k^2)(n.l (1 - k^2) + k^2)), k = (0.75 min(a_t, a_b) + 0.25 max(a_t, a_b) + 1) / sqrt 8.
+ANISOTROPIC = 4
+TANGENT_STEP, TANGENT_BIAS = 0.00553508243, -1.41421354   # a 9-bit field to an octahedral coordinate
+ROTATION_STEP = 0.0498665534                              # radians per step of the 6-bit rotation field
+SECOND_GLOSS_STEP = 1.0 / 127.0                           # the 7-bit second gloss
+# Cycles' anisotropic GGX (Metallic BSDF, measured in Blender 5.0 against the analytic lobe within 4e-6): with
+# Roughness R and Anisotropy A in [0, 1] (negative reads 0, above 1 reads 1), alpha_x = R^2 / sqrt(1 - 0.9 A) along the Tangent input
+# turned about the normal by 2 pi x Rotation (right-handed), alpha_y = R^2 sqrt(1 - 0.9 A) across it.
+CYCLES_MAX_ANISOTROPY = 1.0
+
+
+def anisotropic(recipe):
+    """True when a surface recipe (export_recipe shape) is lit by class 4 and carries its five extra fields: the materials
+    the Blender export lights with the class-4 lobes (rc2016.export.rcra_blender.anisotropic, its in-Blender twin)."""
+    i = recipe['terms'].get('class')
+    node = recipe['nodes'][i] if i is not None else None
+    return (node is not None and node['op'] == 'const' and node['value'] == ANISOTROPIC
+            and all('extra.%d' % k in recipe['terms'] for k in range(len(EXTRA_FIELDS[ANISOTROPIC]))))
+
+
+def gloss_roughness(gloss):
+    """r of the deferred apply programs: 0.9725 - 0.7514 gloss (GGX alpha = r^4)."""
+    return 0.9725 - 0.7514 * gloss
+
+
+def anisotropic_tangent(fx, fy, negative_z):
+    """The class-4 tangent (game space, unit) of its extra fields 0, 1 and 2, as the apply program decodes them."""
+    x, y = fx * TANGENT_STEP + TANGENT_BIAS, fy * TANGENT_STEP + TANGENT_BIAS
+    q = x * x + y * y
+    k = math.sqrt(max(1.0 - 0.25 * q, 0.0))
+    z = 1.0 - 0.5 * q
+    return x * k, y * k, -z if negative_z else z
+
+
+def anisotropic_lobes(gloss, second_field, rotation_field):
+    """(a_t, a_b, turn) of the class-4 lobes: alpha along and across the tangent, and the second lobe's turn in radians."""
+    return (gloss_roughness(gloss) ** 4, gloss_roughness(second_field * SECOND_GLOSS_STEP) ** 4,
+            rotation_field * ROTATION_STEP)
+
+
+def cycles_anisotropic(gloss, second_field, rotation_field):
+    """Cycles Metallic BSDF inputs (Roughness, Anisotropy, Rotation of lobe 1, Rotation of lobe 2) for the class-4 lobes.
+
+    R = r1 r2 keeps alpha_x alpha_y = a_t a_b; A = (1 - (min r / max r)^4) / 0.9 gives their ratio. Cycles has no negative
+    anisotropy, so when the second gloss is the rougher one the tangent is turned a quarter (Cycles' x axis onto b). The
+    ratio is capped at 1 / (1 - 0.9) = 10 (CYCLES_MAX_ANISOTROPY), keeping the product."""
+    r1, r2 = gloss_roughness(gloss), gloss_roughness(second_field * SECOND_GLOSS_STEP)
+    anisotropy = min((1.0 - (min(r1, r2) / max(r1, r2)) ** 4) / 0.9, CYCLES_MAX_ANISOTROPY)
+    quarter = 0.25 if r1 < r2 else 0.0
+    return r1 * r2, anisotropy, quarter, quarter + rotation_field * ROTATION_STEP / (2.0 * math.pi)
 

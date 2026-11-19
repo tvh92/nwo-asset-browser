@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.games.rcra import blender_export, surface as rsurface
+from rc2016.games.rcra import blender_export, lighting, surface as rsurface
 
 CHECK_SCRIPT = Path(__file__).resolve().parents[2] / 'export' / 'rcra_blender_check.py'
 # Forward view inputs for the bake: a camera 3 units in front of the plane, seen at an angle (game space; the plane's
@@ -161,6 +161,9 @@ def expected(entry, size, source=None):
                 else:
                     for name, keys in TERMS.items():
                         out[name].append([terms.get(k, 0.0) for k in keys])   # unlit: 0 without the terms
+                    if lighting.anisotropic(entry['recipe']):   # the class-4 fields the anisotropic group reads
+                        out['extra_a'].append([terms['extra.%d' % k] for k in range(3)])
+                        out['extra_b'].append([terms['extra.3'], terms['extra.4'], 0.0])
                     n = np.array([terms['normal.x'], -terms['normal.z'], terms['normal.y']])   # game -> Blender
                     out['normal'].append(list(n / max(np.linalg.norm(n), 1e-12)))
                     out['alpha'].append([0.0 if terms['clip'] else 1.0] * 3)

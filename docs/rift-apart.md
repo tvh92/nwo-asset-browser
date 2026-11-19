@@ -723,7 +723,7 @@ Classes 1 to 5 read a fifth target, `g_GBufExtra`. It is the writer's `SV_Target
 
 The class programs, as their translations read:
 - **Cloth:** sheen from a Charlie distribution (`(2 + 1/α) sin^(1/α)θ`) with the Neubelt visibility `1 / (4 (NL + NV − NL·NV))`, coloured by F0. It is mixed with GGX by the sheen field, both on the second normal, with r = `0.9725 − 0.6011 gloss`. The diffuse wraps by the wrap field.
-- **Anisotropic:** the average of two GGX lobes on a tangent frame turned by the rotation field. The roughnesses are r⁴ from gloss and from the second gloss.
+- **Anisotropic:** Lambert, plus the average of two anisotropic GGX lobes, `D = 1 / (αt αb (h·n² + h·t² / αt² + h·b² / αb²)²)`. Lobe 1 sits on the G-buffer tangent t (decoded like the writers' octahedral normal) with b = normalize(n × t); lobe 2 on t turned about n by the rotation field × 0.04987 rad. Both have αt = r(gloss)⁴ along the tangent and αb = r(second gloss / 127)⁴ across it. The visibility is separable, `0.25 / ((v·h (1 − k²) + k²)(n·l (1 − k²) + k²))` with k = (0.75 min(αt, αb) + 0.25 max(αt, αb) + 1) / √8, and the Fresnel is Schlick on v·h (`lighting.anisotropic_lobes`; `test_class_4_is_two_anisotropic_ggx_lobes` matches the translated program within 1 %).
 - **Subsurface:** two GGX lobes, mixed by view depth. Transmission through the shadow map's depth, shaped by the skin profile, plus a Henyey–Greenstein scatter lobe (g = 0.65) scaled by the scatter field. The skin pass (`0x33CC4FC`) blurs the diffuse light in screen space with the skin profiles, then adds the specular.
 - **Foliage:** wrapped diffuse plus back transmission, `(1 − sat(N·L + 0.9)²) sat((w − N·L) / (1 + w)²)`, scaled by the transmittance field.
 - **Hair:** lobes shifted along the strand tangent, and transmission.
@@ -1031,7 +1031,18 @@ The BRDF group follows the deferred apply program:
 
 Light strength is π × the game's light colour, as for R&C 2016. Cycles uses the exact Smith term rather than the game's joint approximation. The game applies occlusion to ambient light only, which Cycles cannot separate; the group's "Occlusion on diffuse" input (default 0) applies it to the diffuse colour instead.
 
-The group is the class-0 BRDF. Cycles has no closure that runs another apply program per light, so materials of lighting classes 1 to 5 ([Lighting classes](#lighting-classes)) take it too, and their limitations say so (`blender_export.CLASS_LIMITATION`). The glTF export's roughness is r² for the same reason (`models.rcra_roughness`).
+The group is the class-0 BRDF. Cycles has no closure that runs another apply program per light. Class 4 ([Lighting classes](#lighting-classes)) has its own group, because Cycles' anisotropic GGX is the program's lobe. Classes 1, 2, 3 and 5 take the class-0 group, and their limitations say so (`blender_export.CLASS_LIMITATION`): no closure has their wrapped diffuse, Charlie sheen, Henyey–Greenstein scatter, view-depth lobe mix or strand lobes. The glTF export's roughness is r² for the same reason (`models.rcra_roughness`).
+
+**Anisotropic group** (class 4, "RC RA Anisotropic BRDF", `rcra_blender.build_anisotropic_group`). It has the class-0 diffuse, self-lit and occlusion terms. Its specular is two Metallic BSDFs (GGX, F82 with a white edge tint), mixed at 0.5. The surface group passes the five G-buffer fields as `Extra 0` to `Extra 4`. The group decodes the tangent from them, turns it into Blender space and maps the lobes with `lighting.cycles_anisotropic`:
+
+| Cycles input | Value |
+| --- | --- |
+| Roughness | r1 r2, with r1 = r(gloss) and r2 = r(second gloss), so Cycles' αx αy = αt αb |
+| Anisotropy | (1 − (min r / max r)⁴) / 0.9, the game's αt / αb |
+| Tangent | the decoded G-buffer tangent |
+| Rotation | lobe 1: 0; lobe 2: the rotation field's angle / 2π. Both turn a further quarter when r2 > r1: Cycles has no negative anisotropy, so its x axis goes onto b |
+
+Cycles' mapping was measured in Blender 5.0 with single-sun renders of a plane against the analytic lobe, within 4 × 10⁻⁶: αx = R² / √(1 − 0.9 A) along the tangent, αy = R² √(1 − 0.9 A), A clamped to [0, 1], Rotation turning the tangent right-handed about the normal. So the ratio of the two alphas caps at 10, keeping their product. Two limitations are labelled (`blender_export.ANISOTROPIC_LIMITATION`): Cycles uses the exact anisotropic Smith term where the game uses its separable approximation, and Cycles makes the tangent orthogonal to the normal. `test_blender_anisotropic_group_renders_the_class_4_lobes` renders the group in Cycles and compares it with the analytic lobes of the mapping, within 10⁻⁴. `blender_check` also bakes the fields (`extra_a`, `extra_b`): on Clank's body they agree with the recipe except at under 1 % of texels, by one integer step. Clank's body, head and limbs materials take the group.
 
 ### Blended materials
 
@@ -1099,8 +1110,9 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 ### Not translated
 
 - **Blended materials that read the scene behind in scene mode** (27 of 1,747): Blender gets their G-buffer surface, opaque.
-- **Forward lighting in Blender:** Blender's lights shade the G-buffer surface, which assumes that the forward program lights the same terms as the deferred apply. The viewer uses the program's own key-light term ([Own key light](#own-key-light)). Only that term is used: the programs' local light lists, probes and reflections are not (the review rig has no light grid).
-- **Lighting classes in Blender:** classes 1 to 5 are lit with the class-0 BRDF there; the viewer runs their own programs ([Lighting classes](#lighting-classes)). The viewer does not draw the skin pass's screen-space blur, the shadow-map thickness behind transmission, or the skin profiles, which read 1.
+- **Forward lighting in Blender:** Blender's lights shade the G-buffer surface, which assumes that the forward program lights the same terms as the deferred apply. The viewer uses the program's own key-light term ([Own key light](#own-key-light)). Only that term is used: the programs' local light lists, probes and reflections are not (the review rig has no light grid). The probe and ambient terms also read the BRDF lookup (`g_BrdfLookup`, a 2D array), which no texture asset holds. In the exe, the SM5 programs that bind it only read it, and its source is not traced. So the review environment cannot stand in for the probes without an inferred table.
+- **Lighting classes in Blender:** classes 1, 2, 3 and 5 are lit with the class-0 BRDF there, class 4 with its own lobes (above); the viewer runs every class's own program ([Lighting classes](#lighting-classes)).
+- **Skin:** the viewer does not draw the skin pass's screen-space blur, the shadow-map thickness behind transmission (the model viewer has no shadow maps), or the skin profiles, which read 1. `g_SkinProfiles` is a 1D texture that no SM5 program in the exe writes (only the class-1 apply program and the skin pass read it), so the engine fills it on the CPU, and that code is not traced.
 - **Opaque materials on forward techniques** (245 materials, 44 of them eyes; [Techniques](#techniques)): 232 draw from their forward program.
   - 73 draw with its diffuse coefficient as albedo, 36 of them eyes (`basic_eye`, the crowd eyeballs, `eye_colortint_random`).
   - 44 draw with an albedo and an unlit colour, 6 of them eyes (`eye_emissive`, `basic_eye_holo`, `basic_eye_dimensional`), the rest flares, arcs, glows, and the jellies and gels whose key and ambient light share one albedo.

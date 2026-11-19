@@ -65,6 +65,13 @@ VOLUME = 'volume'
 CUBE = 'cube'   # a layout is (CUBE, index of the cube in the array)
 CLASS_LIMITATION = ('Blender lights this material with the class-0 BRDF: the game applies lighting class %d (%s) with its own '
                     'apply program, which Cycles has no closure for (the viewer draws it, rc2016.games.rcra.lighting).')
+# Class 4: Cycles' anisotropic GGX has the program's lobes (rc2016.games.rcra.lighting.cycles_anisotropic).
+ANISOTROPIC_LIMITATION = ('Lighting class 4 (anisotropic): Blender averages two anisotropic GGX lobes as the class-4 apply '
+                          'program does, on the G-buffer tangent and on it turned by the rotation field, with alpha r^4 '
+                          'from the gloss along the tangent and from the second gloss across it (Metallic BSDF, F82 with a '
+                          'white edge: Schlick, F90 = 1). Cycles uses the exact anisotropic Smith term where the game uses '
+                          'a separable approximation, makes the tangent orthogonal to the normal, and caps the ratio of '
+                          'the two alphas at 10, keeping their product.')
 CUBE_LIMITATION = 'Cube map %s resampled to an equirectangular image (filtering differs at face seams and poles).'
 # D3D / GL cube lookup (the same table): per face +X, -X, +Y, -Y, +Z, -Z, the major axis and the (sc, tc) axes with signs.
 CUBE_FACE_AXES = (((0, 1.0), (2, -1.0), (1, -1.0)), ((0, -1.0), (2, 1.0), (1, -1.0)),
@@ -469,7 +476,9 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
     if 'recipe' in results:
         limitations += results['recipe']['limitations']
         cls = results['recipe']['graph'].value(results['recipe']['terms']['class'])
-        if cls:
+        if lighting.anisotropic(recipes['recipe']):
+            limitations.append(ANISOTROPIC_LIMITATION)
+        elif cls:
             limitations.append(CLASS_LIMITATION % (int(cls), lighting.CLASS_NAMES[int(cls)]))
     limitations += [CUBE_LIMITATION % binding for binding, row in sorted(images.items()) if 'cube' in row]
     limitations += [
