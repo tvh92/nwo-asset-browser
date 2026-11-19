@@ -27,8 +27,11 @@ binding's layout is 'slice' (one 2D texture), 'array' (a padded atlas of every s
 table and the top-row-first face images, so the lookup returns the D3D texel; the top mip, the program's explicit mip level
 is not applied).
 
-Lighting is the Rift Apart deferred BRDF on the viewer's review rig (docs/rift-apart.md): GGX with alpha = (0.9725 - 0.7514
-gloss)^2, the Smith joint visibility approximation, Schlick with F90 = 1, Lambert; occlusion on ambient light only.
+Lighting: each light of the viewer's review rig (key, fill, preview) is applied by the material's lighting class's own
+apply program, translated (rc2016.games.rcra.lighting.direct, the receipt's ``lighting`` recipe), emitted as the function
+rcraLight and called once per light. Ambient light is the rig's, with the class-0 BRDF (GGX alpha = r^4, r = 0.9725 -
+0.7514 gloss) and occlusion on ambient light only. A receipt without a lighting recipe takes the class-0 BRDF for its
+lights too: Smith joint visibility approximation, Schlick with F90 = 1, Lambert.
 """
 from __future__ import annotations
 
@@ -37,7 +40,7 @@ import hashlib
 import json
 import math
 
-EMITTER_VERSION = 3
+EMITTER_VERSION = 4
 PASS_UNIFORM = 'uRcraPass'   # forward programs: 0 the multiply pass (background factor), 1 the colour pass
 COLOUR_VARYING = 'vRcraColour'
 GEOMETRY = {'TEXCOORD.x': 'vUV.x', 'TEXCOORD.y': 'vUV.y', 'TEXCOORD1.x': 'vUV1.x', 'TEXCOORD1.y': 'vUV1.y',
@@ -85,8 +88,9 @@ def uniform(binding):
 
 
 class _Emitter:
-    def __init__(self, recipe, layouts, prefix):
+    def __init__(self, recipe, layouts, prefix, inputs=None):
         self.recipe, self.layouts, self.prefix = recipe, layouts, prefix
+        self.inputs = GEOMETRY if inputs is None else inputs
         self.lines, self.names, self.samples = [], {}, {}
 
     def value(self, i):
@@ -99,9 +103,9 @@ class _Emitter:
             self.names[i] = expr
             return expr
         if op == 'input':
-            if n['name'] not in GEOMETRY:
+            if n['name'] not in self.inputs:
                 raise ValueError('Recipe input not available in the viewer: ' + n['name'])
-            self.names[i] = GEOMETRY[n['name']]
+            self.names[i] = self.inputs[n['name']]
             return self.names[i]
         if op == 'channel':
             expr = self.sample(args[0]) + '.' + 'rgba'[n['index']]
@@ -194,7 +198,7 @@ vec4 rcraVolume(sampler2D t, vec2 uv, float z, float n, vec4 g) {
     float s = z * n - 0.5, k = floor(s);
     return mix(rcraTile(t, uv, mod(k, n), g), rcraTile(t, uv, mod(k + 1.0, n), g), s - k);
 }
-// Rift Apart deferred BRDF (class-0 apply program) on the review rig.
+// Rift Apart deferred BRDF (class-0 apply program) on the review rig: GGX alpha = r^4, r = 0.9725 - 0.7514 gloss.
 float rcraVisibility(float NdL, float NdV, float a) {
     return 0.5 / max(NdL * (NdV * (1.0 - a) + a) + NdV * (NdL * (1.0 - a) + a), 1e-6);
 }
@@ -212,16 +216,123 @@ vec3 rcraDiffuse(vec3 N, vec3 albedo, float occlusion) {
     return albedo * ((max(dot(N, rigKey()), 0.0) * keyColour() + max(dot(N, rigFill()), 0.0) * fillColour()
         + ambientLight(N) * occlusion) / PI * diffuseScale() + preview);
 }
+float rcraAlpha(float gloss) { float r = 0.9725 - 0.7514 * clamp(gloss, 0.0, 1.0); r *= r; return r * r; }
 vec3 rcraSpecular(vec3 N, vec3 V, vec3 F0, float gloss) {
     if (!uLightingEnabled) return vec3(0.0);
-    float r = 0.9725 - 0.7514 * clamp(gloss, 0.0, 1.0), a = r * r;
+    float a = rcraAlpha(gloss);
     vec3 previewL; float previewW = previewLightWeight(previewL);
     vec3 S = rcraLobe(N, V, rigKey(), F0, a) * keyColour() + rcraLobe(N, V, rigFill(), F0, a) * fillColour()
         + envSpecular(N, V, F0, vec3(1.0), a, ambientLight(N));
     if (previewW > 0.0) S += rcraLobe(N, V, previewL, F0, a) * uPreviewLightColour * previewW;
     return S;
 }
+// The rig's ambient light alone: diffuse with occlusion, and the environment's specular (class-0 BRDF).
+vec3 rcraAmbient(vec3 N, vec3 V, vec3 albedo, vec3 F0, float gloss, float occlusion) {
+    vec3 ambient = ambientLight(N);
+    return albedo * ambient * occlusion / PI * diffuseScale() + envSpecular(N, V, F0, vec3(1.0), rcraAlpha(gloss), ambient);
+}
 """
+
+# Inputs of a lighting recipe (rc2016.games.rcra.lighting.INPUTS and the class's extra fields) -> rcraLight parameters, in
+# game space: N the world normal, VIEW the camera-to-point offset, DEPTH the view depth, L the direction to the light and
+# LIGHT its colour (the game's convention: diffuse = albedo x N.L x LIGHT, so LIGHT = the rig colour / pi).
+LIGHT_INPUTS = {'normal.x': 'rN.x', 'normal.y': 'rN.y', 'normal.z': 'rN.z', 'VIEW.x': 'rView.x', 'VIEW.y': 'rView.y',
+                'VIEW.z': 'rView.z', 'DEPTH': 'rDepth', 'albedo.r': 'rA.r', 'albedo.g': 'rA.g', 'albedo.b': 'rA.b',
+                'f0.r': 'rF.r', 'f0.g': 'rF.g', 'f0.b': 'rF.b', 'gloss': 'rG', 'occlusion': 'rO', 'extra.0': 'rE.x',
+                'extra.1': 'rE.y', 'extra.2': 'rE.z', 'extra.3': 'rE.w', 'extra.4': 'rE4', 'L.x': 'rL.x', 'L.y': 'rL.y',
+                'L.z': 'rL.z', 'LIGHT.r': 'rC.r', 'LIGHT.g': 'rC.g', 'LIGHT.b': 'rC.b'}
+LIGHT_SIGNATURE = ('vec3 rcraLight(vec3 rN, vec3 rView, float rDepth, vec3 rA, vec3 rF, float rG, float rO, vec4 rE, '
+                   'float rE4, vec3 rL, vec3 rC, float rKd)')
+# Each rig light through rcraLight: L and the normal turned from view space into the game's world frame (vNativeToView
+# maps native vectors to view space; its transpose turns back, up to scale), LIGHT = the rig colour / pi. The diffuse factor
+# rKd keeps the rig's balance: diffuseScale() for key and fill, pi for the preview light, whose rig colour is not over pi.
+CLASS_LIT = """
+vec3 rcraClassLit(vec3 Nv, vec3 Vv, vec3 albedo, vec3 F0, float gloss, float occlusion, vec3 Nw, vec4 E, float E4) {
+    if (!uLightingEnabled) return albedo;
+    vec3 lit = rcraAmbient(Nv, Vv, albedo, F0, gloss, occlusion);
+    vec3 n = dot(Nw, Nw) > 0.0 ? normalize(Nw) : normalize(Nv * vNativeToView);
+    vec3 view = vTintViewOffset; float depth = max(-vPos.z, 1e-4);
+    lit += rcraLight(n, view, depth, albedo, F0, gloss, occlusion, E, E4, normalize(rigKey() * vNativeToView),
+                     keyColour() / PI, diffuseScale());
+    if (dot(fillColour(), vec3(1.0)) > 0.0)
+        lit += rcraLight(n, view, depth, albedo, F0, gloss, occlusion, E, E4, normalize(rigFill() * vNativeToView),
+                         fillColour() / PI, diffuseScale());
+    vec3 previewL; float previewW = previewLightWeight(previewL);
+    if (previewW > 0.0)
+        lit += rcraLight(n, view, depth, albedo, F0, gloss, occlusion, E, E4, normalize(previewL * vNativeToView),
+                         uPreviewLightColour * previewW / PI, PI);
+    return lit;
+}
+"""
+
+
+def light_source(recipe):
+    """GLSL of rcraLight and rcraClassLit for a lighting recipe: the class's apply program, one statement per node,
+    returning albedo x diffuse x rKd + specular."""
+    emitter = _Emitter(recipe, {}, 'l', inputs=LIGHT_INPUTS)
+    t = emitter.term
+    diffuse = 'vec3(%s, %s, %s)' % (t('diffuse.r'), t('diffuse.g'), t('diffuse.b'))
+    specular = 'vec3(%s, %s, %s)' % (t('specular.r'), t('specular.g'), t('specular.b'))
+    lines = emitter.lines
+    if any('rcraInf' in line or 'rcraNan' in line for line in lines):
+        lines.insert(0, NON_FINITE_LINE)
+    body = '\n'.join(lines + ['    return rA * %s * rKd + %s;' % (diffuse, specular)])
+    return '\n// Lighting class %d: apply program at 0x%X, translated (rc2016.games.rcra.lighting)\n%s {\n%s\n}\n%s' % (
+        recipe.get('lighting_class', 0), recipe.get('offset', 0), LIGHT_SIGNATURE, body, CLASS_LIT)
+
+
+class _PerLightEmitter(_Emitter):
+    """An _Emitter for a recipe of the light inputs L.xyz and LIGHT.rgb, emitted once per light: statements that read no
+    light input are emitted once and shared; the others again for each light (``light``), all at the top level."""
+
+    def __init__(self, recipe, layouts, prefix):
+        super().__init__(recipe, layouts, prefix, inputs=dict(GEOMETRY))
+        nodes = recipe['nodes']
+        self.dependent = set()
+        for i, n in enumerate(nodes):   # arguments precede their users
+            if (n['op'] == 'input' and n['name'].startswith(('L.', 'LIGHT.'))) or any(a in self.dependent for a in n['args']):
+                self.dependent.add(i)
+        self.base = prefix
+
+    def light(self, k, direction, colour):
+        for cache in (self.names, self.samples):
+            for i in [i for i in cache if i in self.dependent]:
+                del cache[i]
+        self.prefix = '%s%d_' % (self.base, k)
+        self.inputs = dict(GEOMETRY, **{'L.' + c: '%s.%s' % (direction, c) for c in 'xyz'},
+                           **{'LIGHT.' + c: '%s.%s' % (colour, c) for c in 'rgb'})
+
+
+# The review rig's lights for a forward program's own key-light term: direction to the light in the game's world frame and
+# its colour in the game's convention (diffuse = albedo x N.L x LIGHT): the rig colour / pi.
+FORWARD_LIGHTS = (('rcraKeyL', 'normalize(rigKey() * vNativeToView)', 'rcraKeyC', 'keyColour() / PI'),
+                  ('rcraFillL', 'normalize(rigFill() * vNativeToView)', 'rcraFillC', 'fillColour() / PI'),
+                  ('rcraPreviewL', 'normalize(rcraPreviewDir * vNativeToView)', 'rcraPreviewC',
+                   'uPreviewLightColour * rcraPreviewW / PI'))
+
+
+def forward_light_lines(recipe, layouts):
+    """Statements adding the forward program's own key-light term for each review light to rcraOwn: colour(L, LIGHT) -
+    colour, the forward colour rcraColour having LIGHT = 0."""
+    emitter = _PerLightEmitter(recipe, layouts, 'k')
+    lines = ['    vec3 rcraOwn = vec3(0.0);',
+             '    vec3 rcraPreviewDir; float rcraPreviewW = uLightingEnabled ? previewLightWeight(rcraPreviewDir) : 0.0;',
+             '    if (rcraPreviewW <= 0.0) rcraPreviewDir = vec3(0.0, 0.0, 1.0);']
+    for k, (direction, d_expr, colour, c_expr) in enumerate(FORWARD_LIGHTS):
+        lines.append('    vec3 %s = %s; vec3 %s = %s;' % (direction, d_expr, colour, c_expr))
+        emitter.light(k, direction, colour)
+        start = len(emitter.lines)
+        t = emitter.term
+        value = 'vec3(%s, %s, %s)' % (t('colour.r'), t('colour.g'), t('colour.b'))
+        lines += emitter.lines[start:]
+        lines.append('    rcraOwn += %s - rcraColour;' % value)
+    return lines
+
+
+def _extra_arguments(emitter):
+    """The vec4 and float of a surface's extra fields (terms extra.0 to extra.4) for rcraClassLit."""
+    t = emitter.term
+    return 'vec4(%s, %s, %s, %s)' % (t('extra.0'), t('extra.1'), t('extra.2'), t('extra.3')), t('extra.4')
 
 
 @functools.lru_cache(maxsize=1)
@@ -324,10 +435,25 @@ def fragment_source(receipt):
             forward.lines.append('    rcraBackground += %s * rcraDiffuse(%s, vec3(1.0), 1.0);'
                                  % (lit_tint, 'rcraNormal' if surface else 'N'))
         body += forward.lines
+        own = receipt['forward'].get('lit') if blend in ('blended', 'additive') else None
+        if own:   # the program's own key-light term per review light (surface.forward_lighting)
+            body += forward_light_lines(own, layouts)
     if blend == SHELL_BLEND:   # the layer is culled past the strand (vFurShell.w), its coverage is its alpha
         body.insert(0, '    if (vFurShell.w > 0.5) discard;')
-    lit = ('rcraDiffuse(rcraNormal, rcraAlbedo, rcraOcclusion) + rcraSpecular(rcraNormal, V, rcraF0, rcraGloss)'
-           if surface else 'vec3(0.0)')
+    lighting = receipt.get('lighting') if surface else None
+    if lighting:
+        start = len(surface.lines)
+        extra, extra4 = _extra_arguments(surface)
+        body += surface.lines[start:]   # the extra terms' statements
+        lit = ('rcraClassLit(rcraNormal, V, rcraAlbedo, rcraF0, rcraGloss, rcraOcclusion, rcraWorldN, %s, %s)'
+               % (extra, extra4))
+    else:
+        lit = ('rcraDiffuse(rcraNormal, rcraAlbedo, rcraOcclusion) + rcraSpecular(rcraNormal, V, rcraF0, rcraGloss)'
+               if surface else 'vec3(0.0)')
+    if forward is not None and receipt['forward'].get('lit') and blend in ('blended', 'additive'):
+        # the program lights itself: its own term per light, plus the surface's ambient light (the program's is 0)
+        lit = ('rcraOwn + (uLightingEnabled ? rcraAmbient(rcraNormal, V, rcraAlbedo, rcraF0, rcraGloss, rcraOcclusion) '
+               ': vec3(0.0))' if surface else 'rcraOwn')
     if blend == 'opaque':
         if surface is None:
             raise ValueError('An opaque receipt needs a surface recipe')
@@ -340,7 +466,8 @@ def fragment_source(receipt):
     else:
         factor = ('mix(vec3(1.0), rcraBackground, rcraAlpha)' if blend == 'blended'
                   else 'vec3(1.0) + rcraAlpha * rcraBackground')
-        colour = '(%s + rcraColour) * rcraAlpha' % lit if blend == 'blended' else 'rcraColour * rcraAlpha'
+        colour = ('(%s + rcraColour) * rcraAlpha' % lit if blend == 'blended' or 'rcraOwn' in lit
+                  else 'rcraColour * rcraAlpha')
         body.append('    if (%s == 0) { sceneOutput(vec4(%s, 1.0)); return; }' % (PASS_UNIFORM, factor))
         body.append('    sceneOutput(vec4(display(%s), rcraAlpha));' % colour)
     declarations = '\n'.join('uniform %s %s;' % ('samplerCube' if layouts[b]['kind'] == 'cube' else 'sampler2D', uniform(b))
@@ -350,11 +477,13 @@ def fragment_source(receipt):
         declarations += 'varying vec4 vFurShell;   // shell_vertex_source: 32 t\', offset term, base flag, culled\n'
     if scene:
         declarations += 'uniform sampler2D uSceneColour; uniform vec4 uSceneDepthInfo;   // frame copy, viewport size\n'
-    if any('rcraInf' in line or 'rcraNan' in line for line in body):
+    light = light_source(lighting) if lighting else ''
+    if any('rcraInf' in line or 'rcraNan' in line for line in body) or 'rcraInf' in light or 'rcraNan' in light:
         declarations += NON_FINITE_DECLARATION
+    if any('rcraInf' in line or 'rcraNan' in line for line in body):
         body.insert(0, NON_FINITE_LINE)
     from rc2016.viewer.native_glsl import FRAME_HELPERS, HELPERS as NATIVE_HELPERS
-    source = (_prefix() + declarations + NATIVE_HELPERS + FRAME_HELPERS + HELPERS + '\nvoid main() {\n'
+    source = (_prefix() + declarations + NATIVE_HELPERS + FRAME_HELPERS + HELPERS + light + '\nvoid main() {\n'
               '    vec3 N = normalize(vNrm) * (gl_FrontFacing ? 1.0 : -1.0); sceneCaptureNormal = N;\n'
               '    vec3 V = normalize(-vPos);\n' + '\n'.join(body) + '\n}\n')
     key = (EMITTER_VERSION, receipt['translation_sha256'], hashlib.sha256(source.encode()).hexdigest())
@@ -366,6 +495,8 @@ def reads_scene(recipe):
     return any(n['op'] == 'input' and n.get('name', '').startswith('BACKGROUND.') for n in recipe['nodes'])
 
 
-def receipt_sha256(surface, forward, blend, layouts):
+def receipt_sha256(surface, forward, blend, layouts, lighting=None):
     payload = dict(version=EMITTER_VERSION, surface=surface, forward=forward, blend=blend, layouts=layouts)
+    if lighting:
+        payload['lighting'] = lighting
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()

@@ -43,7 +43,7 @@ The portable export (GLB, glTF, OBJ) writes only what is decoded, through `rc201
 
 - Each material's base colour and its normal map, at full resolution.
 - F0, gloss and occlusion where the material's own G-buffer writer reads them as plain [`_g` and `_m` channels](#_g-and-_m-channels) (`rcra_export.decoded_maps`). The translated surface terms are evaluated at six random sets of inputs and texels. A layout counts only when gloss and F0 equal its `_g` channels within the G-buffer's 8-bit rounding at every probe, and occlusion only when it equals `_m` blue, each sampled at UV0 and array slice 0.
-  - F0 and gloss are converted to glTF metal/roughness with the Khronos spec-gloss conversion (as for R&C 2016). Roughness is `0.9725 − 0.7514 gloss`, so glTF's GGX alpha (roughness²) is the game's. The game's Lambert diffuse without glTF's energy split is not reproduced.
+  - F0 and gloss are converted to glTF metal/roughness with the Khronos spec-gloss conversion (as for R&C 2016). Roughness is (`0.9725 − 0.7514 gloss`)², so glTF's GGX alpha (roughness²) is the game's r⁴ ([G-buffer and deferred lighting](#g-buffer-and-deferred-lighting)). The game's Lambert diffuse without glTF's energy split is not reproduced.
   - Occlusion is the red channel of the metal/rough image, which glTF's `occlusionTexture` reads. OBJ has no occlusion map.
   - Over the install: 745 materials take the red and green layout and 638 the rgb and alpha layout; about 1,130 take occlusion. The others keep the stand-in: their writer has no `_g` slot, mixes these channels with vertex colour, the normal or other textures, samples `_g` at a tiled UV, or does not translate. Each material's notes give the reason.
 - Emission where the G-buffer writer's self-lit term (albedo × E) has a plain `_c` albedo, and E is a constant K or K times one channel of `_c`, `_g` or `_m` at UV0, at every probe (`rcra_export.decoded_emission`). The emissive map is `_c` times that channel, at strength K (`KHR_materials_emissive_strength`). Over the install, 208 materials carry it: 199 as `_m` red, 8 as a constant and 1 as `_g` green. The writers of 1,052 others tint the self-lit albedo, and 100 use another form; their notes say so.
@@ -537,6 +537,7 @@ Every `.materialgraph` carries its compiled programs, and the engine's own passe
 | `rc2016/shaders/dxbc.py` | DXBC container: chunks, RDEF reflection (constant buffers with struct members, bindings), signatures, and the SM4/SM5 token stream. DXIL containers are identified only. |
 | `rc2016/shaders/sm5.py` | SM5 program to a typed expression DAG, with a numeric evaluator. |
 | `rc2016/games/rcra/shaders.py` | Pass table, pass programs, the generic material binding and the neutral engine profile. |
+| `rc2016/games/rcra/lighting.py` | The engine's per-class deferred apply programs, found in the exe and translated into one direct-light recipe per class ([Lighting classes](#lighting-classes)). |
 
 ### Programs in a graph
 
@@ -615,13 +616,18 @@ With the neutral profile, over all programs (`ready` means no output depends on 
 | Forward 1 | 356 fully, 1,073 in part, 45 not at all | 552 of 5,692 fully |
 | Vertex 3, 7, 10, 13, 17 | 194 of 208 | 526 of 583 |
 
+These counts take the neutral profile alone: no material constants or textures and no engine resources. What stays unknown in them is engine data that profile leaves unbound: per-object and per-material records, the scene G-buffer and depth, light-grid and probe buffers. The bindings the browser uses resolve them:
+- **G-buffer writers:** 5,712 of 5,721 materials translate ([Surface terms](#surface-terms)). The other nine have no graph in the install.
+- **Forward programs:** 1,744 of 1,747 blended materials ([Forward profile](#forward-profile)). The forward programs' own key-light term translates for 678 of the 792 lit ones ([Own key light](#own-key-light)).
+
 With the vertex bindings of [Vertex programs](#vertex-programs), which bind the vertex streams and leave the force-field bitset empty, all five vertex slots translate for the 207 graphs that materials use (583 of 583 uses); the 208th, `gbl_displacement_singularity`, has no material.
 
-The forward programs still in part keep further engine loops, so their outputs need more engine inputs bound. Not translated:
-- groupshared memory
-- tessellation control-point inputs (3 graphs)
-- UAV atomics
-- the DXIL-only raytracing libraries
+**Other program features.** The translator also takes:
+- **Tessellation:** a domain program's control points (`vicp`, inputs `CP<n>.<semantic>.<c>` from the input signature), patch constants (`vpc`, `PATCH.<semantic>.<c>` from the `PCSG` signature) and `vDomain` are inputs. Components are named by register component, as interpolants are. The six domain programs in the graphs (`amb_uwb_jellyfish` and the two `hero_thin_thrust_exhaust` graphs, slots 2 and 6) translate fully.
+- **UAV writes:** `store_raw`, `store_structured` and the UAV atomics are kept in `Translation.stores` with their operation, address and predicate. The value an `imm_atomic_*` returns is memory that other threads write, so it is `unknown`.
+- **Groupshared memory** (per thread): a `ld_raw` or `ld_structured` of `g#` at the same address node and byte offset as this thread's last store returns that value. Any other read is a value another thread wrote: `unknown`. An atomic on an address, or a store at a run-time offset, drops this thread's values there. No graph program uses groupshared memory or atomics; engine compute programs do.
+
+Not translated: the DXIL-only raytracing libraries (`IGRS` entries, 395 graphs). They need an LLVM bitcode reader, which `dxbc` does not have.
 
 ### G-buffer and deferred lighting
 
@@ -638,10 +644,47 @@ The class-0 apply program (exe offset 59122268) gives the deferred BRDF. It is n
 
 | Term | Rift Apart |
 | --- | --- |
-| GGX | `α = (0.9725 − 0.7514 gloss)²` |
+| GGX | `α = r⁴`, r = `0.9725 − 0.7514 gloss` (the program squares r three times: r², r⁴, r⁸ = α²) |
 | Visibility | Smith joint approximation, `0.5 / (NL (NV (1 − α) + α) + NV (NL (1 − α) + α))` |
 | Fresnel | Schlick, F90 = 1 |
 | Diffuse | Lambert `sat(N·L)`, no 1/π, times the light colour |
+
+At 300 random inputs the translated program matches this form within 0.9 % (the 12-bit normal). The form with α = r² differs by up to 370 %.
+
+### Lighting classes
+
+The writer stores a lighting class in bits 13 to 15 of NormalSpec x; bit 12 set means class 0 whatever those bits hold. Each class has its own apply program in the exe. `lighting.find_programs` finds them by the class test at their start, `ubfe(3, 13, NormalSpec.x)` against the class:
+- Of the two programs that test classes 1 and 2 together, the one that binds `g_SkinProfiles` applies class 1 and the other class 2.
+- Per class it takes the smallest program without the rain inputs (`g_WeatherPorosityMap`).
+
+Classes 1 to 5 read a fifth target, `g_GBufExtra`. It is the writer's `SV_Target3`, one u32 whose fields the apply program reads at fixed bit offsets (`lighting.EXTRA_FIELDS`):
+
+| Class | Writers (graphs) | Apply program | `g_GBufExtra` fields (bit offset, width) |
+| --- | --- | --- | --- |
+| 0 | the rest (862 with bit 12 clear, 556 with it set) | `0x386225C` | none |
+| 1 subsurface | 15: skin and heads (`basic_normal_gloss_subsurface`, `basic_subsurface_head`), nymphs, dinosaurs | `0x383BE0C`, reads `g_SkinProfiles`; diffuse and specular to separate targets | (0, 3) scatter, (9, 6) transmission, (18, 7) and (25, 7) a second octahedral normal |
+| 2 cloth | 11 (`basic_normal_gloss_cloth`, `cloth_distressed`, hex platforms) | `0x37C962C` | (0, 8) and (8, 8) a second normal, (16, 5) sheen mix, (21, 6) scatter lobe, (27, 5) wrap |
+| 3 hair | the engine fur writer ([Fur materials](#fur-materials)) | `0x381EE4C` | (0, 9), (9, 9) and (18, 1) the strand tangent, (19, 7) transmittance, (26, 6) lobe shift |
+| 4 anisotropic | 7 (`basic_normal_gloss_aniso*`, `hero_armor_palette_aniso`) | `0x37E5A7C` | (0, 9), (9, 9) and (18, 1) the tangent, (19, 6) its rotation, (25, 7) a second gloss |
+| 5 foliage | 20 (`basic_normal_gloss_foliage`, canopies, shrubs, topiary, transmittance) | `0x380292C` | (0, 6), (6, 6) and (12, 6) the transmission colour, (18, 7) transmittance, (25, 7) wrap |
+
+The class programs, as their translations read:
+- **Cloth:** sheen from a Charlie distribution (`(2 + 1/α) sin^(1/α)θ`) with the Neubelt visibility `1 / (4 (NL + NV − NL·NV))`, coloured by F0. It is mixed with GGX by the sheen field, both on the second normal, with r = `0.9725 − 0.6011 gloss`. The diffuse wraps by the wrap field.
+- **Anisotropic:** the average of two GGX lobes on a tangent frame turned by the rotation field. The roughnesses are r⁴ from gloss and from the second gloss.
+- **Subsurface:** two GGX lobes, mixed by view depth. Transmission through the shadow map's depth, shaped by the skin profile, plus a Henyey–Greenstein scatter lobe (g = 0.65) scaled by the scatter field. The skin pass (`0x33CC4FC`) blurs the diffuse light in screen space with the skin profiles, then adds the specular.
+- **Foliage:** wrapped diffuse plus back transmission, `(1 − sat(N·L + 0.9)²) sat((w − N·L) / (1 + w)²)`, scaled by the transmittance field.
+- **Hair:** lobes shifted along the strand tangent, and transmission.
+
+**One light's term** (`lighting.direct`). Each class program is translated with these bindings:
+- **G-buffer:** packed from term inputs exactly as the writers pack it. NormalSpec gets the 12-bit normal, F0 square roots and gloss as bytes, the class bits and occlusion mode. DiffuseEmis gets albedo and occlusion, and `g_GBufExtra` the `extra.<k>` fields.
+- **The light:** one key light, direction `L` and colour `LIGHT`, unshadowed. The shadow atlas, cloud shadows, ray-traced shadows and gobo read 1, the point lies past every shadow shell, and the sunlight occlusion factor is 0.
+- **The view:** the camera-to-point offset `VIEW` and the view depth `DEPTH`.
+- **Everything else:** 0. That covers ambient fill, the light grid, probes, GI, SSR and the local light lists (empty).
+- **Skin profiles:** an engine texture filled at run time. They read 1, labelled.
+
+The packed fields read back exactly through `surface._integers_in_float` (`PACKED_NOTE`), as for the writers. Each output is split as `albedo × diffuse + specular`: the apply program multiplies its diffuse light by DiffuseEmis rgb, and for class 1 the skin pass does. The recipe holds the light's own term, the output minus its value with `LIGHT` = 0. That removes the hair program's light-independent ambient transmission, which comes from inputs bound to 1. Against the program translated without the integer-to-float rewrite, the recipes agree within 1.1 × 10⁻⁷ relative at 300 random inputs per class. The viewer's GLSL agrees with the recipes within 4 × 10⁻⁴ relative on the GPU.
+
+`surface.surface` returns the class as the constant term `class` and the fields as the terms `extra.<k>`: `ubfe` of the writer's `SV_Target3`, read back by the packed-field rewrite. At random inputs they equal the fields of the writer's word, on cloth, foliage, subsurface and anisotropic materials. A word that is a sum of fields, as the foliage writers pack it, is read as their or, under the same packing assumption. A writer that picks its class at run time (a select of packed words) is lit as class 0 and says so.
 
 ### Forward profile
 
@@ -668,6 +711,22 @@ A lit material's background coefficient could carry the forward lighting the pro
 **Scene mode.** A program that reads the scene behind other than as an affine tint keeps it: the screen blend curves of the holograms and camera panes (`bg < 0.5 ? 2ab : …`), a vignette's contrast power, the absolute value or saturate of a distorted scene, and particles that read one background channel into all three. `surface.forward` then returns the whole target with `BACKGROUND.rgba` as inputs and a background tint of 0 (`reads_scene`), labelled (`SCENE_NOTE`). A lit one qualifies only when its target reads the scene and the light sources in separate summands (`surface._separable` over the symbolic translation), so the scene passes through unlit. The symbolic values are the light sources only: the unbound `GlobalWorldCBuffer` constants and the lighting textures; view and draw settings (clip plane, depth of field, temporal jitter, alpha overrides) keep their profile values. The viewer samples the inputs from a copy of its frame taken before the batch; Blender has no node for the scene behind, so these materials keep their G-buffer surface there.
 
 **Texture kinds.** Material units are 2D arrays, sampled at a slice. 3D textures (flipbook volumes) are sampled trilinearly with a normalised depth ([Textures](#textures)). Cube maps (`TextureCube`, and a `TextureCubeArray` read at a constant cube index) are sampled along the direction the program computes (the first three address lanes, in game space). The explicit mip level, bias or gradients of a cube lookup are not applied: the top mip is read, and the result says so. An array read at a run-time index, or a cube read by `gather` or `ld`, is unsupported. A cube texture's slices are its faces, six per cube in the order +X, -X, +Y, -Y, +Z, -Z, top row first. A constant array index that is NaN (a per-object seed of 0 divided by 0) reads slice 0, as D3D converts NaN to the integer 0 (`blender_export._slice_index`), and one past the array reads its last slice, as D3D clamps an array index (`slice_index`). A texture the install does not hold gets the engine's default ([Missing textures](#missing-textures)).
+
+#### Own key light
+
+`surface.forward_lighting` translates a lit forward program again with the key light symbolic: direction `L.xyz` (to the light, game space) and colour `LIGHT.rgb`, unshadowed as `lighting.direct` binds it (past every shadow shell; the shadow atlas, ray-traced and cloud shadows read 1). Every other light source keeps the profile's 0. With `LIGHT` = 0 the colour is the profile's. It is kept only when it is linear in `LIGHT`, checked at random inputs and texels as colour(2C) − colour(0) = 2 (colour(C) − colour(0)). A renderer then adds colour(L, C) − colour per light.
+
+Over the 1,736 blended and additive materials with a graph:
+
+| Result | Materials |
+| --- | --- |
+| Lit, own key light translates | 678 |
+| Unlit (no lit bit: the program reads no light) | 944 |
+| Lit, but the colour reads no key light (local lights or ambient only) | 72 |
+| Lit, and the lit colour reads the scene behind | 33 |
+| Not linear in the light colour | 9 |
+
+The viewer draws the 678 with their own term per review light ([In the viewer](#in-the-viewer)). Blender has no per-light hook in a material, so it keeps lighting their G-buffer surface.
 
 #### Missing textures
 
@@ -909,11 +968,13 @@ The BRDF group follows the deferred apply program:
 
 | Term | Node |
 | --- | --- |
-| Specular | Metallic BSDF, GGX, roughness `0.9725 − 0.7514 gloss`, F82 Fresnel with a white edge tint (Schlick with F90 = 1) |
+| Specular | Metallic BSDF, GGX, roughness r² with r = `0.9725 − 0.7514 gloss`, so Blender's α (roughness²) is the game's r⁴; F82 Fresnel with a white edge tint (Schlick with F90 = 1) |
 | Diffuse | Diffuse BSDF, roughness 0 |
 | Self-lit | Emission: albedo at strength `E` |
 
 Light strength is π × the game's light colour, as for R&C 2016. Cycles uses the exact Smith term rather than the game's joint approximation. The game applies occlusion to ambient light only, which Cycles cannot separate; the group's "Occlusion on diffuse" input (default 0) applies it to the diffuse colour instead.
+
+The group is the class-0 BRDF. Cycles has no closure that runs another apply program per light, so materials of lighting classes 1 to 5 ([Lighting classes](#lighting-classes)) take it too, and their limitations say so (`blender_export.CLASS_LIMITATION`). The glTF export's roughness is r² for the same reason (`models.rcra_roughness`).
 
 ### Blended materials
 
@@ -953,7 +1014,7 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 | Undrawn materials | Batches of a material the plain instance draw skips ([Material alpha](#material-alpha)) are left out. The texture entry carries `not_drawn`, and the material list shows the note. |
 | Inputs | UV0 and UV1, the world normal, the decoded tangent and the whole `TEXCOORD3.w` (attribute `aTangent`, skinned with the vertex, interpolated as the game's interpolant; render flag 0x10000 clear), the vertex colour, front face, and the view from `vTintViewOffset`. A mesh without a tangent stream gets the UV-derivative frame (`native_glsl.FRAME_HELPERS`). |
 | Textures | A sampled array slice as stored. Arrays with a run-time slice and 3D textures as the padded atlas of the Blender export, without mipmaps. A cube map as a GL cube map of its six stored faces (face k to `GL_TEXTURE_CUBE_MAP_POSITIVE_X + k`, rows top first), top mip, linear, seamless where the driver has it: D3D and GL share the face table, so `textureCube` along the game direction returns the D3D texel. Float data formats as `RGBA32F`. |
-| Lighting | The review rig with the Rift Apart BRDF: GGX α = (0.9725 − 0.7514 gloss)², Smith joint approximation, Schlick F90 = 1, Lambert, occlusion on ambient light only |
+| Lighting | Each review light (key, fill, preview) goes through the material's lighting class's own apply program: `lighting.direct`, emitted as the function `rcraLight` and called once per light ([Lighting classes](#lighting-classes)). Inputs are in game space: the world normal, `vTintViewOffset`, the view depth, and the light turned back from view space through `vNativeToView`. `LIGHT` is the rig colour / π, so the game's convention (diffuse = albedo × N·L × `LIGHT`) gives the rig's old balance. Key and fill keep the rig's diffuse scale. Ambient light is the rig's, with the class-0 BRDF (GGX α = r⁴) and occlusion on ambient light only. Forward materials with their [own key light](#own-key-light) add colour(L, `LIGHT`) − colour per light, plus the G-buffer surface's ambient light. Statements that read no light are emitted once and shared. |
 | Blending | Forward materials draw in the float scene target, tested but not writing depth. A multiply pass scales what is behind by the background factor (blended: mix(1, B, α); additive: 1 + αB; modulate: the tint). B adds lit_background × the rig's diffuse light at the surface normal (`rcraDiffuse` with albedo 1 and no occlusion) for a material that lights the scene behind it. Then a colour pass adds the premultiplied colour, coverage blended over. A program in scene mode reads `BACKGROUND` from a copy of the frame taken before its batch (`_scene_copies`): scene-linear in the float scene target, display-referred otherwise. |
 | Texture sizes | Programs that query a texture's size () get it from the full-resolution texture, as in the Blender export. Without it 143 materials failed in the viewer; with it 31 do (29 have no graph, 2 fail the G-buffer writer). |
 | Caching | The translation (`viewer_materials.translate`: recipes, blend, limitations, bindings, or the reason it fails) is kept across sessions in the source's translation disk cache, keyed by the material and graph bytes and `CODE_SHA256` (the Rift Apart reader, `sm5`, `dxbc` and `rcra_glsl`). Infinite and NaN constants are stored tagged. Atlases are kept per source (least recently used out past 256 MB), since materials share their texture arrays, and 8-bit atlases are built in bytes. |
@@ -981,8 +1042,8 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 ### Not translated
 
 - **Blended materials whose forward program does not translate** (3 of 1,747), or that read the scene behind in scene mode (27): Blender gets their G-buffer surface, opaque.
-- **Forward lighting:** the forward program's own light loop is not used. Blender's lights shade the G-buffer surface instead, which assumes that the forward program lights the same terms as the deferred apply.
-- **Lighting classes 1 to 5:** skin, hair and the other special classes need their own apply programs. They are lit with class 0.
+- **Forward lighting in Blender:** Blender's lights shade the G-buffer surface, which assumes that the forward program lights the same terms as the deferred apply. The viewer uses the program's own key-light term ([Own key light](#own-key-light)). Only that term is used: the programs' local light lists, probes and reflections are not (the review rig has no light grid).
+- **Lighting classes in Blender:** classes 1 to 5 are lit with the class-0 BRDF there; the viewer runs their own programs ([Lighting classes](#lighting-classes)). The viewer does not draw the skin pass's screen-space blur, the shadow-map thickness behind transmission, or the skin profiles, which read 1.
 - **Opaque materials on forward techniques** (245 materials, 44 of them eyes, such as `basic_eye`): their graph's G-buffer writer is a black stub ([Techniques](#techniques)), so both renderers draw them black. Their colour is the forward program's. Ratchet's eye forward program does not translate under the forward profile, for three reasons:
   - it reprojects through `g_SSRVelocityTex` and `g_HalfResLinearDepth`, which the profile does not bind;
   - it does pixel arithmetic on `SV_POSITION.xy` (a checker parity and texel reads at the screen size), which the profile maps to the view offset;
@@ -1010,4 +1071,4 @@ python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --su
 
 `tests/test_rcra_vertex.py` checks the vertex-program path. Without game files, it checks the vectorised evaluator against the translator's operations bit for bit, the view check, the stored vertices as a glTF morph target, and the notes in the loader. With `RCRA_GAME` it checks that the swarmer's vertex-animation texture moves every mesh, with each vertex where the translator's own evaluator puts it. It also checks that a dimensional glitch is view-dependent and that a balloon keeps its stored vertices.
 
-`tests/test_rcra_draw_skip.py` checks two things on synthetic flags blocks: the draw-skip rule (blended, additive, opaque, fur and distance-fade cases) and the packed draw alpha. It also checks the viewport and export wiring. With `RCRA_GAME` it checks that Ratchet's head lists only `compositeshell` as undrawn and that the texture entries mark its slot. It also checks that a glass of material alpha 0.3 gets forward alpha × 1228/4096. `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores). It skips without the DLL. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.
+`tests/test_rcra_draw_skip.py` checks two things on synthetic flags blocks: the draw-skip rule (blended, additive, opaque, fur and distance-fade cases) and the packed draw alpha. It also checks the viewport and export wiring. With `RCRA_GAME` it checks that Ratchet's head lists only `compositeshell` as undrawn and that the texture entries mark its slot. It also checks that a glass of material alpha 0.3 gets forward alpha × 1228/4096. `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores, raw stores and atomics, groupshared memory, domain-program inputs). It skips without the DLL. `tests/test_rcra_lighting.py` checks the lighting classes. Without game files it covers the class bits, the extra-field layout, the emitted `rcraLight` and `rcraClassLit`, and the forward programs' own light emitted per light. With `RCRA_GAME` it finds the six apply programs, checks class 0 against GGX with α = r⁴ and that every class recipe is the light's own term. It also checks the cloth and foliage writers' extra fields against their packed word, that the fur writer is class 3, the dome's own key light, the jellyfish domain program, and engine compute programs with groupshared memory. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.

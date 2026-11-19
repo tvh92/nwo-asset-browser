@@ -464,6 +464,7 @@ class Shader:
     reflection: Reflection | None
     inputs: list
     outputs: list
+    patch_constants: list = field(default_factory=list)   # a domain program's patch-constant signature (vpc registers)
 
     @property
     def stage(self):
@@ -482,4 +483,5 @@ def shader(blob):
         raise DxbcError('DXBC container has no SM4/SM5 program (DXIL)' if 'DXIL' in parts else 'No program chunk')
     sig_in = next((signature(parts[k], k) for k in ('ISGN', 'ISG1') if k in parts), [])
     sig_out = next((signature(parts[k], k) for k in ('OSGN', 'OSG5', 'OSG1') if k in parts), [])
-    return Shader(program(code), reflection(parts['RDEF']) if 'RDEF' in parts else None, sig_in, sig_out)
+    patch = next((signature(parts[k], k) for k in ('PCSG', 'PSG1') if k in parts), [])
+    return Shader(program(code), reflection(parts['RDEF']) if 'RDEF' in parts else None, sig_in, sig_out, patch)

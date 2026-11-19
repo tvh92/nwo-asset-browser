@@ -567,6 +567,7 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
     }
     if program and program.get('coverage'):
         terms['coverage'] = program['coverage'](g)
+    class_limitations = _class_terms(g, terms, out(0, 0), out(3, 0))
     for name, byte in (('f0.r', f0r), ('f0.g', f0g), ('f0.b', f0b)):
         stored = _rounded(g, g.op('sat', byte))
         terms[name] = g.op('mul', stored, stored)
@@ -579,7 +580,29 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
     limitations += program['limitations'] if program else []
     if program is None and rmaterial.forward_technique(graph_data) and rmaterial.material_blend(material_data) == 'opaque':
         limitations.append(rmaterial.FORWARD_TECHNIQUE_NOTE)   # an opaque material the game draws in the forward layer
+    limitations += class_limitations
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Surface')
+
+
+CLASS_RUNTIME_NOTE = ('The writer chooses its lighting class at run time (a select of packed words); it is lit as class 0.')
+
+
+def _class_terms(g, terms, word_x, extra):
+    """Add the lighting class (term ``class``, a constant) and, for classes 1 to 5, the fields of the g_GBufExtra word
+    (SV_Target3) the class's apply program reads (terms ``extra.<k>``, their integer values; lighting.EXTRA_FIELDS).
+    Returns limitations."""
+    from rc2016.games.rcra import lighting
+    cls = lighting.material_class(g, word_x)
+    notes = []
+    if cls is None:
+        cls, notes = 0, [CLASS_RUNTIME_NOTE]
+    if cls and extra is None:
+        cls, notes = 0, ['The writer stores lighting class %d without its extra target; it is lit as class 0.' % cls]
+    terms['class'] = g.const('f', float(cls))
+    for k, (offset, width) in enumerate(lighting.EXTRA_FIELDS.get(cls, ())):
+        word = g.cast(extra, 'i')
+        terms['extra.%d' % k] = g.op('utof', g.op('ubfe', g.const('i', width), g.const('i', offset), word))
+    return notes
 
 
 MAX_CASE_CONDITIONS = 4
@@ -733,13 +756,18 @@ def _integers_in_float(g, terms):
     def fields(i, out):   # the parts of an or-tree word: (shift, source, width or None), constant bits apart
         n = g.nodes[i]
         k = [g.value(a) for a in n['args']]
-        if n['op'] == 'or':
+        if n['op'] in ('or', 'iadd'):   # a sum of fields is their or when no constant bits fall in a field (checked)
+            out['sum'] = out.get('sum', False) or n['op'] == 'iadd'
             for a in n['args']:
                 fields(a, out)
         elif n['op'] == 'const' and n['type'] == 'i':
+            if out.get('sum') and out['bits'] & n['value'] & 0xFFFFFFFF:
+                out['overlap'] = True
             out['bits'] |= n['value'] & 0xFFFFFFFF
         elif n['op'] == 'ishl' and k[1] is not None:
             out['parts'].append((k[1] & 31, n['args'][0], None))
+        elif n['op'] == 'imul' and k[1] is not None and power(k[1]):
+            out['parts'].append((k[1].bit_length() - 1, n['args'][0], None))
         elif n['op'] == 'bfi' and None not in k[:2] and k[3] == 0:
             out['parts'].append((k[1] & 31, n['args'][2], k[0] & 31))
         else:
@@ -766,12 +794,14 @@ def _integers_in_float(g, terms):
             if o <= offset and offset + width <= o + w:
                 return bits(n['args'][2], offset - o, width)
             return None
-        if n['op'] != 'or':
+        if n['op'] not in ('or', 'iadd'):
             return bits(word, offset, width)
         parts = fields(word, dict(bits=0, parts=[]))
         shifts = sorted(s for s, _x, _w in parts['parts'])
-        if len(set(shifts)) != len(shifts):
-            return None
+        if len(set(shifts)) != len(shifts) or parts.get('overlap'):
+            return None if n['op'] == 'or' else bits(word, offset, width)
+        # A sum of fields (iadd) is their or under the packing's assumption that each field fits its slot; the constant's
+        # bits inside the field read back are checked below as for an or.
         at = [p for p in parts['parts'] if p[0] == offset]
         if any(offset < s < offset + width for s in shifts) or len(at) > 1:
             return None
@@ -822,6 +852,14 @@ def _integers_in_float(g, terms):
             if out is None:
                 a = f(args[0])
                 out = None if a is None else mod(a, k[1] + 1)
+        elif op == 'and' and k[1] and power((k[1] >> ((k[1] & -k[1]).bit_length() - 1)) + 1):
+            # a contiguous mask above bit 0 (a sign or mode bit): that field, scaled back to its place
+            low = (k[1] & -k[1]).bit_length() - 1
+            width = (k[1] >> low).bit_length()
+            field = extract(args[0], low, width)
+            if field is None:
+                field = bits(args[0], low, width)
+            out = None if field is None else g.op('mul', field, g.const('f', float(2 ** low)))
         elif op == 'ubfe' and None not in k[:2]:
             out = extract(args[2], k[1] & 31, k[0] & 31)
         elif op == 'ushr' and k[1] is not None:
@@ -834,6 +872,16 @@ def _integers_in_float(g, terms):
         memo[i] = out
         return out
 
+    def unsigned(i):   # an integer whose value is below 2^31: a bit field, a cast of a float to unsigned, a small constant
+        n = g.nodes[i]
+        if n['op'] == 'const':
+            return n['type'] == 'i' and 0 <= n['value'] < 2 ** 31
+        if n['op'] in ('ubfe', 'ftou'):
+            return True
+        k = [g.value(a) for a in n['args']]
+        return (n['op'] == 'ushr' and k[1] is not None and k[1] & 31 > 0) or \
+            (n['op'] == 'and' and any(v is not None and 0 <= v < 2 ** 31 for v in k))
+
     def top(i):
         n = g.nodes[i]
         op, args = n['op'], n['args']
@@ -841,11 +889,13 @@ def _integers_in_float(g, terms):
             return f(args[0])
         if op == 'bits2f' and g.nodes[args[0]]['op'] == 'b2i':   # a boolean kept in a float register: all ones is NaN
             return g.select(g.nodes[args[0]]['args'][0], g.const('f', float('nan')), g.const('f', 0.0))
-        if op in ('ieq', 'ine', 'ilt', 'ige'):
+        if op in ('ieq', 'ine', 'ilt', 'ige', 'ult', 'uge'):
             a, b = f(args[0]), f(args[1])
             if a is None or b is None:
                 return None
-            return g.op({'ieq': 'eq', 'ine': 'ne', 'ilt': 'lt', 'ige': 'ge'}[op], a, b)
+            if op in ('ult', 'uge') and not all(unsigned(x) for x in args):
+                return None   # an unsigned test of values that may be negative: not the float test
+            return g.op({'ieq': 'eq', 'ine': 'ne', 'ilt': 'lt', 'ige': 'ge', 'ult': 'lt', 'uge': 'ge'}[op], a, b)
         return None
 
     roots = list(terms.values())
@@ -1357,6 +1407,99 @@ def forward(graph_data, material_data, texture_sizes=None):
                            'refraction) is dropped.' % BACKGROUND_BUFFER
                            + (LIT_BACKGROUND_NOTE if lit is not None else UNLIT_BACKGROUND_NOTE * bool(flags)))
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Forward colour')
+
+
+# The forward program's own key-light term (forward_lighting): the key light's direction and colour as inputs L.xyz (to the
+# light, game space) and LIGHT.rgb, unshadowed: past every shadow shell (as rc2016.games.rcra.lighting binds the apply
+# programs), the shadow atlas, ray-traced shadows and cloud shadows reading 1. Every other light source keeps the forward
+# profile's 0.
+KEY_LIGHT_INPUTS = {'GlobalWorldCBuffer.m_KeyLightVec': 'L.x', 'GlobalWorldCBuffer.m_KeyLightVec+4': 'L.y',
+                    'GlobalWorldCBuffer.m_KeyLightVec+8': 'L.z', 'GlobalWorldCBuffer.m_KeyLightColorLinear': 'LIGHT.r',
+                    'GlobalWorldCBuffer.m_KeyLightColorLinear+4': 'LIGHT.g',
+                    'GlobalWorldCBuffer.m_KeyLightColorLinear+8': 'LIGHT.b'}
+UNSHADOWED = {'GlobalWorldCBuffer.m_KeyLightShellPlanesW': 1.0, 'GlobalWorldCBuffer.m_KeyLightShellPlanesW+4': 1.0,
+              'GlobalWorldCBuffer.m_KeyLightShellPlanesW+8': 1.0, 'GlobalWorldCBuffer.m_KeyLightShellPlanesW+12': 1.0,
+              'GlobalWorldCBuffer.m_KeyLightShellLodConsts+12': 10.0}
+SHADOW_RESOURCES = ('g_ShadowAtlas', 'g_RayTracedShadows', 'g_CloudShadowMap')
+LIGHT_INPUT_NAMES = tuple(KEY_LIGHT_INPUTS.values())
+FORWARD_LIGHT_NOTE = ("Viewer: the forward program's own key-light term lights it, once per review light (direction L, "
+                      'colour LIGHT, unshadowed); its ambient, probes, local lights and reflections stay 0, so ambient '
+                      'light comes from the G-buffer surface, when it has one.')
+
+
+class _ForwardLitBindings(_ForwardBindings):
+    """_ForwardBindings with the key light symbolic (KEY_LIGHT_INPUTS) and unshadowed."""
+
+    def constant(self, name):
+        if name in KEY_LIGHT_INPUTS:
+            return self.graph.input(KEY_LIGHT_INPUTS[name], 'f')
+        if name in UNSHADOWED:
+            return self.graph.const('f', UNSHADOWED[name])
+        return super().constant(name)
+
+    def resource(self, graph, op, binding, args):
+        if binding in SHADOW_RESOURCES and op.startswith(('sample', 'gather')):
+            return [graph.const('f', 1.0)] * 4
+        return super().resource(graph, op, binding, args)
+
+
+def forward_lighting(graph_data, material_data, texture_sizes=None):
+    """The forward program's colour lit by one key light: terms colour.r/g/b of the inputs L.xyz and LIGHT.rgb besides
+    those of ``forward`` (alpha and discard are forward's). With LIGHT = 0 it is forward's colour, and it is linear in
+    LIGHT (checked at random inputs), so a renderer adds colour(L, LIGHT) - colour per light.
+
+    Raises Unsupported for an unlit material, a program that does not read the key light, one whose lit colour reads
+    the scene behind, or one that is not linear in the light colour."""
+    from rc2016.games.rcra.material import draw_flags
+    flags = draw_flags(material_data)
+    if not flags:
+        raise Unsupported('The material is unlit: its forward program reads no light')
+    shader = rshaders.pass_shader(graph_data, rshaders.SLOT_FORWARD)
+    bindings = _ForwardLitBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
+                                   rshaders.material_units(graph_data, material_data), texture_sizes)
+    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
+    translator = sm5.Translator(shader, bindings)
+    bindings.graph = translator.g
+    tr = _run(translator)
+    g = tr.graph
+    target = [tr.outputs.get(('o', 0, c)) for c in range(3)]
+    if None in target:
+        raise Unsupported('Forward program does not write a colour target')
+    terms = {'colour.' + c: g.cast(x, 'f') for c, x in zip('rgb', target)}
+    names = {g.nodes[i]['name'] for i in g.reachable(list(terms.values())) if g.nodes[i]['op'] == 'input'}
+    if not names & set(LIGHT_INPUT_NAMES):
+        raise Unsupported('The forward colour does not read the key light')
+    if names & set(BACKGROUND_INPUTS):
+        raise Unsupported('The lit forward colour reads the scene behind (%s)' % BACKGROUND_BUFFER)
+    result = _portable(g, terms, bindings, graph_data, material_data, tr, [FORWARD_LIGHT_NOTE], 'Forward light')
+    _check_linear_in_light(result)
+    return result
+
+
+def _check_linear_in_light(result, trials=8):
+    """Raise Unsupported unless colour(L, 2C) - colour(L, 0) = 2 (colour(L, C) - colour(L, 0)) at random inputs and texels."""
+    import random
+    rng = random.Random(5)
+    recipe = export_recipe(result)
+    texels = {}
+
+    def sample(node, _args):
+        return texels.setdefault(node.get('binding'), [rng.uniform(0.05, 0.95) for _ in range(4)])
+    for _trial in range(trials):
+        texels.clear()
+        values = {name: rng.uniform(-1.0, 1.0) for name in recipe['inputs']}
+        values['SV_IsFrontFace'] = True
+        light = [rng.uniform(0.2, 2.0) for _ in range(3)]
+        out = []
+        for scale in (0.0, 1.0, 2.0):
+            values.update({'LIGHT.' + c: scale * v for c, v in zip('rgb', light)})
+            out.append(evaluate_recipe(recipe, values, sample))
+        for c in 'rgb':
+            a, b, d = (o['colour.' + c] for o in out)
+            if not all(math.isfinite(x) for x in (a, b, d)):
+                continue
+            if abs((d - a) - 2.0 * (b - a)) > 1e-3 * max(1.0, abs(d - a)):
+                raise Unsupported('The forward colour is not linear in the key light colour')
 
 
 def export_recipe(result):

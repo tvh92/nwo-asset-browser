@@ -302,6 +302,48 @@ class TranslatorTests(unittest.TestCase):
         texel['w'] = 0
         self.assertFalse(sm5.evaluate(g, [store['active']], {'vThreadID.x': 3, 'vThreadID.y': 4}, load)[store['active']])
 
+    def test_raw_stores_and_atomics_are_captured(self):
+        source = """RWByteAddressBuffer b : register(u0); RWStructuredBuffer<uint> c : register(u1);
+            [numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID) {
+                b.Store(id.x * 4, id.x + 7); uint old; InterlockedAdd(c[0], id.x, old); b.Store(256 + id.x * 4, old); }"""
+        tr = sm5.translate(dxbc.shader(compile_hlsl(source, 'cs_5_0')))
+        ops = [s['op'] for s in tr.stores]
+        self.assertEqual(ops[0], 'store_raw')
+        self.assertTrue(any(op.startswith('imm_atomic') for op in ops), ops)
+        g = tr.graph
+        first = tr.stores[0]
+        self.assertEqual(sm5.evaluate(g, [first['values'][0]], {'vThreadID.x': 5})[first['values'][0]], 12)
+        last = tr.stores[-1]   # the atomic's previous value: memory other threads write
+        self.assertTrue(g.unknowns(list(last['values'].values())))
+
+    def test_groupshared_reads_this_threads_store(self):
+        source = """RWBuffer<float> o : register(u0); groupshared float s[64];
+            [numthreads(64, 1, 1)] void main(uint3 t : SV_GroupThreadID) {
+                s[t.x] = t.x * 2.0; GroupMemoryBarrierWithGroupSync();
+                o[t.x] = s[t.x] + 1.0; o[t.x + 64] = s[(t.x + 1) & 63]; }"""
+        tr = sm5.translate(dxbc.shader(compile_hlsl(source, 'cs_5_0')))
+        g = tr.graph
+        own, other = tr.stores[0], tr.stores[1]
+        self.assertFalse(g.unknowns([own['values'][0]]))
+        self.assertEqual(sm5.evaluate(g, [own['values'][0]], {'vThreadIDInGroup.x': 9})[own['values'][0]], 19.0)
+        self.assertTrue(g.unknowns([other['values'][0]]))   # another thread's slot
+
+    def test_domain_program_inputs(self):
+        source = """struct P { float3 p : POSITION; }; struct C { float e[3] : SV_TessFactor; float i : SV_InsideTessFactor;
+                float3 b : BEND; };
+            [domain("tri")] float4 main(C c, float3 uvw : SV_DomainLocation, const OutputPatch<P, 3> q) : SV_Position {
+                return float4(q[0].p * uvw.x + q[1].p * uvw.y + q[2].p * uvw.z + c.b, 1); }"""
+        tr = sm5.translate(dxbc.shader(compile_hlsl(source, 'ds_5_0')))
+        self.assertEqual(tr.status(), 'ready')
+        g = tr.graph
+        names = set(g.leaves(list(tr.outputs.values()), 'input'))
+        # named by register component, as interpolants are: BEND shares its register with a tess factor (.yzw)
+        self.assertTrue({'CP0.POSITION.x', 'CP2.POSITION.z', 'PATCH.BEND.y', 'vDomain.x'} <= names, names)
+        inputs = {n: 0.0 for n in names}
+        inputs.update({'CP1.POSITION.x': 2.0, 'vDomain.y': 0.25, 'PATCH.BEND.y': 0.5})
+        x = tr.outputs[('o', 0, 0)]
+        self.assertAlmostEqual(sm5.evaluate(g, [x], inputs)[x], 1.0)
+
 
 class FoldTests(unittest.TestCase):
     """Graph folds that need no compiler."""

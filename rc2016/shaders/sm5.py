@@ -644,11 +644,13 @@ class Translator:
         self.instructions = shader.program.instructions
         self.match = _blocks(self.instructions)
         self.icb = shader.program.immediate_constants
-        self._inputs = {}
-        for e in shader.inputs:
-            for c in range(4):
-                if e.mask >> c & 1:
-                    self._inputs[(e.register, c)] = e
+        self._inputs, self._patch = {}, {}
+        for elements, table in ((shader.inputs, self._inputs), (getattr(shader, 'patch_constants', ()), self._patch)):
+            for e in elements:
+                for c in range(4):
+                    if e.mask >> c & 1:
+                        table[(e.register, c)] = e
+        self.groupshared = {}     # (g register, address node, byte offset) -> node: this thread's groupshared stores
         self._indexable = {}
         self._dimensions = {}     # t register -> declared resource dimension
         for d in shader.program.declarations:
@@ -728,8 +730,32 @@ class Translator:
                 pick = g.op('ieq', g.op('iadd', dynamic, g.const('i', index)), g.const('i', row))
                 node = g.select(pick, g.const('i', raw), node)
             return node
+        if t in ('vicp', 'vocp'):   # a control point's input or output register: CP<n>.<semantic>.<c> (OCP for vocp)
+            point, dynamic = self._index(*operand.indices[0])
+            if dynamic is not None:
+                raise Unknown('dynamically indexed control point')
+            reg = operand.indices[1][0]
+            element = self._inputs.get((reg, comp)) if t == 'vicp' else None
+            name = '%s%d.%s.%s' % ('CP' if t == 'vicp' else 'OCP', point, element.semantic if element else 'v%d' % reg,
+                                   'xyzw'[comp])
+            bound = self.bindings.input(name)
+            if bound is not None:
+                return bound
+            return g.input(name, 'i' if element is not None and element.component_type in (1, 2) else 'f')
+        if t == 'vpc':   # a patch constant: PATCH.<semantic>.<c> from the patch-constant signature
+            reg = operand.indices[0][0]
+            element = self._patch.get((reg, comp))
+            name = 'PATCH.%s.%s' % (element.semantic if element else 'vpc%d' % reg, 'xyzw'[comp])
+            bound = self.bindings.input(name)
+            if bound is not None:
+                return bound
+            return g.input(name, 'i' if element is not None and element.component_type in (1, 2) else 'f')
+        if t == 'vDomain':   # the domain location (barycentric or uv)
+            name = 'vDomain.' + 'xyzw'[comp]
+            bound = self.bindings.input(name)
+            return bound if bound is not None else g.input(name, 'f')
         if t in ('vPrim', 'vCoverage', 'vThreadID', 'vThreadGroupID', 'vThreadIDInGroup', 'vThreadIDInGroupFlattened',
-                 'vGSInstanceID'):
+                 'vGSInstanceID', 'vOutputControlPointID', 'vForkInstanceID', 'vJoinInstanceID'):
             return g.input(t + '.' + 'xyzw'[comp], 'i')
         raise Unknown('operand type ' + t)
 
@@ -1435,13 +1461,11 @@ class Translator:
                                     active=self._entered(flow.active)))
             return
         if op == 'sync':
-            return
-        if op in ('store_uav_typed', 'store_raw', 'store_structured') or op.startswith('atomic_') \
-                or op.startswith('imm_atomic'):
+            return   # a barrier: this thread's own groupshared stores stay what it reads back (_groupshared)
+        if op in ('store_raw', 'store_structured') or op.startswith(('atomic_', 'imm_atomic')):
+            return self._memory(ins, flow)
+        if op == 'store_uav_typed':
             self.unsupported.append(op)
-            if op.startswith('imm_atomic'):
-                for lane in self.lanes(o[0]):
-                    self.write(o[0], lane, g.unknown(op), False, flow)
             return
         if op == 'nop':
             return
@@ -1468,6 +1492,69 @@ class Translator:
                     value = g.cast(value, 'f')
             self.write(dst, lane, value, False, flow)
 
+    def _memory(self, ins, flow):
+        """store_raw and store_structured (UAV: a store; groupshared: this thread's value at the address), and the UAV and
+        groupshared atomics. An atomic is recorded as a store with its operation; the value an imm_atomic returns is the
+        memory's previous content, which other threads write, so it is unknown, and a groupshared address an atomic
+        touched reads unknown afterwards."""
+        g = self.g
+        op = ins.opcode
+        o = ins.operands
+        returns = op.startswith('imm_atomic')
+        dst = o[1] if returns else o[0]
+        if dst.indices and dst.indices[0][1] is not None:
+            raise Unknown('dynamically indexed memory')
+        register = dst.indices[0][0]
+        rest = o[2:] if returns else o[1:]
+        if op == 'store_structured':
+            address, offset, values = self.read(rest[0], 'i')[0], self.read(rest[1], 'i')[0], self.read(rest[2], 'raw')
+        elif op == 'store_raw':
+            address, offset, values = self.read(rest[0], 'i')[0], g.const('i', 0), self.read(rest[1], 'raw')
+        elif not rest:   # imm_atomic_alloc / consume: the UAV's hidden counter
+            address, offset, values = g.const('i', 0), g.const('i', 0), []
+        else:   # atomics: address (a structured address takes two lanes), then their operands
+            lanes = self.read(rest[0], 'i')
+            address, offset = lanes[0], lanes[1] if len(lanes) > 1 else g.const('i', 0)
+            values = [x for operand in rest[1:] for x in self.read(operand, 'i')[:1]]
+        lanes = self.lanes(dst) if op.startswith('store') else list(range(len(values)))
+        if dst.type == 'g':
+            base = g.value(offset)
+            if op.startswith('store') and base is not None:
+                for k, lane in enumerate(lanes):
+                    key = (register, address, base + 4 * k)
+                    old = self.groupshared.get(key)
+                    value = values[lane]
+                    self.groupshared[key] = value if old is None or flow is None else g.select(flow.active, value, old)
+            else:   # an atomic or a store at a run-time offset: the slot's content is no longer this thread's alone
+                for key in [key for key in self.groupshared if key[0] == register and key[1] == address]:
+                    del self.groupshared[key]
+        else:
+            self.stores.append(dict(binding=_binding_name(self.reflection, 'u', register), op=op, address=address,
+                                    offset=offset, values={lane: values[lane] for lane in lanes},
+                                    active=self._entered(flow.active)))
+        if returns:
+            for lane in self.lanes(o[0]):
+                self.write(o[0], lane, g.unknown('%s result (memory other threads write)' % op), False, flow)
+
+    def _groupshared(self, ins, register, flow):
+        """ld_raw / ld_structured of groupshared memory: what this thread stored at the same address, else unknown (a value
+        another thread wrote)."""
+        g = self.g
+        o = ins.operands
+        if ins.opcode == 'ld_structured':
+            address, offset = self.read(o[1], 'i')[0], self.read(o[2], 'i')[0]
+        else:
+            address, offset = self.read(o[1], 'i')[0], g.const('i', 0)
+        base = g.value(offset)
+        resource = o[-1]
+        swizzle = resource.selected()
+        dst = o[0]
+        for lane in self.lanes(dst):
+            value = self.groupshared.get((register, address, base + 4 * swizzle[lane])) if base is not None else None
+            if value is None:
+                value = g.unknown('groupshared memory another thread wrote')
+            self.write(dst, lane, value, False, flow)
+
     def _resource(self, ins, flow):
         g = self.g
         op = ins.opcode
@@ -1484,7 +1571,9 @@ class Translator:
         address_at, resource_at, sampler_at, extras = layout
         resource = o[resource_at]
         if resource.type == 'g':
-            raise Unknown('groupshared memory')
+            if op not in ('ld_raw', 'ld_structured') or (resource.indices and resource.indices[0][1] is not None):
+                raise Unknown('groupshared memory read by ' + op)
+            return self._groupshared(ins, resource.indices[0][0], flow)
         kind = 'u' if resource.type == 'u' else 't'
         if resource.indices and resource.indices[0][1] is not None:
             raise Unknown('dynamically indexed resource')

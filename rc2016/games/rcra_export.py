@@ -7,8 +7,8 @@ F0, gloss and occlusion come from the material's own G-buffer writer (``decoded_
 evaluated at random texels and inputs, and a term is used only when it is exactly a plain channel of the _g or _m map
 sampled at UV0. The _g map then holds gloss² in red and a grey F0 in green, or F0 in rgb and gloss in alpha (picked by the
 material's cb2 parameter 7107A2D8), and the _m map's blue is occlusion (docs/rift-apart.md, "_g and _m channels"). F0 and
-gloss are converted to glTF metal/roughness with the Khronos spec-gloss conversion, with roughness 0.9725 - 0.7514 gloss so
-that glTF's GGX alpha (roughness²) is the game's. Where a writer scales, remaps or mixes these channels, or does not
+gloss are converted to glTF metal/roughness with the Khronos spec-gloss conversion, with roughness (0.9725 - 0.7514 gloss)²
+so that glTF's GGX alpha (roughness²) is the game's, r⁴. Where a writer scales, remaps or mixes these channels, or does not
 translate, the material keeps the neutral stand-in (non-metallic, fully rough) and its notes say why.
 
 Emission and alpha are checked the same way (``decoded_emission``, ``decoded_alpha``). The writer's emission E (self-lit
@@ -36,7 +36,7 @@ UNIT_NOTE = '%s texture %s: stored as DXGI %d (float or 16-bit), its sampled val
 RATIO_TOLERANCE = 1e-4
 STAND_IN = 'no game F0 or gloss: exported non-metallic and fully rough (%s)'
 CONVERSION = ('F0 and gloss from _g (%s), converted with the Khronos spec-gloss to metal-rough conversion; roughness '
-              '0.9725 - 0.7514 gloss, so the GGX alpha is the game\'s. Lambert diffuse without the glTF energy split is '
+              '(0.9725 - 0.7514 gloss)², so the GGX alpha is the game\'s. Lambert diffuse without the glTF energy split is '
               'not reproduced.')
 LAYOUTS = {'grey': 'gloss² in red, grey F0 in green', 'colored': 'F0 in rgb, gloss in alpha'}
 OCCLUSION_NOTE = 'occlusion from _m blue (glTF occlusion: the red channel of the metal-rough image)'

@@ -242,6 +242,26 @@ class CaseTests(unittest.TestCase):
             want = sm5.evaluate(g, list(terms.values()), inputs)
             self.assertEqual({k: got[out[k]] for k in out}, {k: want[terms[k]] for k in terms}, (u, v, w))
 
+    def test_summed_fields_high_masks_and_unsigned_tests(self):
+        """A word summed from a shifted field and constant bits above 2^24 (the foliage writers' iadd(imul(q, 2^18), c)),
+        read back by ubfe, a single high-bit mask, and an unsigned compare of a field."""
+        g = sm5.Graph()
+        y = g.input('TEXCOORD.y')
+        field = g.op('ftou', g.op('add', g.op('mul', g.op('sat', y), g.const('f', 127.0)), g.const('f', 0.5)))
+        word = g.op('iadd', g.op('imul', field, g.const('i', 1 << 18)), g.const('i', 0x580094C0))
+        terms = {'low': g.op('utof', g.op('ubfe', g.const('i', 6), g.const('i', 6), word)),
+                 'field': g.op('utof', g.op('ubfe', g.const('i', 7), g.const('i', 18), word)),
+                 'bit': g.select(g.op('ine', g.op('and', word, g.const('i', 0x40000000)), g.const('i', 0)),
+                                 g.const('f', 1.0), g.const('f', 0.0)),
+                 'small': g.select(g.op('ult', g.op('ubfe', g.const('i', 7), g.const('i', 18), word), g.const('i', 64)),
+                                   g.const('f', 1.0), g.const('f', 0.0))}
+        out, packed = self._in_float(g, terms)
+        self.assertTrue(packed)
+        for v in (0.0, 0.3, 0.51, 1.0):
+            got = sm5.evaluate(g, list(out.values()), {'TEXCOORD.y': v})
+            want = sm5.evaluate(g, list(terms.values()), {'TEXCOORD.y': v})
+            self.assertEqual({k: got[out[k]] for k in out}, {k: want[terms[k]] for k in terms}, v)
+
 
 class ConstantNormalTests(unittest.TestCase):
     def test_constant_words_invert_the_packing(self):

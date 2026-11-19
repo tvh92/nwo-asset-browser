@@ -28,7 +28,8 @@ to them, so the node returns the cube texel for the game direction.
 Vectors convert between game space (Y-up) and Blender (Z-up, the glTF importer's turn): game (x, y, z) = Blender (x, z, -y).
 
 BRDF group "RC RA Deferred BRDF", from the engine's class-0 deferred apply program (docs/rift-apart.md):
-- **Specular:** GGX with Blender roughness r = 0.9725 - 0.7514 gloss (Blender alpha = r^2, the game's alpha). Metallic
+- **Specular:** GGX with Blender roughness r^2, r = 0.9725 - 0.7514 gloss (Blender alpha = roughness^2 = r^4, the game's
+  alpha). Metallic
   BSDF with F82 Fresnel and a white edge tint is Schlick with F90 = 1, as in the game. Cycles' Smith term is exact; the game
   uses the joint approximation.
 - **Diffuse:** Lambert, plus the self-lit term albedo x E.
@@ -54,7 +55,7 @@ from pathlib import Path
 import bpy
 
 BRDF_GROUP = 'RC RA Deferred BRDF'
-GROUP_VERSION = 1
+GROUP_VERSION = 2
 SURFACE_PREFIX = 'RC RA surface '
 RECIPE_PROPERTY = 'rc_rcra_recipe_sha256'
 FORWARD_PREFIX = 'RC RA forward '
@@ -111,17 +112,22 @@ def build_brdf_group():
     inp, out = nodes.new('NodeGroupInput'), nodes.new('NodeGroupOutput')
     rough = nodes.new('ShaderNodeMath')
     rough.operation = 'MULTIPLY_ADD'
-    rough.name = 'Roughness 0.9725 - 0.7514 gloss'
+    rough.name = 'r = 0.9725 - 0.7514 gloss'
     links.new(inp.outputs['Gloss'], rough.inputs[0])
     rough.inputs[1].default_value = -0.7514
     rough.inputs[2].default_value = 0.9725
+    square = nodes.new('ShaderNodeMath')   # Blender alpha = roughness^2, the game's alpha r^4: roughness r^2
+    square.operation = 'MULTIPLY'
+    square.name = 'Roughness r^2'
+    links.new(rough.outputs[0], square.inputs[0])
+    links.new(rough.outputs[0], square.inputs[1])
     spec = nodes.new('ShaderNodeBsdfMetallic')
     spec.name = 'Specular GGX Schlick F90 1'
     spec.distribution = 'GGX'
     spec.fresnel_type = 'F82'
     links.new(inp.outputs['F0'], spec.inputs['Base Color'])
     spec.inputs['Edge Tint'].default_value = (1.0, 1.0, 1.0, 1.0)
-    links.new(rough.outputs[0], spec.inputs['Roughness'])
+    links.new(square.outputs[0], spec.inputs['Roughness'])
     links.new(inp.outputs['Normal'], spec.inputs['Normal'])
     # Diffuse colour x (1 + f (occlusion - 1)), f = "Occlusion on diffuse".
     occ = nodes.new('ShaderNodeMath')
@@ -153,7 +159,7 @@ def build_brdf_group():
     links.new(add.outputs[0], total.inputs[0])
     links.new(emission.outputs[0], total.inputs[1])
     links.new(total.outputs[0], out.inputs['Shader'])
-    for x, node in enumerate((inp, rough, spec, occ, scale, tint, diffuse, emission, add, total, out)):
+    for x, node in enumerate((inp, rough, square, spec, occ, scale, tint, diffuse, emission, add, total, out)):
         node.location = (x * 220, 0)
     return group
 

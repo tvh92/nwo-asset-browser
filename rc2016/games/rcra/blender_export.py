@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 
 from rc2016.formats.linear_png import linear_to_srgb as _linear_to_srgb, png16, srgb_to_linear as _srgb_to_linear
-from rc2016.games.rcra import surface as rsurface
+from rc2016.games.rcra import lighting, surface as rsurface
 from rc2016.games.rcra.texture import texture_size
 
 SRGB_FORMATS = frozenset({29, 72, 75, 78, 91, 93, 99})
@@ -63,6 +63,8 @@ MAX_RECIPE_NODES = 10000
 ALL_SLICES = 'all'
 VOLUME = 'volume'
 CUBE = 'cube'   # a layout is (CUBE, index of the cube in the array)
+CLASS_LIMITATION = ('Blender lights this material with the class-0 BRDF: the game applies lighting class %d (%s) with its own '
+                    'apply program, which Cycles has no closure for (the viewer draws it, rc2016.games.rcra.lighting).')
 CUBE_LIMITATION = 'Cube map %s resampled to an equirectangular image (filtering differs at face seams and poles).'
 # D3D / GL cube lookup (the same table): per face +X, -X, +Y, -Y, +Z, -Z, the major axis and the (sc, tc) axes with signs.
 CUBE_FACE_AXES = (((0, 1.0), (2, -1.0), (1, -1.0)), ((0, -1.0), (2, 1.0), (1, -1.0)),
@@ -466,6 +468,9 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
                                'Blender gets its opaque G-buffer surface.' % (blend, errors['forward']))
     if 'recipe' in results:
         limitations += results['recipe']['limitations']
+        cls = results['recipe']['graph'].value(results['recipe']['terms']['class'])
+        if cls:
+            limitations.append(CLASS_LIMITATION % (int(cls), lighting.CLASS_NAMES[int(cls)]))
     limitations += [CUBE_LIMITATION % binding for binding, row in sorted(images.items()) if 'cube' in row]
     limitations += [
         'Tangent frame: the decoded vertex tangent and TEXCOORD3.w, carried as coordinates in Blender\'s UV0 tangent '

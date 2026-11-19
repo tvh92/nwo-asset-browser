@@ -246,12 +246,12 @@ class LoaderDispatchTests(unittest.TestCase):
         grey, colored = maps['a.material'], maps['b.material']
         self.assertEqual(grey['sources'], {'_c': 'c.texture', '_n': 'n.texture', '_g': 'g.texture', '_m': 'm.texture'})
         gloss = (64 / 255) ** 0.5   # gloss² in red
-        self.assertEqual(int(grey['mr'][0, 0, 1]), round((0.9725 - 0.7514 * gloss) * 255))
+        self.assertEqual(int(grey['mr'][0, 0, 1]), round((0.9725 - 0.7514 * gloss) ** 2 * 255))
         self.assertEqual(int(grey['mr'][0, 0, 0]), 77)   # occlusion: _m blue in the glTF occlusion channel
         self.assertEqual(int(grey['mr'][0, 0, 2]), 0)    # a grey F0 of 10/255 is a dielectric
         self.assertTrue(grey['occlusion'])
         self.assertIn('gloss² in red, grey F0 in green', ' '.join(grey['notes']))
-        self.assertEqual(int(colored['mr'][0, 0, 1]), round((0.9725 - 0.7514 * 128 / 255) * 255))   # gloss in alpha
+        self.assertEqual(int(colored['mr'][0, 0, 1]), round((0.9725 - 0.7514 * 128 / 255) ** 2 * 255))   # gloss in alpha
         self.assertEqual((int(colored['mr'][0, 0, 0]), colored['occlusion']), (255, False))
 
     def test_rift_apart_plain_writer_check(self):

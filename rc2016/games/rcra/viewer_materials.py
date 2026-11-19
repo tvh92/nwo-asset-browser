@@ -148,6 +148,15 @@ def _translate(graph, data, source, program=None):
         raise NotTranslated(errors.get('surface') or errors.get('forward') or 'nothing translates')
     if blend != 'opaque':
         limitations.append(bexp.BLEND_LIMITATIONS[blend])
+    if 'forward' in recipes and blend in ('blended', 'additive') and not rsurface.reads_scene(recipes['forward']):
+        try:   # the program's own key-light term, drawn once per review light (rcra_glsl)
+            lit = rsurface.forward_lighting(graph, data, texture_sizes=lambda path: texture_size(source, path))
+        except (rsurface.Unsupported, ValueError, KeyError):
+            lit = None
+        if lit is not None:
+            bexp.replace_missing(source, graph, lit)
+            recipes['forward']['lit'] = rsurface.fold_nan(rsurface.export_recipe(lit))
+            results['forward_lit'] = lit
     textures = {}
     for result in results.values():
         textures.update(result['textures'])
@@ -295,13 +304,35 @@ def _load_bindings(source, recipes, paths, hd, limitations):
 def material_receipt(source, material_key, hd=False):
     """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason."""
     surface, forward, blend, limitations, paths = translate(source, material_key)
-    layouts, textures = _load_bindings(source, [r for r in (surface, forward) if r], paths, hd, limitations)
+    recipes = [r for r in (surface, forward, (forward or {}).get('lit')) if r]
+    layouts, textures = _load_bindings(source, recipes, paths, hd, limitations)
     emission = surface['terms']['emission'] if surface else forward['terms']['colour.r']
     recipe = surface or forward
+    lit = class_lighting(source, surface, limitations) if surface else None
     receipt = dict(kind='rcra', status='ready', blend=blend, surface=surface, forward=forward, layouts=layouts,
-                   limitations=limitations, nodes=recipe['nodes'], outputs=dict(emission=emission),
-                   translation_sha256=rcra_glsl.receipt_sha256(surface, forward, blend, layouts))
+                   limitations=limitations, nodes=recipe['nodes'], outputs=dict(emission=emission), lighting=lit,
+                   translation_sha256=rcra_glsl.receipt_sha256(surface, forward, blend, layouts, lit))
     return receipt, textures
+
+
+def recipe_class(recipe):
+    """The lighting class a surface recipe stores (its constant ``class`` term), 0 without one."""
+    index = recipe['terms'].get('class')
+    return int(recipe['nodes'][index]['value']) if index is not None else 0
+
+
+def class_lighting(source, surface, limitations):
+    """The direct-light recipe of the surface's lighting class (rc2016.games.rcra.lighting.direct), appending its
+    limitation to ``limitations``; None, with a limitation, when the executable's apply program does not translate."""
+    from rc2016.games.rcra import lighting
+    cls = recipe_class(surface)
+    try:
+        recipe = lighting.direct(source.root, cls, disk=getattr(source, 'translation_disk_cache', None))
+    except (OSError, ValueError, rsurface.Unsupported) as error:
+        limitations.append('Viewer: the class-%d apply program is not available (%s); lit by the class-0 BRDF.' % (cls, error))
+        return None
+    limitations += recipe['limitations']
+    return recipe
 
 
 SHELL_BLEND = 'fur_shell'   # rcra_glsl: the surface lit, its ``coverage`` as alpha
@@ -349,9 +380,10 @@ def shell_receipt(source, material_key, hd=False):
     recipe, fur, limitations, paths = out
     limitations = [rcra_glsl.LIMITATION] + list(limitations)
     layouts, textures = _load_bindings(source, [recipe], paths, hd, limitations)
+    lit = class_lighting(source, recipe, limitations)
     receipt = dict(kind='rcra', status='ready', blend=SHELL_BLEND, surface=recipe, forward=None, layouts=layouts,
                    limitations=limitations, nodes=recipe['nodes'], outputs=dict(emission=recipe['terms']['emission']),
-                   fur=fur, translation_sha256=rcra_glsl.receipt_sha256(recipe, None, SHELL_BLEND, layouts))
+                   fur=fur, lighting=lit, translation_sha256=rcra_glsl.receipt_sha256(recipe, None, SHELL_BLEND, layouts, lit))
     return receipt, textures
 
 

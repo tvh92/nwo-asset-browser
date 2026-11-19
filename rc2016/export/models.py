@@ -301,8 +301,9 @@ def material_maps(archive, material, cache, map_cache=None):
 
 
 def rcra_roughness(gloss):
-    """Rift Apart: glTF roughness whose GGX alpha (roughness²) is the game's, (0.9725 - 0.7514 gloss)² (docs/rift-apart.md)."""
-    return np.clip(0.9725 - 0.7514 * gloss, 0.0, 1.0)
+    """Rift Apart: glTF roughness whose GGX alpha (roughness²) is the game's r⁴, r = 0.9725 - 0.7514 gloss: roughness r²
+    (docs/rift-apart.md)."""
+    return np.clip(np.square(0.9725 - 0.7514 * gloss), 0.0, 1.0)
 
 
 def _convert_maps(c_tex, g_tex, n_tex, paths, o_tex=None, e_tex=None):
