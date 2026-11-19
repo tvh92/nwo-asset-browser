@@ -145,16 +145,25 @@ class InstallDrawSkipTests(unittest.TestCase):
             for c in 'rgb':
                 check(out['colour.' + c])
 
-    def test_emissive_forward_technique_stays_black(self):
-        """A forward technique whose colour has an unlit part (an emissive eye) keeps the black stub, with the reason."""
+    def test_emissive_forward_technique_draws_its_unlit_part(self):
+        """A forward technique whose colour has an unlit part (an emissive eye) carries it as the terms unlit.r/g/b."""
         from rc2016.games.rcra import surface as rsurface
         from rc2016.games.rcra.texture import texture_size
         key = self.source.resolve('material/characters/npc/npc_dino_large_horns/npc_dino_large_eye.material')[0]
         self.assertTrue(rmat._graphs(self.source, key)[0].endswith('/eye_emissive.materialgraph'))
         graph = self.source.asset_data(next(k for k in self.source.resolve(rmat._graphs(self.source, key)[0])
                                             if self.source.entries[k]['type'] == 'materialgraph'))
-        result = rsurface.surface(graph, self.source.asset_data(key), texture_sizes=lambda p: texture_size(self.source, p))
-        self.assertTrue(any('unlit part' in line and 'technique flag 0x200' in line for line in result['limitations']))
+        sizes = lambda p: texture_size(self.source, p)   # noqa: E731
+        result = rsurface.surface(graph, self.source.asset_data(key), texture_sizes=sizes)
+        self.assertIn(rsurface.FORWARD_UNLIT_NOTE, result['limitations'])
+        recipe = rsurface.fold_nan(rsurface.export_recipe(result))
+        self.assertTrue({'unlit.r', 'unlit.g', 'unlit.b'} <= set(recipe['terms']))
+        self.assertFalse([n for n in recipe['inputs'] if n.startswith(('ENGINE.', 'L.', 'LIGHT.', 'BACKGROUND.'))])
+        values = {name: 0.3 for name in recipe['inputs']}
+        values.update({'TEXCOORD2.z': 1.0, 'TEXCOORD3.x': 1.0, 'TEXCOORD3.w': 1.0, 'VIEW.z': -2.0, 'SV_IsFrontFace': True})
+        out = rsurface.evaluate_recipe(recipe, values, lambda node, args: [0.5, 0.5, 0.5, 1.0])
+        self.assertGreater(max(out['unlit.' + c] for c in 'rgb'), 0.0)
+        self.assertTrue(all(out['unlit.' + c] >= 0.0 for c in 'rgb'))
 
     def test_forward_alpha_carries_the_draw_alpha(self):
         from rc2016.games.rcra import surface as rsurface

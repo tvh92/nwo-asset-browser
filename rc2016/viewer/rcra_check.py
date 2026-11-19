@@ -27,6 +27,7 @@ import numpy as np
 
 GROUPS = {'albedo': ('albedo.r', 'albedo.g', 'albedo.b'), 'f0': ('f0.r', 'f0.g', 'f0.b'),
           'scalars': ('gloss', 'occlusion', 'emission'), 'normal': ('normal.x', 'normal.y', 'normal.z'),
+          'unlit': ('unlit.r', 'unlit.g', 'unlit.b'),
           'clip': ('clip',)}
 FORWARD_GROUPS = {'forward_colour': ('colour.r', 'colour.g', 'colour.b'), 'forward_alpha': ('alpha', 'clip'),
                   'forward_background': ('background.r', 'background.g', 'background.b'),

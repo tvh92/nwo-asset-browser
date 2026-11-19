@@ -585,8 +585,10 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
         except (Unsupported, ValueError, KeyError) as error:
             limitations.append(rmaterial.FORWARD_TECHNIQUE_NOTE % error)
         else:
-            imported = _import(g, lit['graph'], [lit['terms']['albedo.' + c] for c in 'rgb'])
-            terms.update({'albedo.' + c: g.op('sat', x) for c, x in zip('rgb', imported)})
+            names = [k for k in ('albedo.r', 'albedo.g', 'albedo.b', 'unlit.r', 'unlit.g', 'unlit.b') if k in lit['terms']]
+            imported = dict(zip(names, _import(g, lit['graph'], [lit['terms'][k] for k in names])))
+            terms.update({k: g.op('sat', x) if k.startswith('albedo.') else g.op('max', x, zero)
+                          for k, x in imported.items()})
             limitations += [x for x in lit['limitations'] if x not in limitations]
     limitations += class_limitations
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Surface')
@@ -1522,7 +1524,17 @@ FORWARD_ALBEDO_NOTE = ('The game draws this graph with its forward program (tech
                        'a stub that stores black albedo. The albedo here is the forward program\'s diffuse coefficient: its '
                        'colour is split exactly into F0 + Y_d x L_d + Y_s x L_s per channel (L_d its diffuse light, L_s its '
                        'specular light), and Y_d is lit by the renderer\'s diffuse light. The G-buffer writer\'s normal, F0, '
-                       'gloss and occlusion are kept. Its unlit part F0 is 0 at every tested input and texel.')
+                       'gloss and occlusion are kept.')
+FORWARD_UNLIT_ZERO_NOTE = ' Its unlit part F0 is 0 at every tested input and texel.'
+FORWARD_UNLIT_ONLY_NOTE = ('The game draws this graph with its forward program (technique flag 0x200); its G-buffer writer is '
+                           'a stub that stores black albedo. The forward program has no diffuse light factor (its colour '
+                           'is split exactly into F0 + Y_s x L_s per channel, L_s its specular light), so the albedo stays '
+                           'black. The G-buffer writer\'s normal, F0, gloss and occlusion are kept.')
+# F0 of the split reads no light source: an emissive colour, an effect, or the whole colour of an unlit program. The game adds
+# it as the program computes it, so a renderer adds it unlit, in scene-linear units, after the lit terms.
+FORWARD_UNLIT_NOTE = ("The forward program's unlit part F0 (its emission, or the whole colour of an unlit program) reads no "
+                      'light source; it is drawn as an unlit colour (terms unlit.r/g/b, negative values clamped to 0) added '
+                      'to the lit surface in scene-linear units.')
 FORWARD_SPECULAR_NOTE = ("Viewer: the forward program's own specular term Y_s x L_s lights it, once per review light (the "
                          'key light as direction L and colour LIGHT, unshadowed; its screen-space and probe reflections and '
                          'every other light source 0). Blender has no per-light program, so there the stub\'s F0 of the '
@@ -1545,14 +1557,18 @@ class _ForwardLitFreeBindings(_EngineFreeBindings):
         return super().resource(graph, op, binding, args)
 
 
+# Engine values a forward program scales a colour by that are not light: the exposure the tone mapper adapts to.
+EXPOSURE_INPUTS = ('ENGINE.GlobalWorldCBuffer.m_ActualLuminance', 'ENGINE.GlobalWorldCBuffer.m_AdaptedLuminance',
+                   'ENGINE.GlobalWorldCBuffer.m_ToneMapAnchor')
+
+
 def _forward_split(graph_data, material_data, texture_sizes):
-    """The forward program of a lit forward technique split per colour channel into F0 + Y_d x L_d + sum Y_s x L_s, every
+    """The forward program of a forward technique split per colour channel into F0 + Y_d x L_d + sum Y_s x L_s, every
     light source symbolic (_ForwardLitFreeBindings: the key light L, LIGHT, the others ENGINE.*). A light factor is
-    specular when it reads a specular input (SPECULAR_INPUTS), else diffuse; there must be exactly one diffuse factor.
+    specular when it reads a specular input (SPECULAR_INPUTS), else diffuse; there must be at most one diffuse factor (Y_d
+    is 0 without one). An unlit material (no lit bit) reads no light, so its whole colour is F0.
     Returns (graph, translation, bindings, {channel: (F0, Y_d, specular term)}). Raises Unsupported otherwise."""
     flags = rmaterial.draw_flags(material_data)
-    if not flags:
-        raise Unsupported('The material is unlit: its forward program reads no light')
     shader = rshaders.pass_shader(graph_data, rshaders.SLOT_FORWARD)
     bindings = _ForwardLitFreeBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
                                        rshaders.material_units(graph_data, material_data), texture_sizes)
@@ -1574,27 +1590,46 @@ def _forward_split(graph_data, material_data, texture_sizes):
         diffuse, specular = [], zero
         for factor, y in split[1].items():
             names = {g.nodes[i]['name'] for i in g.reachable([factor]) if g.nodes[i]['op'] == 'input'}
+            if not flags:   # an unlit program that still reads light state uses it for an effect, not as lighting
+                raise Unsupported('The material is unlit, but its forward colour reads engine light values (%s)'
+                                  % ', '.join(sorted(n for n in names if n.startswith(('ENGINE.', 'L.', 'LIGHT.')))[:3]))
             if any(name.startswith(SPECULAR_INPUTS) for name in names):
                 specular = g.op('add', specular, g.op('mul', y, factor))
-            else:
-                diffuse.append(y)
-        if len(diffuse) != 1:
+            elif names & {'LIGHT.r', 'LIGHT.g', 'LIGHT.b'} or any(
+                    n.startswith('ENGINE.') and n not in EXPOSURE_INPUTS for n in names):
+                diffuse.append(y)   # a light colour: the key light, ambient fill, GI, the light grid
+            else:   # the key light's direction alone (a terminator), or an exposure scale: neither albedo nor emission
+                raise Unsupported('Forward colour has a light factor that reads no light colour (%s)'
+                                  % ', '.join(sorted(n for n in names if n.startswith(('ENGINE.', 'L.')))[:3]))
+        if len(diffuse) > 1:
             raise Unsupported('Forward colour has %d diffuse light factors' % len(diffuse))
-        parts[c] = (split[0], diffuse[0], specular)
+        parts[c] = (split[0], diffuse[0] if diffuse else zero, specular)
     return g, tr, bindings, parts
 
 
 def forward_albedo(graph_data, material_data, texture_sizes=None):
-    """The diffuse coefficient Y_d of a lit forward technique's program (_forward_split, FORWARD_ALBEDO_NOTE): terms
-    albedo.r/g/b, free of the light sources. The unlit part F0 must be 0 (_unlit_zero): an emissive or effect colour is
-    not an albedo.
+    """The diffuse coefficient Y_d of a forward technique's program (_forward_split, FORWARD_ALBEDO_NOTE): terms
+    albedo.r/g/b, free of the light sources (0 when the program has no diffuse light). When its unlit part F0 is not 0
+    (_unlit_zero: emission, or the whole colour of an unlit program), also terms unlit.r/g/b, F0 itself, which a renderer
+    adds unlit (FORWARD_UNLIT_NOTE). F0 must not read the scene behind (g_FrameBuffer).
 
-    Returns the same dict as ``surface`` with terms albedo.r/g/b. Raises Unsupported otherwise."""
+    Returns the same dict as ``surface`` with terms albedo.r/g/b and optionally unlit.r/g/b. Raises Unsupported otherwise."""
     g, tr, bindings, parts = _forward_split(graph_data, material_data, texture_sizes)
-    if not _unlit_zero(g, [parts[c][0] for c in 'rgb'], bindings, graph_data, material_data, tr):
-        raise Unsupported('Forward colour has an unlit part (emission or an effect), which an albedo cannot carry')
     terms = {'albedo.' + c: parts[c][1] for c in 'rgb'}   # free of the light sources (_factor_split)
-    return _portable(g, terms, bindings, graph_data, material_data, tr, [FORWARD_ALBEDO_NOTE], 'Forward albedo')
+    lit = any(g.value(parts[c][1]) != 0.0 for c in 'rgb')
+    notes = [FORWARD_ALBEDO_NOTE if lit else FORWARD_UNLIT_ONLY_NOTE]
+    unlit = [parts[c][0] for c in 'rgb']
+    if not _unlit_zero(g, unlit, bindings, graph_data, material_data, tr):
+        scene = _reads(g, lambda name: name in BACKGROUND_INPUTS)
+        if any(scene(x) for x in unlit):
+            raise Unsupported('Forward colour\'s unlit part reads the scene behind (%s)' % BACKGROUND_BUFFER)
+        terms.update(('unlit.' + c, x) for c, x in zip('rgb', unlit))
+        notes.append(FORWARD_UNLIT_NOTE)
+    elif not lit:
+        raise Unsupported('Forward colour is 0: it has no diffuse light factor and no unlit part')
+    else:
+        notes.append(FORWARD_UNLIT_ZERO_NOTE)
+    return _portable(g, terms, bindings, graph_data, material_data, tr, notes, 'Forward albedo')
 
 
 def forward_specular(graph_data, material_data, texture_sizes=None):
@@ -1604,6 +1639,8 @@ def forward_specular(graph_data, material_data, texture_sizes=None):
     (FORWARD_SPECULAR_NOTE).
 
     Raises Unsupported when the program has no specular term that reads the key light, or as forward_albedo."""
+    if not rmaterial.draw_flags(material_data):
+        raise Unsupported('The material is unlit: its forward program reads no light')
     g, tr, bindings, parts = _forward_split(graph_data, material_data, texture_sizes)
     terms = _zero_inputs(g, {'colour.' + c: parts[c][2] for c in 'rgb'}, lambda name: name.startswith('ENGINE.'))
     names = {g.nodes[i]['name'] for i in g.reachable(list(terms.values())) if g.nodes[i]['op'] == 'input'}

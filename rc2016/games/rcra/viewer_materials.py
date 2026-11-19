@@ -114,7 +114,7 @@ def _floats(value, decode=False):
 
 
 def _translate(graph, data, source, program=None):
-    from rc2016.games.rcra.material import material_blend
+    from rc2016.games.rcra.material import draw_flags, material_blend
     from rc2016.games.rcra.texture import texture_size
     blend = material_blend(data)
     results, errors = {}, {}
@@ -157,7 +157,9 @@ def _translate(graph, data, source, program=None):
             bexp.replace_missing(source, graph, lit)
             recipes['forward']['lit'] = rsurface.fold_nan(rsurface.export_recipe(lit))
             results['forward_lit'] = lit
-    if blend == 'opaque' and 'surface' in recipes and rsurface.FORWARD_ALBEDO_NOTE in results['surface']['limitations']:
+    forward_technique = 'surface' in recipes and any(note in results['surface']['limitations'] for note in (
+        rsurface.FORWARD_ALBEDO_NOTE, rsurface.FORWARD_UNLIT_ONLY_NOTE))
+    if blend == 'opaque' and forward_technique and draw_flags(data):
         try:   # a forward technique's own specular term, drawn once per review light (rcra_glsl)
             own = rsurface.forward_specular(graph, data, texture_sizes=lambda path: texture_size(source, path))
         except (rsurface.Unsupported, ValueError, KeyError) as error:
@@ -316,6 +318,12 @@ def material_receipt(source, material_key, hd=False):
     recipes = [r for r in (surface, forward, (forward or {}).get('lit'), (surface or {}).get('own_specular')) if r]
     layouts, textures = _load_bindings(source, recipes, paths, hd, limitations)
     emission = surface['terms']['emission'] if surface else forward['terms']['colour.r']
+    if surface:   # a forward technique's unlit colour glows as emission does (bloom.self_lit reads one output)
+        for name in ('unlit.r', 'unlit.g', 'unlit.b'):
+            node = surface['nodes'][surface['terms'][name]] if name in surface['terms'] else None
+            if node is not None and not (node.get('op') == 'const' and float(node.get('value', 0.0)) <= 0.0):
+                emission = surface['terms'][name]
+                break
     recipe = surface or forward
     lit = class_lighting(source, surface, limitations) if surface else None
     receipt = dict(kind='rcra', status='ready', blend=blend, surface=surface, forward=forward, layouts=layouts,

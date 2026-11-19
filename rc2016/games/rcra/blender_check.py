@@ -31,7 +31,7 @@ CHECK_SCRIPT = Path(__file__).resolve().parents[2] / 'export' / 'rcra_blender_ch
 # normal is game +y).
 FORWARD_VIEW = {'VIEW.x': -0.6, 'VIEW.y': -2.4, 'VIEW.z': 0.9, 'CAMERA.x': 0.6, 'CAMERA.y': 2.4, 'CAMERA.z': -0.9}
 TERMS = {'albedo': ('albedo.r', 'albedo.g', 'albedo.b'), 'f0': ('f0.r', 'f0.g', 'f0.b'),
-         'scalars': ('gloss', 'occlusion', 'emission')}
+         'scalars': ('gloss', 'occlusion', 'emission'), 'unlit': ('unlit.r', 'unlit.g', 'unlit.b')}
 
 
 class UndefinedSample(ArithmeticError):
@@ -160,7 +160,7 @@ def expected(entry, size, source=None):
                         out[name].append([math.nan] * 3)
                 else:
                     for name, keys in TERMS.items():
-                        out[name].append([terms[k] for k in keys])
+                        out[name].append([terms.get(k, 0.0) for k in keys])   # unlit: 0 without the terms
                     n = np.array([terms['normal.x'], -terms['normal.z'], terms['normal.y']])   # game -> Blender
                     out['normal'].append(list(n / max(np.linalg.norm(n), 1e-12)))
                     out['alpha'].append([0.0 if terms['clip'] else 1.0] * 3)

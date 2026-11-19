@@ -393,16 +393,18 @@ def _frame_lines():
 
 def _surface(emitter, discard=True):
     """Lines computing the G-buffer surface terms into rcraAlbedo, rcraF0, rcraGloss, rcraNormal (view), rcraOcclusion,
-    rcraEmission, and the discard."""
+    rcraEmission, rcraUnlit (a forward technique's unlit colour, surface.forward_albedo; 0 without one) and the discard."""
     t = emitter.term
     lines = emitter.lines
     albedo = 'vec3(%s, %s, %s)' % (t('albedo.r'), t('albedo.g'), t('albedo.b'))
+    unlit = 'vec3(%s, %s, %s)' % (t('unlit.r'), t('unlit.g'), t('unlit.b'))
     f0 = 'vec3(%s, %s, %s)' % (t('f0.r'), t('f0.g'), t('f0.b'))
     normal = 'vec3(%s, %s, %s)' % (t('normal.x'), t('normal.y'), t('normal.z'))
     gloss, occlusion, emission, clip = t('gloss'), t('occlusion', '1.0'), t('emission'), t('clip')
     lines += (['    if (%s != 0.0) discard;' % clip] if discard else []) + [
               '    vec3 rcraAlbedo = clamp(%s, 0.0, 1.0); vec3 rcraF0 = %s; float rcraGloss = %s;' % (albedo, f0, gloss),
               '    float rcraOcclusion = %s; float rcraEmission = %s;' % (occlusion, emission),
+              '    vec3 rcraUnlit = %s;' % unlit,
               '    vec3 rcraWorldN = %s;' % normal,
               '    vec3 rcraNormal = dot(rcraWorldN, rcraWorldN) > 0.0 ? normalize(vNativeToView * rcraWorldN) : N;']
 
@@ -461,7 +463,7 @@ def fragment_source(receipt):
         if own:   # a forward technique's own specular term per review light (surface.forward_specular), 0 at LIGHT = 0
             body += ['    vec3 rcraColour = vec3(0.0);'] + forward_light_lines(own, layouts)
             lit = '(%s) + (uLightingEnabled ? rcraOwn : vec3(0.0))' % lit
-        body.append('    sceneOutput(vec4(displayFog(%s + rcraAlbedo * rcraEmission), 1.0));' % lit)
+        body.append('    sceneOutput(vec4(displayFog(%s + rcraAlbedo * rcraEmission + rcraUnlit), 1.0));' % lit)
     elif blend == SHELL_BLEND:
         body.append('    sceneOutput(vec4(displayFog(%s + rcraAlbedo * rcraEmission), clamp(%s, 0.0, 1.0)));'
                     % (lit, coverage))

@@ -601,11 +601,12 @@ class _Emitter:
 
 SURFACE_OUTPUTS = (('Albedo', 'NodeSocketColor'), ('F0', 'NodeSocketColor'), ('Gloss', 'NodeSocketFloat'),
                    ('Normal', 'NodeSocketVector'), ('Occlusion', 'NodeSocketFloat'), ('Emission', 'NodeSocketFloat'),
-                   ('Alpha', 'NodeSocketFloat'))
+                   ('Alpha', 'NodeSocketFloat'), ('Unlit', 'NodeSocketColor'))
 
 
 def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpolation='Linear', fixed=None, tangent=False):
-    """A node group computing the recipe's surface terms (Albedo, F0, Gloss, Normal, Occlusion, Emission, Alpha)."""
+    """A node group computing the recipe's surface terms (Albedo, F0, Gloss, Normal, Occlusion, Emission, Alpha, and Unlit:
+    a forward technique's unlit colour, rc2016.games.rcra.surface.forward_albedo, black without one)."""
     digest = recipe_sha256(recipe)
     name = SURFACE_PREFIX + digest[:16]
     group = bpy.data.node_groups.new(name, 'ShaderNodeTree')
@@ -623,6 +624,9 @@ def build_surface_group(recipe, images, uv_maps, colour_attribute=None, interpol
         return node.outputs[0]
     em.link(combine(('albedo.r', 'albedo.g', 'albedo.b'), 'ShaderNodeCombineColor'), out.inputs['Albedo'])
     em.link(combine(('f0.r', 'f0.g', 'f0.b'), 'ShaderNodeCombineColor'), out.inputs['F0'])
+    for name in ('unlit.r', 'unlit.g', 'unlit.b'):
+        terms.setdefault(name, 0.0)
+    em.link(combine(('unlit.r', 'unlit.g', 'unlit.b'), 'ShaderNodeCombineColor'), out.inputs['Unlit'])
     # Game normal (x, y, z) -> Blender (x, -z, y), normalised.
     normal = em.node('ShaderNodeCombineXYZ')
     em.feed(terms['normal.x'], normal.inputs[0])
@@ -740,6 +744,17 @@ def _surface_shader(tree, entry, images, uv_maps, colour_attribute, blended, tan
     b.node_tree, b.name, b.location = build_brdf_group(), 'Game BRDF', (300, 0)
     for socket in ('Albedo', 'F0', 'Gloss', 'Normal', 'Occlusion') + (() if blended else ('Emission',)):
         tree.links.new(s.outputs[socket], b.inputs[socket])
+    body = b.outputs['Shader']
+    if not blended and 'unlit.r' in recipe['terms']:   # a forward technique's unlit colour, added unlit
+        glow = tree.nodes.new('ShaderNodeEmission')
+        glow.name, glow.location = 'Forward unlit colour', (300, -250)
+        tree.links.new(s.outputs['Unlit'], glow.inputs['Color'])
+        glow.inputs['Strength'].default_value = 1.0
+        add = tree.nodes.new('ShaderNodeAddShader')
+        add.name, add.location = 'Lit + unlit', (430, 0)
+        tree.links.new(body, add.inputs[0])
+        tree.links.new(glow.outputs[0], add.inputs[1])
+        body = add.outputs[0]
     clip = recipe['nodes'][recipe['terms']['clip']]
     if clip['op'] != 'const' or clip['value'] or 'coverage' in recipe['terms']:
         # alpha-tested (the writer's discard) or partly covered (a fur shell): a transparent mix
@@ -748,9 +763,9 @@ def _surface_shader(tree, entry, images, uv_maps, colour_attribute, blended, tan
         mix.location, clear.location = (560, 0), (300, -250)
         tree.links.new(s.outputs['Alpha'], mix.inputs['Fac'])
         tree.links.new(clear.outputs[0], mix.inputs[1])
-        tree.links.new(b.outputs['Shader'], mix.inputs[2])
+        tree.links.new(body, mix.inputs[2])
         return mix.outputs[0], surface
-    return b.outputs['Shader'], surface
+    return body, surface
 
 
 def _forward_shader(tree, entry, images, uv_maps, colour_attribute, lit, tangent=False):

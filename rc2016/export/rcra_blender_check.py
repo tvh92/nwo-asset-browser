@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from rc2016.export import rcra_blender  # noqa: E402
 
 BAKES = (('albedo', 'Albedo'), ('f0', 'F0'), ('normal', 'Normal'), ('scalars', ('Gloss', 'Occlusion', 'Emission')),
-         ('alpha', 'Alpha'))
+         ('alpha', 'Alpha'), ('unlit', 'Unlit'))
 FORWARD_BAKES = (('forward_colour', 'Colour'), ('forward_alpha', 'Alpha'), ('forward_background', 'Background'))
 
 

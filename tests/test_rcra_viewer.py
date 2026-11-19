@@ -85,6 +85,17 @@ class EmitterTests(unittest.TestCase):
         self.assertIn('+ (uLightingEnabled ? rcraOwn : vec3(0.0))', source)
         self.assertNotIn('rcraOwn', rcra_glsl.fragment_source(_receipt('opaque', forward=False))['source'])
 
+    def test_opaque_unlit_colour_is_added_unlit(self):
+        """A forward technique's unlit colour (surface.forward_albedo's unlit.r/g/b) is added after the lit terms."""
+        plain = rcra_glsl.fragment_source(_receipt('opaque', forward=False))['source']
+        self.assertIn('vec3 rcraUnlit = vec3(0.0, 0.0, 0.0);', plain)
+        receipt = _receipt('opaque', forward=False)
+        terms = dict(receipt['surface']['terms'], **{'unlit.r': 5, 'unlit.g': 3, 'unlit.b': 4})
+        receipt['surface'] = dict(receipt['surface'], terms=terms)
+        source = rcra_glsl.fragment_source(receipt)['source']
+        self.assertNotIn('vec3 rcraUnlit = vec3(0.0, 0.0, 0.0);', source)
+        self.assertIn('rcraAlbedo * rcraEmission + rcraUnlit), 1.0)', source)
+
     def test_lit_background_takes_the_rig_diffuse_light(self):
         receipt = _receipt('blended')
         terms = dict(receipt['forward']['terms'], **{'lit_background.' + c: 5 for c in 'rgb'})
