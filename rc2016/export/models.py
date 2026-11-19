@@ -983,7 +983,7 @@ class ModelExporter:
                     materials={str(slot): dict(name=m['name'], textures=m['sources'], notes=m['notes']) for slot, m in maps.items()},
                     notes=notes, coordinates='native Y-up, right-handed, game units; glTF UVs top-left origin',
                     limitations='Portable approximation of the game material (metal/roughness conversion of the decoded specular/gloss); '
-                                'graph-specific tints, palettes, detail maps and runtime effects are not baked. Not game-equivalent.')
+                                'terms the format cannot carry are left out, as each material\'s notes say. Not game-equivalent.')
         info_path.write_text(json.dumps(info, indent=1), encoding='utf-8')
         message = f"{len(info['files'])} files, {len(clips_out)} clip(s)" + (f", {len(skipped)} clip(s) skipped" if skipped else '')
         return dict(status='exported', folder=str(folder), message=message, notes=notes,

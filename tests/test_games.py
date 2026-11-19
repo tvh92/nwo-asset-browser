@@ -327,6 +327,38 @@ class LoaderDispatchTests(unittest.TestCase):
         self.assertEqual((b['alpha_mode'], b['emissive']), ('OPAQUE', None))
         self.assertIn('drawn additive in the game; exported opaque: glTF has no additive blend', ' '.join(b['notes']))
 
+    def test_rift_apart_export_maps_bake_the_programs_over_uv0(self):
+        """albedo = _c.rgb x (2, 1, 0.5), F0 0.02, gloss _c.a, emission 3 _c.r in the writer; forward alpha 0.5 _c.g."""
+        def n(op, *args, **extra):
+            return dict(op=op, type='f', args=list(args), **extra)
+        uv = [n('input', name='TEXCOORD.x'), n('input', name='TEXCOORD.y'),
+              n('sample', 0, 1, opcode='sample', binding='textureUnit5', dimension=3, offsets=[0, 0, 0])]
+        c = [n('channel', 2, index=i) for i in range(4)]                                   # 3..6
+        k = [n('const', value=v) for v in (2.0, 1.0, 0.5, 3.0, 0.02)]                       # 7..11
+        surface = dict(nodes=uv + c + k + [n('mul', 3 + i, 7 + i) for i in range(3)] + [n('mul', 3, 10)],
+                       terms={'albedo.r': 12, 'albedo.g': 13, 'albedo.b': 14, 'f0.r': 11, 'f0.g': 11, 'f0.b': 11,
+                              'gloss': 6, 'occlusion': 8, 'emission': 15})
+        forward = dict(nodes=uv + c + k + [n('mul', 4, 9)], terms={'alpha': 12})
+        plan = dict(albedo=None, f0gloss=None, occlusion=None, emission=None, alpha=None)
+        maps = self.rift_apart_maps({'a.material': dict(
+            layout=None, occlusion=False, g=None, m=None, reason='x', blend='blended', emission=None, alpha=None, bake=plan,
+            bindings={'textureUnit5': 'c.texture'}, surface=surface, forward=forward)})
+        a = maps['a.material']
+        self.assertEqual(a['base'].shape, (2, 2, 4))
+        self.assertEqual(int(a['base'][0, 0, 3]), round(0.5 * 100))   # 0.5 x 100/255 in the base map's alpha
+        self.assertEqual((a['alpha_mode'], a['alpha'], a['occlusion']), ('BLEND', 1.0, False))   # occlusion 1: none
+        self.assertEqual(int(a['mr'][0, 0, 1]), round((0.9725 - 0.7514) ** 2 * 255))            # gloss 1
+        self.assertEqual(int(a['mr'][0, 0, 2]), 0)                                               # F0 0.02: dielectric
+        self.assertAlmostEqual(a['emissive_strength'], 3 * 200 / 255, places=5)
+        self.assertEqual(a['emissive'][0, 0].tolist(), [255, round(255 * 1.055 * (100 / 255) ** (1 / 2.4) - 14.025),
+                                                        round(255 * 1.055 * (25 / 255) ** (1 / 2.4) - 14.025)])
+        self.assertEqual(a['sources'], {'_n': 'n.texture', 'textureUnit5': 'c.texture'})   # _c and _g are not read
+        notes = ' '.join(a['notes'])
+        for text in ('albedo baked from the G-buffer writer over UV0 (2x2)', 'F0 and gloss baked',
+                     'emission baked from the G-buffer writer: albedo x E, strength 2.35294',
+                     "alpha-over (glTF BLEND): the forward program's alpha baked over UV0 (2x2)"):
+            self.assertIn(text, notes)
+
     def test_gltf_occlusion_shares_the_metal_rough_image(self):
         import numpy as np
         from rc2016.export.models import ModelExporter

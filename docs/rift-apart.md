@@ -39,17 +39,42 @@ Rift Apart's capabilities are `models`, `textures`, `export` and `animation`:
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
 
-The portable export (GLB, glTF, OBJ) writes only what is decoded, through `rc2016/games/rcra_export.py`. Blender formats replace these materials with the translated ones ([Blender materials](#blender-materials)):
+The portable export (GLB, glTF, OBJ) writes only what is decoded, through `rc2016/games/rcra_export.py`. Blender formats replace these materials with the translated ones ([Blender materials](#blender-materials)). Each material gets its normal map at full resolution. Its other maps come from its own translated programs, per group of terms: albedo; F0 and gloss; occlusion; emission; and, for an alpha-over material, the forward alpha. Each group is taken from the first of these that applies:
 
-- Each material's base colour and its normal map, at full resolution.
-- F0, gloss and occlusion where the material's own G-buffer writer reads them as plain [`_g` and `_m` channels](#_g-and-_m-channels) (`rcra_export.decoded_maps`). The translated surface terms are evaluated at six random sets of inputs and texels. A layout counts only when gloss and F0 equal its `_g` channels within the G-buffer's 8-bit rounding at every probe, and occlusion only when it equals `_m` blue, each sampled at UV0 and array slice 0.
-  - F0 and gloss are converted to glTF metal/roughness with the Khronos spec-gloss conversion (as for R&C 2016). Roughness is (`0.9725 − 0.7514 gloss`)², so glTF's GGX alpha (roughness²) is the game's r⁴ ([G-buffer and deferred lighting](#g-buffer-and-deferred-lighting)). The game's Lambert diffuse without glTF's energy split is not reproduced.
-  - Occlusion is the red channel of the metal/rough image, which glTF's `occlusionTexture` reads. OBJ has no occlusion map.
-  - Over the install: 745 materials take the red and green layout and 638 the rgb and alpha layout; about 1,130 take occlusion. The others keep the stand-in: their writer has no `_g` slot, mixes these channels with vertex colour, the normal or other textures, samples `_g` at a tiled UV, or does not translate. Each material's notes give the reason.
-- Emission where the G-buffer writer's self-lit term (albedo × E) has a plain `_c` albedo, and E is a constant K or K times one channel of `_c`, `_g` or `_m` at UV0, at every probe (`rcra_export.decoded_emission`). The emissive map is `_c` times that channel, at strength K (`KHR_materials_emissive_strength`). Over the install, 208 materials carry it: 199 as `_m` red, 8 as a constant and 1 as `_g` green. The writers of 1,052 others tint the self-lit albedo, and 100 use another form; their notes say so.
-- Alpha-over for a material whose flags blend is "blended", where the forward program's alpha is K times `_c` alpha (143 materials, the base map keeps `_c` alpha) or a constant K below 1 (`rcra_export.decoded_alpha`). This is glTF `BLEND` with alpha factor K. A constant alpha of 1 stays opaque. Additive (427) and modulate (11) materials have no glTF blend and stay opaque, as do 984 blended materials whose alpha has another form. Each material's notes name its case.
-- Everything else is single-sided (the culling state is not decoded), and the graph-specific masks and other terms are not carried. Without decoded F0 and gloss a material is non-metallic and fully rough, and its notes say so.
-- A texture stored in a float or 16-bit data format is used as its sampled values rounded to 8 bits when they all lie in 0..1 ([Float and 16-bit textures](#float-and-16-bit-textures)), with a note. This carries the flat 4×4 `R32G32_FLOAT` `default_pink_shader_n` placeholder of 386 materials and the `R16G16` normal of the escape ship. A texture with values outside 0..1 is left out with its range.
+1. **Baked over UV0** (`rc2016/games/rcra/bake.py`):
+   - **When:** every operation of the group's terms reaches no input but UV0 (`TEXCOORD.xy`) and the front-face flag, and samples only 1D or 2D textures or one array slice per texel (`bake.blocker`; the test is structural).
+   - **How:** the terms are evaluated at the texel centres of a grid in UV0 space, with every tint, palette, mask, detail map and blend the program applies there. The grid is the largest texture they sample (at most 4096 per side); a texture read at a scaled UV is resampled at that grid.
+   - **Sampling:** bilinear with wrap at the top mip, as the Blender export samples, with sRGB decoded before filtering. A sample at an explicit mip, bias or gradient reads the top mip, with a note.
+   - **Evaluation:** the SM5 graph is run over arrays (`bake.evaluate`, the vertex programs' vectorised operations). On the install it equals the scalar evaluator at every checked texel, and where a writer reads plain `_g` channels the baked F0 and gloss equal them within the G-buffer's 8-bit rounding.
+   - **Cost:** a 2048² material takes about 2 to 3 seconds.
+2. **Plain channels** (`rcra_export.decoded_maps`, for the few writers whose terms reach UV1 or the normal on a path that does not change them). The surface terms are evaluated at six random sets of inputs and texels; a form counts only when it holds at every probe, sampled at UV0 and array slice 0:
+   - F0 and gloss equal a [`_g` layout](#_g-and-_m-channels)'s channels within the G-buffer's 8-bit rounding.
+   - Occlusion equals `_m` blue.
+   - Emission E is a constant K or K times one channel of `_c`, `_g` or `_m`, with a plain `_c` albedo (`decoded_emission`).
+   - Forward alpha is K times `_c` alpha or a constant K below 1 (`decoded_alpha`).
+3. **Stand-in:** the `_c` map as the base colour, non-metallic and fully rough, no occlusion, no emission, opaque. The notes give the reason, such as the term that reads UV1, the normal or the view.
+
+How each group reaches glTF:
+
+- **F0 and gloss** are converted to metal/roughness with the Khronos spec-gloss conversion (as for R&C 2016). Roughness is (`0.9725 − 0.7514 gloss`)², so glTF's GGX alpha (roughness²) is the game's r⁴ ([G-buffer and deferred lighting](#g-buffer-and-deferred-lighting)). The game's Lambert diffuse without glTF's energy split is not reproduced.
+- **Occlusion** is the red channel of the metal/rough image, which glTF's `occlusionTexture` reads. A baked occlusion of 1 everywhere is left out. OBJ has no occlusion map.
+- **Emission** is the self-lit term, albedo × E. The emissive map is albedo × E divided by the largest E, at that largest E as strength (`KHR_materials_emissive_strength`).
+- **Alpha:** an alpha-over material (flags blend "blended") is glTF `BLEND`, with the baked alpha in the base map's alpha, or a constant factor. A forward alpha of 1 stays opaque.
+- **Not carried:** additive and modulate materials have no glTF blend and stay opaque. Every material is single-sided, because the culling state is not decoded. Terms that depend on the view, the normal, UV1 or the vertex colour are not carried.
+
+Over the install (5,274 materials with a G-buffer surface, 1,306 alpha-over):
+
+| Group | Carried | Of which baked | Mostly blocked by |
+| --- | --- | --- | --- |
+| Albedo | 3,696 baked (the others keep `_c`) | 3,696 | UV1, the normal and view |
+| F0 and gloss | 4,159 | 4,157 (1,554 constants) | UV1, a volume or cube map, the normal |
+| Occlusion | about 1,245 | | UV1, the normal |
+| Emission | about 916 | 911 | an albedo or E that reads UV1 or the view (about 444 left) |
+| Alpha-over alpha | about 357 | 350 | the view (soft-particle and distance fades of effects), the normal |
+
+Additive (427) and modulate (11) materials stay opaque, and 139 alpha-over materials have a forward alpha of 1.
+
+A texture stored in a float or 16-bit data format is used as its sampled values rounded to 8 bits when they all lie in 0..1 ([Float and 16-bit textures](#float-and-16-bit-textures)), with a note. This carries the flat 4×4 `R32G32_FLOAT` `default_pink_shader_n` placeholder of 386 materials and the `R16G16` normal of the escape ship. A texture with values outside 0..1 is left out with its range. The bake samples float textures as stored.
 
 ## Install layout
 
@@ -1098,5 +1123,7 @@ python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --su
 `tests/test_rcra_model.py` also checks the tangent decode. Without game files it covers a round trip of the packed fields, the viewer payload (display basis, whole `TEXCOORD3.w`) and the glTF attribute. With `RCRA_GAME` it finds the engine model vertex programs in the exe and translates them, and checks their `TEXCOORD3` against the decoder on Ratchet, with and without render flag 0x10000. It also checks that the tangent follows Ratchet's UV frame.
 
 `tests/test_rcra_vertex.py` checks the vertex-program path. Without game files, it checks the vectorised evaluator against the translator's operations bit for bit, the view check, the stored vertices as a glTF morph target, and the notes in the loader. With `RCRA_GAME` it checks that the swarmer's vertex-animation texture moves every mesh, with each vertex where the translator's own evaluator puts it. It also checks that a dimensional glitch is view-dependent and that a balloon keeps its stored vertices.
+
+`tests/test_rcra_bake.py` checks the portable export's UV0 bake. Without game files, it checks the structural test (UV1, the normal, a cube map or volume block a group; the front-face flag does not), terms at the texel centres, sRGB decoding before filtering, bilinear wrap at a scaled UV, lookup tables, and that chunks and threads give the same values. With `RCRA_GAME` it checks that Ratchet's head material bakes to the scalar evaluator's values at random texels.
 
 `tests/test_rcra_draw_skip.py` checks two things on synthetic flags blocks: the draw-skip rule (blended, additive, opaque, fur and distance-fade cases) and the packed draw alpha. It also checks the viewport and export wiring. With `RCRA_GAME` it checks that Ratchet's head lists only `compositeshell` as undrawn and that the texture entries mark its slot. It also checks that a glass of material alpha 0.3 gets forward alpha × 1228/4096. `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores, raw stores and atomics, groupshared memory, domain-program inputs). It skips without the DLL. `tests/test_rcra_lighting.py` checks the lighting classes. Without game files it covers the class bits, the extra-field layout, the emitted `rcraLight` and `rcraClassLit`, and the forward programs' own light emitted per light. With `RCRA_GAME` it finds the six apply programs, checks class 0 against GGX with α = r⁴ and that every class recipe is the light's own term. It also checks the cloth and foliage writers' extra fields against their packed word, that the fur writer is class 3, the dome's own key light, the jellyfish domain program, and engine compute programs with groupshared memory. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.
