@@ -121,9 +121,25 @@ class InstallDrawSkipTests(unittest.TestCase):
         self.assertFalse(rmat.forward_technique(graph('required/materials/basic_normal_gloss.materialgraph')))
         eye = self.source.asset_data(self.source.resolve('material/characters/hero/hero_ratchet_eyes/ratchet_eye.material')[0])
         result = rsurface.surface(eye_graph, eye, texture_sizes=lambda p: texture_size(self.source, p))
-        g = result['graph']
-        self.assertEqual([g.nodes[result['terms'][t]].get('value') for t in ('albedo.r', 'albedo.g', 'albedo.b')], [0.0] * 3)
-        self.assertIn(rmat.FORWARD_TECHNIQUE_NOTE, result['limitations'])
+        # the albedo is the forward program's diffuse coefficient: the eye texture at the refracted coordinate
+        self.assertIn(rsurface.FORWARD_ALBEDO_NOTE, result['limitations'])
+        self.assertIn('characters/hero/hero_ratchet/textures/ratchet_eye_c.texture', result['textures'].values())
+        recipe = rsurface.fold_nan(rsurface.export_recipe(result))
+        values = {name: 0.3 for name in recipe['inputs']}
+        values.update({'VIEW.z': 2.0, 'SV_IsFrontFace': True})
+        out = rsurface.evaluate_recipe(recipe, values, lambda node, args: [0.6, 0.4, 0.2, 1.0])
+        self.assertEqual([round(out['albedo.' + c], 6) for c in 'rgb'], [0.6, 0.4, 0.2])
+
+    def test_emissive_forward_technique_stays_black(self):
+        """A forward technique whose colour has an unlit part (an emissive eye) keeps the black stub, with the reason."""
+        from rc2016.games.rcra import surface as rsurface
+        from rc2016.games.rcra.texture import texture_size
+        key = self.source.resolve('material/characters/npc/npc_dino_large_horns/npc_dino_large_eye.material')[0]
+        self.assertTrue(rmat._graphs(self.source, key)[0].endswith('/eye_emissive.materialgraph'))
+        graph = self.source.asset_data(next(k for k in self.source.resolve(rmat._graphs(self.source, key)[0])
+                                            if self.source.entries[k]['type'] == 'materialgraph'))
+        result = rsurface.surface(graph, self.source.asset_data(key), texture_sizes=lambda p: texture_size(self.source, p))
+        self.assertTrue(any('unlit part' in line and 'technique flag 0x200' in line for line in result['limitations']))
 
     def test_forward_alpha_carries_the_draw_alpha(self):
         from rc2016.games.rcra import surface as rsurface

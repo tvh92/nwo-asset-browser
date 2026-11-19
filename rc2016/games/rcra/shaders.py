@@ -65,7 +65,13 @@ FORWARD_LIGHTING = ('g_LightGridLookup', 'g_LightLookupView', 'g_LightZBinView',
                     'g_SSRFinalTex', 'g_AoSsrBuffer', 'g_BrdfLookup', 'g_RayTracedShadows')
 # - The deformable-snow map (snow writers read it at the world position once the view is bound): empty, 0, as the
 #   deformable-snow constants are 0 under review values. Not decoded.
-FORWARD_RESOURCES = dict({name: 0.0 for name in FORWARD_LIGHTING}, g_ViewDepthBuffer=FORWARD_FAR_CLIP, g_DeformablesView=0.0)
+# - Screen-space reflections a forward program traces itself (eyes: a march through the half-resolution depth, then the
+#   previous frame's reflection reprojected by the velocity buffer): the empty scene, so the half-resolution linear depth
+#   is the far clip as the view depth, the reflection history 0 (a light source) and the velocity 0 (no motion). Not decoded.
+SCREEN_REFLECTION = {'g_HalfResLinearDepth': FORWARD_FAR_CLIP, 'g_SSRHistory': 0.0, 'g_SSRVelocityTex': 0.0}
+FLOAT_RESOURCES = ('g_ViewDepthBuffer', 'g_HalfResLinearDepth')   # depths: an integer-addressed read (ld) is a float
+FORWARD_RESOURCES = dict({name: 0.0 for name in FORWARD_LIGHTING}, g_ViewDepthBuffer=FORWARD_FAR_CLIP, g_DeformablesView=0.0,
+                         **SCREEN_REFLECTION)
 # - The scene's G-buffer (screen effects, eye normal smoothing, decals read it around the pixel): cleared, every word 0,
 #   as the empty scene the far-clip depth stands for; its size is the review viewport's (resinfo). Not decoded.
 SCENE_GBUFFER = {'g_GBufNormalSpec': 0}

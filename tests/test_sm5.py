@@ -199,6 +199,31 @@ class TranslatorTests(unittest.TestCase):
                 want = next((float(i) for i in range(n) if height(i, sm5.f32(x)) > sm5.f32(y)), -1.0)
                 self.assertEqual((got[tr.output(0, 0)], got[tr.output(0, 1)]), (want, float(n)), (high, x, y, z))
 
+    def test_ray_march_ends_at_its_step_count(self):
+        # A 32-step march whose exit test is 'k < 32 and not hit' (the eyes' screen-space reflection): the folded test no
+        # longer shows the counter, so the budget comes from the body's counter (compared with and stepped by literals).
+        source = '''Texture2D t : register(t0); SamplerState s : register(s0);
+            float4 main(float4 a : TEXCOORD0) : SV_TARGET { float k = 0; float d = -1; float p = a.x;
+                [loop] while (k < 32 && d < 0) { p += a.y; d = t.SampleLevel(s, float2(p, 0), 0).r - a.z; k += 1; }
+                return float4(k, p, d, 1); }'''
+        tr = sm5.translate(dxbc.shader(compile_hlsl(source)))
+        self.assertEqual(tr.status(), 'ready')
+
+        def height(p):
+            return ((int(p * 1000) * 37) % 101) / 100.0
+        rnd = __import__('random').Random(4)
+        f = sm5.f32
+        for _ in range(200):
+            x, y, z = f(rnd.uniform(0, 1)), f(rnd.uniform(0.001, 0.05)), f(rnd.uniform(0.8, 1.05))
+            got = sm5.evaluate(tr.graph, [tr.output(0, 0), tr.output(0, 1)], {'TEXCOORD.x': x, 'TEXCOORD.y': y, 'TEXCOORD.z': z},
+                               lambda node, args: [height(args[0]), 0.0, 0.0, 0.0])
+            k, p, d = 0.0, x, -1.0
+            while k < 32 and d < 0:
+                p = f(p + y)
+                d = f(height(p) - z)
+                k += 1
+            self.assertEqual((got[tr.output(0, 0)], got[tr.output(0, 1)]), (k, p), (x, y, z))
+
     @staticmethod
     def _early_break(x, y, z):
         f, s, c, i = sm5.f32, 0.0, (0.0, 0.0, 0.0), 0.0

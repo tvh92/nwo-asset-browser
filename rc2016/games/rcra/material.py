@@ -245,8 +245,8 @@ GRAPH_SWITCHES = 0xBC93FB5E
 TECHNIQUE_RECORD, TECHNIQUE_SLOTS, TECHNIQUE_FLAGS = 280, 32, 0x108
 FORWARD_TECHNIQUE = 0x200
 FORWARD_TECHNIQUE_NOTE = ('The game draws this graph with its forward program (technique flag 0x200): its G-buffer writer '
-                          'is a stub that stores black albedo. The forward program is not drawn for an opaque material, so '
-                          'it renders black here.')
+                          'is a stub that stores black albedo, and the forward program\'s diffuse part does not translate '
+                          '(%s), so it renders black here.')
 
 
 def material_switches(data):

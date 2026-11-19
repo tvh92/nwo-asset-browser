@@ -387,6 +387,13 @@ class ViewportDrawTests(unittest.TestCase):
         self._link('characters/npc/npc_civ_average/animations/vertex_animations/cheer_stadium_suite/materials/'
                    'cheer_stadium_npc_civ_average_01/cheer_stadium_npc_civ_average_01_arm_a.material', check)
 
+    def test_forward_technique_eye_links_with_its_albedo(self):
+        def check(_view, receipt, _textures):
+            from rc2016.games.rcra import surface as rsurface
+            self.assertEqual(receipt['blend'], 'opaque')
+            self.assertIn(rsurface.FORWARD_ALBEDO_NOTE, receipt['limitations'])
+        self._link('material/characters/hero/hero_ratchet_eyes/ratchet_eye.material', check)
+
     def test_fur_material_links(self):
         def check(_view, receipt, _textures):
             self.assertEqual(receipt['blend'], 'opaque')

@@ -1214,6 +1214,59 @@ class Translator:
                             keys.add(('x', reg, k, lane))
         return keys
 
+    def _counted_steps(self, body, before):
+        """Iterations a loop body's step counter allows (+ 2 for the exit test), read from the instructions: a register
+        lane compared with a literal (lt, ge, ilt, ige) whose only writes in the body add a literal to itself, and which
+        holds a constant at entry. The largest such count up to MAX_LOOP_ITERATIONS, or None. A budget only: the unrolling
+        stays exact whether or not the counter gates the loop (past the budget the loop is poisoned as before)."""
+        g = self.g
+        compared, steps, other = {}, {}, set()
+        for ins in body:
+            ops = ins.operands
+            if ins.opcode in ('lt', 'ge', 'ilt', 'ige') and len(ops) == 3:
+                for reg, lit in ((ops[1], ops[2]), (ops[2], ops[1])):
+                    if reg.type == 'r' and lit.type == 'l':
+                        for lane in self.lanes(ops[0]):
+                            key = ('r', reg.indices[0][0], reg.selected()[lane])
+                            compared.setdefault(key, []).append((ins.opcode, lit.values[lane if len(lit.values) == 4 else 0]))
+            if ins.opcode in ('if', 'else', 'endif', 'loop', 'endloop', 'break', 'breakc', 'continue', 'continuec', 'ret',
+                              'retc', 'discard', 'switch', 'case', 'default', 'endswitch'):
+                continue
+            for operand in ops[:self._destinations(ins)]:
+                if operand.type != 'r':
+                    continue
+                for lane in self.lanes(operand):
+                    key = ('r', operand.indices[0][0], lane)
+                    srcs = ops[1:3]
+                    if (ins.opcode in ('add', 'iadd') and len(ops) == 3 and operand.modifier is None
+                            and any(s.type == 'r' and s.modifier is None and ('r', s.indices[0][0], s.selected()[lane]) == key
+                                    for s in srcs)
+                            and any(s.type == 'l' for s in srcs) and key not in steps):
+                        lit = next(s for s in srcs if s.type == 'l')
+                        steps[key] = (ins.opcode, lit.values[lane if len(lit.values) == 4 else 0])
+                    else:
+                        other.add(key)
+        best = None
+        for key, tests in compared.items():
+            if key not in steps or key in other or before.get(key) is None or g.value(before[key]) is None:
+                continue
+            kind, raw = steps[key]
+            init = g.value(before[key])
+            for opcode, limit in tests:
+                if kind == 'add' and opcode in ('lt', 'ge'):
+                    k0, step, bound = bits_float(init if isinstance(init, int) else float_bits(init)), bits_float(raw), \
+                        bits_float(limit)
+                elif kind == 'iadd' and opcode in ('ilt', 'ige'):
+                    k0, step, bound = _signed(init if isinstance(init, int) else float_bits(init)), _signed(raw), _signed(limit)
+                else:
+                    continue
+                if not all(math.isfinite(x) for x in (k0, step, bound)) or step == 0 or (bound - k0) / step <= 0:
+                    continue
+                count = int(math.ceil((bound - k0) / step)) + 2
+                if count <= MAX_LOOP_ITERATIONS:
+                    best = count if best is None else max(best, count)
+        return best
+
     def _loop(self, start, close, flow, loops):
         """Run the loop as a region entered by every lane, then merge it with select(entry, after, before).
 
@@ -1232,6 +1285,8 @@ class Translator:
         # Data-dependent trip counts are unrolled only for small loops without nested loops (PCF taps and the like).
         predicated_limit = MAX_PREDICATED_ITERATIONS if len(body) <= 64 and not any(
             x.opcode == 'loop' for x in body) else 0
+        if predicated_limit:   # a step counter the body compares with a literal (a ray march's step count): its budget
+            predicated_limit = max(predicated_limit, self._counted_steps(body, before) or 0)
         state = dict(kind='loop', broken=g.const('b', False), continued=g.const('b', False), outer=self.outer, facts={})
         iterations = 0
         while True:

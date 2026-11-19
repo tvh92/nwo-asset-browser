@@ -130,7 +130,7 @@ class _Bindings(rshaders.NeutralEngine):
         if binding in rshaders.FORWARD_RESOURCES:   # an integer read (ld_structured) takes the same value's bits
             self.engine_read.add(binding)
             value = rshaders.FORWARD_RESOURCES[binding]
-            kind = 'f' if op.startswith('sample') or binding == 'g_ViewDepthBuffer' else 'i'
+            kind = 'f' if op.startswith('sample') or binding in rshaders.FLOAT_RESOURCES else 'i'
             return [graph.const(kind, value if kind == 'f' else int(value))] * 4
         if binding in self.records and op == 'ld_structured':
             offset = graph.value(args[4]) if len(args) > 4 else None
@@ -579,7 +579,15 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
                    "G-buffer's rounding; F0 and gloss keep it."]
     limitations += program['limitations'] if program else []
     if program is None and rmaterial.forward_technique(graph_data) and rmaterial.material_blend(material_data) == 'opaque':
-        limitations.append(rmaterial.FORWARD_TECHNIQUE_NOTE)   # an opaque material the game draws in the forward layer
+        # an opaque material the game draws in the forward layer: its albedo from the forward program's diffuse part
+        try:
+            lit = forward_albedo(graph_data, material_data, texture_sizes)
+        except (Unsupported, ValueError, KeyError) as error:
+            limitations.append(rmaterial.FORWARD_TECHNIQUE_NOTE % error)
+        else:
+            imported = _import(g, lit['graph'], [lit['terms']['albedo.' + c] for c in 'rgb'])
+            terms.update({'albedo.' + c: g.op('sat', x) for c, x in zip('rgb', imported)})
+            limitations += [x for x in lit['limitations'] if x not in limitations]
     limitations += class_limitations
     return _portable(g, terms, bindings, graph_data, material_data, tr, limitations, 'Surface')
 
@@ -1500,6 +1508,84 @@ def _check_linear_in_light(result, trials=8):
                 continue
             if abs((d - a) - 2.0 * (b - a)) > 1e-3 * max(1.0, abs(d - a)):
                 raise Unsupported('The forward colour is not linear in the key light colour')
+
+
+# The diffuse coefficient of a forward technique's program (forward_albedo): its colour is F0 + Y_d x L_d + Y_s x L_s per
+# channel, with L_d the forward diffuse light (key light with its shadows, ambient fill or light grid, distant GI, AO) and L_s
+# the specular light (it reads a specular input: BRDF lookup, reflections, probes). Y_d is the colour the program lights
+# diffusely, the albedo a deferred renderer lights with its own diffuse light, as the scene behind of a lit blended material
+# (LIT_BACKGROUND_NOTE).
+FORWARD_ALBEDO_NOTE = ('The game draws this graph with its forward program (technique flag 0x200); its G-buffer writer is '
+                       'a stub that stores black albedo. The albedo here is the forward program\'s diffuse coefficient: its '
+                       'colour is split exactly into F0 + Y_d x L_d + Y_s x L_s per channel (L_d its diffuse light, L_s its '
+                       'specular light), and Y_d is lit by the renderer\'s diffuse light. The G-buffer writer\'s normal, F0, '
+                       'gloss and occlusion are kept, and the program\'s own specular term (Y_s x L_s: its key-light '
+                       'highlight, screen-space and probe reflections) is not drawn. Its unlit part F0 is 0 at every tested '
+                       'input and texel.')
+
+
+def forward_albedo(graph_data, material_data, texture_sizes=None):
+    """The diffuse coefficient Y_d of a lit forward program (FORWARD_ALBEDO_NOTE): terms albedo.r/g/b. Translated with every
+    light source symbolic (_EngineFreeBindings); each colour channel must split into exactly one diffuse factor and any
+    number of specular ones, with Y_d free of the light sources, and the unlit part F0 must be 0 (_unlit_zero): an
+    emissive or effect colour is not an albedo.
+
+    Returns the same dict as ``surface`` with terms albedo.r/g/b. Raises Unsupported otherwise."""
+    flags = rmaterial.draw_flags(material_data)
+    if not flags:
+        raise Unsupported('The material is unlit: its forward program reads no light')
+    shader = rshaders.pass_shader(graph_data, rshaders.SLOT_FORWARD)
+    bindings = _EngineFreeBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
+                                   rshaders.material_units(graph_data, material_data), texture_sizes)
+    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
+    translator = sm5.Translator(shader, bindings)
+    bindings.graph = translator.g
+    tr = _run(translator)
+    g = tr.graph
+    engine = _reads(g, lambda name: name.startswith('ENGINE.'))
+    terms, unlit = {}, []
+    for c in 'rgb':
+        colour = tr.outputs.get(('o', 0, 'rgb'.index(c)))
+        if colour is None:
+            raise Unsupported('Forward program does not write a colour target')
+        split = _factor_split(g, g.cast(colour, 'f'), engine)
+        if split is None:
+            raise Unsupported('Forward colour is not a sum of light factors')
+        diffuse = []
+        for light, y in split[1].items():
+            names = {g.nodes[i]['name'] for i in g.reachable([light]) if g.nodes[i]['op'] == 'input'}
+            if not any(name.startswith(SPECULAR_INPUTS) for name in names):
+                diffuse.append(y)
+        if len(diffuse) != 1:
+            raise Unsupported('Forward colour has %d diffuse light factors' % len(diffuse))
+        terms['albedo.' + c] = diffuse[0]
+        unlit.append(split[0])
+    if not _unlit_zero(g, unlit, bindings, graph_data, material_data, tr):
+        raise Unsupported('Forward colour has an unlit part (emission or an effect), which an albedo cannot carry')
+    return _portable(g, terms, bindings, graph_data, material_data, tr, [FORWARD_ALBEDO_NOTE], 'Forward albedo')
+
+
+def _unlit_zero(g, unlit, bindings, graph_data, material_data, tr, trials=8):
+    """True when the unlit parts F0 (one per channel) are 0 at random inputs and texels (constant 0, or a portable
+    expression that evaluates to 0: terms the program multiplies by a zero light source); False otherwise."""
+    if all(g.value(x) == 0.0 for x in unlit):
+        return True
+    import random
+    try:
+        recipe = export_recipe(_portable(g, {'f0.' + c: x for c, x in zip('rgb', unlit)}, bindings, graph_data,
+                                         material_data, tr, [], 'Forward unlit colour'))
+    except Unsupported:
+        return False
+    rng = random.Random(7)
+    for _trial in range(trials):
+        texels = {}
+        values = {name: rng.uniform(-1.0, 1.0) for name in recipe['inputs']}
+        values.update({'VIEW.z': rng.uniform(0.5, 10.0), 'SV_IsFrontFace': True})
+        out = evaluate_recipe(recipe, values, lambda node, _a: texels.setdefault(
+            node.get('binding'), [rng.uniform(0.0, 1.0) for _ in range(4)]))
+        if any(not math.isfinite(v) or abs(v) > 1e-6 for v in out.values()):
+            return False
+    return True
 
 
 def export_recipe(result):
