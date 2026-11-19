@@ -31,7 +31,9 @@ values) and the class as the term ``class``.
 Per class the result is the colour the engine's later passes see for that light: classes 0 and 2 to 5 write it to
 g_GBufferApplyOutput; class 1 writes the diffuse light there and the specular to g_GBufferApplyOutput2, and the skin pass
 adds them as albedo x (blurred diffuse) + specular, so the recipe is albedo x diffuse + specular, the blur not applied
-(SKIN_NOTE). The skin profiles (g_SkinProfiles, an engine texture filled at run time) read 1.
+(SKIN_NOTE). The class-1 program loads one texel of the skin profiles (g_SkinProfiles): texel PROFILE_BASE + the profile
+index (G-buffer extra bits 5 to 8, the field extra.4). The recipe reads that texel as the inputs ``PROFILE.r/g/b/a``; a
+renderer looks it up in PROFILE_TEXTURE, the texture the engine binds (``profile_texel``).
 """
 from __future__ import annotations
 
@@ -50,7 +52,7 @@ CLASSES = (0, 1, 2, 3, 4, 5)
 CLASS_NAMES = {0: 'standard', 1: 'subsurface', 2: 'cloth', 3: 'hair', 4: 'anisotropic', 5: 'foliage'}
 # The g_GBufExtra fields each class's apply program reads: (bit offset, width), in the order of the terms extra.0, extra.1, ...
 EXTRA_FIELDS = {
-    1: ((0, 3), (9, 6), (18, 7), (25, 7)),            # scatter, transmission, second normal (octahedral, 7 + 7 bits)
+    1: ((0, 3), (9, 6), (18, 7), (25, 7), (5, 4)),    # scatter, transmission, second normal (7 + 7 bits), skin profile
     2: ((0, 8), (8, 8), (16, 5), (21, 6), (27, 5)),   # second normal (8 + 8), sheen mix, scatter lobe, wrap
     3: ((0, 9), (9, 9), (18, 1), (19, 7), (26, 6)),   # strand tangent (9 + 9, z sign), transmittance, lobe shift
     4: ((0, 9), (9, 9), (18, 1), (19, 6), (25, 7)),   # tangent (9 + 9, z sign), rotation, second gloss
@@ -64,12 +66,22 @@ SKIN_PROFILES = 'g_SkinProfiles'
 APPLY_OUTPUT, SPECULAR_OUTPUT = 'g_GBufferApplyOutput', 'g_GBufferApplyOutput2'
 CLASS_NOTE = ('Lighting class %d (%s): direct light from the engine\'s class-%d apply program (%s), translated; ambient light '
               'is the review rig\'s.')
-SKIN_NOTE = (' The skin pass blurs the diffuse light in screen space with the skin profiles before adding the specular; '
-             'the blur is not drawn (albedo x diffuse + specular at each pixel), and the skin profiles, an engine texture '
-             'filled at run time, read 1.')
+SKIN_NOTE = (" The skin profiles are the engine's (texel 64 + the material's profile index of "
+             "required/textures/char-skin-profiles-srgb_1d.texture); the program reads them only for transmission through "
+             "the shadow-map depth, which the unshadowed review lights do not have, so they do not change the light. The "
+             "skin pass blurs the diffuse light in screen space with the skin profiles before adding the specular; the blur "
+             "is not drawn (albedo x diffuse + specular at each pixel).")
+# The skin profiles: RiftApart.exe binds required/textures/char-skin-profiles-srgb_1d.texture once it has loaded, else its
+# "Default Skin Profile Lookup" built from the same 128 texels embedded in the executable (getter 0x141353a90,
+# TextureDefaultsInit 0x14135550a). R8G8B8A8_UNORM_SRGB, 128 x 1. The class-1 apply program and the skin pass load texel
+# PROFILE_BASE + ubfe(4, 5, extra word).
+PROFILE_TEXTURE = 'required/textures/char-skin-profiles-srgb_1d.texture'
+PROFILE_BASE = 64
+PROFILE_FIELD = 4   # the index of the profile field in EXTRA_FIELDS[1]
+PROFILE_INPUTS = ('PROFILE.r', 'PROFILE.g', 'PROFILE.b', 'PROFILE.a')
 UNSHADOWED_NOTE = (' Lights are unshadowed (shadow maps, cloud shadows and gobos read 1; transmission that the game takes '
                    'from the shadow map depth reads it at the lit surface).')
-ONE_RESOURCES = ('g_ShadowAtlas', 'g_CloudShadowMap', 'g_RayTracedShadows', 'g_GoboAtlas', 'g_AoSsrBuffer', SKIN_PROFILES,
+ONE_RESOURCES = ('g_ShadowAtlas', 'g_CloudShadowMap', 'g_RayTracedShadows', 'g_GoboAtlas', 'g_AoSsrBuffer',
                  'g_SssoHistoryTex')
 _LOCK = threading.Lock()
 _PROGRAMS = {}
@@ -148,6 +160,7 @@ class _ApplyBindings(sm5.Bindings):
         self.graph = None
         self.zeroed = set()
         self._words = None
+        self.profile_addresses = []   # the texel addresses of the skin profile loads
 
     def _inputs(self):
         g = self.graph
@@ -232,6 +245,9 @@ class _ApplyBindings(sm5.Bindings):
             return [graph.const('i', 0)] * 4
         if binding in ONE_RESOURCES:
             return [graph.const('f', 1.0)] * 4
+        if binding == SKIN_PROFILES and op.startswith('ld'):   # one texel, looked up by the renderer (profile_texel)
+            self.profile_addresses.append(args[0])
+            return [graph.input(name, 'f') for name in PROFILE_INPUTS]
         self.zeroed.add(binding)
         return [graph.const('i' if op.startswith('ld') else 'f', 0)] * 4
 
@@ -268,6 +284,8 @@ def translate(shader, cls):
         stores.setdefault(store['binding'], store)
     if APPLY_OUTPUT not in stores:
         raise rsurface.Unsupported('Apply program writes no %s' % APPLY_OUTPUT)
+    for address in bindings.profile_addresses:
+        _check_profile_address(g, address, cls)
     colour = [stores[APPLY_OUTPUT]['values'][c] for c in range(3)]
     terms = {}
     for c, channel in enumerate('rgb'):
@@ -295,7 +313,65 @@ def translate(shader, cls):
     terms = {name: (node if dark[name] == node or g.value(dark[name]) == 0.0
                     else g.op('add', node, g.op('neg', dark[name])))
              for name, node in terms.items()}
+    terms = _fold_unused_profile(g, terms, cls)
     return dict(graph=g, terms=terms, zeroed=sorted(bindings.zeroed))
+
+
+def _check_profile_address(g, address, cls):
+    """Raise Unsupported unless a skin profile load reads texel PROFILE_BASE + the profile field (at random field values)."""
+    import random
+    from collections import defaultdict
+
+    from rc2016.games.rcra import surface as rsurface
+    fields = EXTRA_FIELDS.get(cls, ())
+    if len(fields) <= PROFILE_FIELD:
+        raise rsurface.Unsupported('Class %d reads the skin profiles without a profile field' % cls)
+    rng = random.Random(1)
+    for _trial in range(16):
+        values = {'extra.%d' % k: float(rng.randrange(1 << w)) for k, (_o, w) in enumerate(fields)}
+        got = sm5.evaluate(g, [address], defaultdict(float, values), lambda *a: (0.0,) * 4)[address]
+        if got != PROFILE_BASE + values['extra.%d' % PROFILE_FIELD]:
+            raise rsurface.Unsupported('The skin profile load does not read texel %d + the profile field' % PROFILE_BASE)
+
+
+def profile_reach(g, terms, cls, trials=48):
+    """True when the skin profile inputs change the terms at random inputs, fields and profile colours."""
+    import random
+    from collections import defaultdict
+    names = {g.nodes[i]['name'] for i in g.reachable(list(terms.values())) if g.nodes[i]['op'] == 'input'}
+    if not names & set(PROFILE_INPUTS):
+        return False
+    rng = random.Random(7)
+    roots = list(terms.values())
+    for _trial in range(trials):
+        values = defaultdict(float, {name: rng.uniform(-1.0, 1.0) for name in names})
+        values.update({'extra.%d' % k: float(rng.randrange(1 << w)) for k, (_o, w) in enumerate(EXTRA_FIELDS.get(cls, ()))})
+        values.update(DEPTH=rng.uniform(0.2, 8.0), gloss=rng.random(), occlusion=rng.random())
+        outs = []
+        for colour in ((0.0, 0.0, 0.0, 0.0), tuple(rng.uniform(0.05, 1.0) for _ in range(4))):
+            values.update(zip(PROFILE_INPUTS, colour))
+            outs.append(sm5.evaluate(g, roots, values, lambda *a: (0.0,) * 4))
+        if any(outs[0][r] != outs[1][r] and not (outs[0][r] != outs[0][r] and outs[1][r] != outs[1][r]) for r in roots):
+            return True
+    return False
+
+
+def _fold_unused_profile(g, terms, cls):
+    """The terms with the skin profile inputs at 0 when they do not change them: under these bindings the class-1 program
+    reads the profile only for transmission through the shadow-map depth (gated by the key light's shadow cascade
+    constants, 0 here) and the light grid's ambient transmission, both 0 (PROFILE_NOTE)."""
+    from rc2016.games.rcra import surface as rsurface
+    if profile_reach(g, terms, cls):
+        return terms
+    return rsurface._substitute(g, terms, {i: g.const('f', 0.0) for i, n in enumerate(g.nodes)
+                                           if n['op'] == 'input' and n['name'] in PROFILE_INPUTS})
+
+
+def profile_texel(texels, index):
+    """The skin profile texel (linear RGBA) an apply program loads for profile ``index``: texels[PROFILE_BASE + index], 0
+    past the texture's end as a D3D load reads."""
+    k = PROFILE_BASE + int(index)
+    return tuple(float(x) for x in texels[k]) if 0 <= k < len(texels) else (0.0, 0.0, 0.0, 0.0)
 
 
 def _portable(g, terms):

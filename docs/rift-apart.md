@@ -715,7 +715,7 @@ Classes 1 to 5 read a fifth target, `g_GBufExtra`. It is the writer's `SV_Target
 | Class | Writers (graphs) | Apply program | `g_GBufExtra` fields (bit offset, width) |
 | --- | --- | --- | --- |
 | 0 | the rest (862 with bit 12 clear, 556 with it set) | `0x386225C` | none |
-| 1 subsurface | 15: skin and heads (`basic_normal_gloss_subsurface`, `basic_subsurface_head`), nymphs, dinosaurs | `0x383BE0C`, reads `g_SkinProfiles`; diffuse and specular to separate targets | (0, 3) scatter, (9, 6) transmission, (18, 7) and (25, 7) a second octahedral normal |
+| 1 subsurface | 15: skin and heads (`basic_normal_gloss_subsurface`, `basic_subsurface_head`), nymphs, dinosaurs | `0x383BE0C`, reads `g_SkinProfiles`; diffuse and specular to separate targets | (0, 3) scatter, (9, 6) transmission, (18, 7) and (25, 7) a second octahedral normal, (5, 4) the skin profile |
 | 2 cloth | 11 (`basic_normal_gloss_cloth`, `cloth_distressed`, hex platforms) | `0x37C962C` | (0, 8) and (8, 8) a second normal, (16, 5) sheen mix, (21, 6) scatter lobe, (27, 5) wrap |
 | 3 hair | the engine fur writer ([Fur materials](#fur-materials)) | `0x381EE4C` | (0, 9), (9, 9) and (18, 1) the strand tangent, (19, 7) transmittance, (26, 6) lobe shift |
 | 4 anisotropic | 7 (`basic_normal_gloss_aniso*`, `hero_armor_palette_aniso`) | `0x37E5A7C` | (0, 9), (9, 9) and (18, 1) the tangent, (19, 6) its rotation, (25, 7) a second gloss |
@@ -724,7 +724,7 @@ Classes 1 to 5 read a fifth target, `g_GBufExtra`. It is the writer's `SV_Target
 The class programs, as their translations read:
 - **Cloth:** sheen from a Charlie distribution (`(2 + 1/α) sin^(1/α)θ`) with the Neubelt visibility `1 / (4 (NL + NV − NL·NV))`, coloured by F0. It is mixed with GGX by the sheen field, both on the second normal, with r = `0.9725 − 0.6011 gloss`. The diffuse wraps by the wrap field.
 - **Anisotropic:** Lambert, plus the average of two anisotropic GGX lobes, `D = 1 / (αt αb (h·n² + h·t² / αt² + h·b² / αb²)²)`. Lobe 1 sits on the G-buffer tangent t (decoded like the writers' octahedral normal) with b = normalize(n × t); lobe 2 on t turned about n by the rotation field × 0.04987 rad. Both have αt = r(gloss)⁴ along the tangent and αb = r(second gloss / 127)⁴ across it. The visibility is separable, `0.25 / ((v·h (1 − k²) + k²)(n·l (1 − k²) + k²))` with k = (0.75 min(αt, αb) + 0.25 max(αt, αb) + 1) / √8, and the Fresnel is Schlick on v·h (`lighting.anisotropic_lobes`; `test_class_4_is_two_anisotropic_ggx_lobes` matches the translated program within 1 %).
-- **Subsurface:** two GGX lobes, mixed by view depth. Transmission through the shadow map's depth, shaped by the skin profile, plus a Henyey–Greenstein scatter lobe (g = 0.65) scaled by the scatter field. The skin pass (`0x33CC4FC`) blurs the diffuse light in screen space with the skin profiles, then adds the specular.
+- **Subsurface:** two GGX lobes, mixed by view depth. Transmission through the shadow map's depth, plus a Henyey–Greenstein scatter lobe (g = 0.65) scaled by the scatter field. The transmission is Burley's normalised diffusion, `0.125 / d (e^(−t/d) + e^(−t/3d))`, with t the thickness from the shadow map and d the skin profile colour per channel (see [Skin profiles](#skin-profiles)). It is gated by `0 < sat(0.2 − 0.8 N·L) × m_KeyLightShellLodConsts.y`, a shadow cascade constant. The skin pass (`0x33CC4FC`) blurs the diffuse light in screen space with the skin profiles, then adds the specular.
 - **Foliage:** wrapped diffuse plus back transmission, `(1 − sat(N·L + 0.9)²) sat((w − N·L) / (1 + w)²)`, scaled by the transmittance field.
 - **Hair:** lobes shifted along the strand tangent, and transmission.
 
@@ -733,11 +733,36 @@ The class programs, as their translations read:
 - **The light:** one key light, direction `L` and colour `LIGHT`, unshadowed. The shadow atlas, cloud shadows, ray-traced shadows and gobo read 1, the point lies past every shadow shell, and the sunlight occlusion factor is 0.
 - **The view:** the camera-to-point offset `VIEW` and the view depth `DEPTH`.
 - **Everything else:** 0. That covers ambient fill, the light grid, probes, GI, SSR and the local light lists (empty).
-- **Skin profiles:** an engine texture filled at run time. They read 1, labelled.
+- **Skin profiles:** the class-1 load of texel 64 + the profile field reads the inputs `PROFILE.rgba`. `lighting.translate` checks the address at random field values. Under these bindings the profile reaches the light only through the shadow-map transmission, which is off, so the recipe folds it to 0 (`profile_reach`, `SKIN_NOTE`).
 
 The packed fields read back exactly through `surface._integers_in_float` (`PACKED_NOTE`), as for the writers. Each output is split as `albedo × diffuse + specular`: the apply program multiplies its diffuse light by DiffuseEmis rgb, and for class 1 the skin pass does. The recipe holds the light's own term, the output minus its value with `LIGHT` = 0. That removes the hair program's light-independent ambient transmission, which comes from inputs bound to 1. Against the program translated without the integer-to-float rewrite, the recipes agree within 1.1 × 10⁻⁷ relative at 300 random inputs per class. The viewer's GLSL agrees with the recipes within 4 × 10⁻⁴ relative on the GPU.
 
 `surface.surface` returns the class as the constant term `class` and the fields as the terms `extra.<k>`: `ubfe` of the writer's `SV_Target3`, read back by the packed-field rewrite. At random inputs they equal the fields of the writer's word, on cloth, foliage, subsurface and anisotropic materials. A word that is a sum of fields, as the foliage writers pack it, is read as their or, under the same packing assumption. A writer that picks its class at run time (a select of packed words) is lit as class 0 and says so.
+
+#### Skin profiles
+
+`g_SkinProfiles` is `required/textures/char-skin-profiles-srgb_1d.texture`: `R8G8B8A8_UNORM_SRGB`, 128 × 1. The engine's getter (`0x141353a90`) returns that texture once it has loaded, else its "Default Skin Profile Lookup", which `TextureDefaultsInit` builds from the same 128 texels embedded in the exe. Texels 0 to 7 are the eight skin tones of `char-skin-tone-srgb_1d.texture`. Texels 64 to 67 and 79 are the profile colours (64 is (80, 36, 29), a red scatter distance), and the rest are black. The class-1 apply program and the skin pass both load texel 64 + bits 5 to 8 of `g_GBufExtra`.
+
+#### Engine lookup tables
+
+`TextureDefaultsInit` (`0x141353e10`) also builds the BRDF lookup, "Default Brdf Lookup". No texture asset replaces it: the only other reference to its texture is at shutdown. It is a 64 × 64 `R16G16B16A16_FLOAT` array of 4 slices:
+
+| Slice | Content |
+| --- | --- |
+| 0 | Red and green from 4,096 half-float pairs at `0x1444c6cc0` (blue and alpha 0): a split-sum style table, red falling and green rising along the roughness axis |
+| 1, 2 | 64 × 64 × 4 half floats copied from `0x14548e340` and `0x145496340` |
+| 3 | 0 |
+
+The probes the programs read are prefiltered on the GPU by `EnvProbeMipGen` (render task `0x14108d140`). Per probe face it dispatches the convolution program (exe offset 63366492): GGX importance sampling with filtered source mips. The CPU fills one 64-byte `g_MiscArray` record per output mip (`0x14108cd60`). The mips are 128, 64, 32, 16 and 8 texels. Each record holds the probe and face, 1 / size and half of it, and four per-mip tables from the exe:
+
+| Mip | 0 | 1 | 2 | 3 | 4 |
+| --- | --- | --- | --- | --- | --- |
+| `0x1432d1f50` | 0.000362 | 0.00548 | 0.0416 | 0.209 | 0.8 |
+| `0x1432d1f68` | 0.12 | 0.12 | 0.08 | 0.04 | 0 |
+| `0x1452f0b60` (c; the record also holds 4 / (1 − c)) | 0.982 | 0.914 | 0.487 | 0.00316 | 0 |
+| `0x1432d1ff0` (n; the record holds 2ⁿ and n) | 6 | 6 | 7 | 8 | 8 |
+
+These addresses are for the Steam build the browser was checked against. Nothing in the browser reads these tables yet: the viewer's ambient light and environment specular are the review rig's (see [Not translated](#not-translated)).
 
 ### Forward profile
 
@@ -1110,9 +1135,9 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 ### Not translated
 
 - **Blended materials that read the scene behind in scene mode** (27 of 1,747): Blender gets their G-buffer surface, opaque.
-- **Forward lighting in Blender:** Blender's lights shade the G-buffer surface, which assumes that the forward program lights the same terms as the deferred apply. The viewer uses the program's own key-light term ([Own key light](#own-key-light)). Only that term is used: the programs' local light lists, probes and reflections are not (the review rig has no light grid). The probe and ambient terms also read the BRDF lookup (`g_BrdfLookup`, a 2D array), which no texture asset holds. In the exe, the SM5 programs that bind it only read it, and its source is not traced. So the review environment cannot stand in for the probes without an inferred table.
+- **Forward lighting in Blender:** Blender's lights shade the G-buffer surface, which assumes that the forward program lights the same terms as the deferred apply. The viewer uses the program's own key-light term ([Own key light](#own-key-light)). Only that term is used: the programs' local light lists, probes and reflections are not (the review rig has no light grid). The probe and ambient terms also read the BRDF lookup and the GPU-prefiltered probes. Both are now traced ([Engine lookup tables](#engine-lookup-tables)), but no renderer here uses them yet: that needs the review environment convolved by the game's probe program, and the light grid or ambient fill bound to the review ambient.
 - **Lighting classes in Blender:** classes 1, 2, 3 and 5 are lit with the class-0 BRDF there, class 4 with its own lobes (above); the viewer runs every class's own program ([Lighting classes](#lighting-classes)).
-- **Skin:** the viewer does not draw the skin pass's screen-space blur, the shadow-map thickness behind transmission (the model viewer has no shadow maps), or the skin profiles, which read 1. `g_SkinProfiles` is a 1D texture that no SM5 program in the exe writes (only the class-1 apply program and the skin pass read it), so the engine fills it on the CPU, and that code is not traced.
+- **Skin:** the viewer does not draw the skin pass's screen-space blur, a seven-tap pass over a four-level pyramid of the diffuse light that other skin passes write. It does not draw the transmission through the shadow-map depth either (the model viewer has no shadow maps), which is the only path by which the skin profiles ([Skin profiles](#skin-profiles)) reach the light.
 - **Opaque materials on forward techniques** (245 materials, 44 of them eyes; [Techniques](#techniques)): 232 draw from their forward program.
   - 73 draw with its diffuse coefficient as albedo, 36 of them eyes (`basic_eye`, the crowd eyeballs, `eye_colortint_random`).
   - 44 draw with an albedo and an unlit colour, 6 of them eyes (`eye_emissive`, `basic_eye_holo`, `basic_eye_dimensional`), the rest flares, arcs, glows, and the jellies and gels whose key and ambient light share one albedo.

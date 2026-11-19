@@ -132,6 +132,11 @@ class ClassTests(unittest.TestCase):
             want = 0.5 * (_cycles_lobe(rough, aniso, rot1, tangent, light) + _cycles_lobe(rough, aniso, rot2, tangent, light))
             self.assertAlmostEqual(got, want, delta=1e-4 * max(want, 1.0), msg=str(case))
 
+    def test_profile_texel_is_a_d3d_load(self):
+        texels = [(k / 255.0, 0.0, 0.0, 1.0) for k in range(128)]
+        self.assertEqual(lighting.profile_texel(texels, 3), (67 / 255.0, 0.0, 0.0, 1.0))
+        self.assertEqual(lighting.profile_texel(texels[:70], 9), (0.0, 0.0, 0.0, 0.0))   # past the end reads 0
+
     def test_anisotropic_tangent_is_unit(self):
         for fx, fy in ((0, 0), (255, 255), (511, 0), (300, 211)):
             for sign in (0, 1):
@@ -332,6 +337,17 @@ class RealLightingTests(unittest.TestCase):
             for got, w in zip(lighting.evaluate(recipe, v), want):
                 self.assertAlmostEqual(got, w, delta=0.01 * max(abs(w), 1e-3))
             checked += 1
+
+    def test_class_1_reads_the_skin_profile_only_through_shadow_transmission(self):
+        """The class-1 program loads texel 64 + the profile field (checked inside lighting.translate); with the review
+        lights unshadowed the profile does not change the light, so the recipe folds it to 0 and says why."""
+        recipe = lighting.direct(GAME, 1)
+        names = {n['name'] for n in recipe['nodes'] if n['op'] == 'input'}
+        self.assertFalse(names & set(lighting.PROFILE_INPUTS))
+        self.assertIn('char-skin-profiles-srgb_1d.texture', ' '.join(recipe['limitations']))
+        from rc2016.games.rcra.texture import texture_header
+        header = texture_header(self.source, lighting.PROFILE_TEXTURE)
+        self.assertEqual((header['format'], header['sd_width'], header['sd_height']), (29, 128, 1))   # RGBA8 sRGB, 1D
 
     def test_class_recipes_are_portable_and_read_their_fields(self):
         for cls in lighting.CLASSES:
