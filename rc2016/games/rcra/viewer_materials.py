@@ -157,8 +157,7 @@ def _translate(graph, data, source, program=None):
             bexp.replace_missing(source, graph, lit)
             recipes['forward']['lit'] = rsurface.fold_nan(rsurface.export_recipe(lit))
             results['forward_lit'] = lit
-    forward_technique = 'surface' in recipes and any(note in results['surface']['limitations'] for note in (
-        rsurface.FORWARD_ALBEDO_NOTE, rsurface.FORWARD_UNLIT_ONLY_NOTE))
+    forward_technique = 'surface' in recipes and rsurface.forward_split_drawn(results['surface']['limitations'])
     if blend == 'opaque' and forward_technique and draw_flags(data):
         try:   # a forward technique's own specular term, drawn once per review light (rcra_glsl)
             own = rsurface.forward_specular(graph, data, texture_sizes=lambda path: texture_size(source, path))

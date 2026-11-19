@@ -165,6 +165,79 @@ class InstallDrawSkipTests(unittest.TestCase):
         self.assertGreater(max(out['unlit.' + c] for c in 'rgb'), 0.0)
         self.assertTrue(all(out['unlit.' + c] >= 0.0 for c in 'rgb'))
 
+    def _material(self, path):
+        key = self.source.resolve(path)[0]
+        graph = self.source.asset_data(next(k for k in self.source.resolve(rmat._graphs(self.source, key)[0])
+                                            if self.source.entries[k]['type'] == 'materialgraph'))
+        return graph, self.source.asset_data(key)
+
+    def _recipe(self, fn, path):
+        from rc2016.games.rcra import surface as rsurface
+        from rc2016.games.rcra.texture import texture_size
+        graph, data = self._material(path)
+        result = fn(graph, data, texture_sizes=lambda p: texture_size(self.source, p))
+        return rsurface.fold_nan(rsurface.export_recipe(result))
+
+    def _evaluate(self, recipe):
+        from rc2016.games.rcra import surface as rsurface
+        values = {name: 0.3 for name in recipe['inputs']}
+        values.update({'TEXCOORD2.z': 1.0, 'TEXCOORD3.x': 1.0, 'TEXCOORD3.w': 1.0, 'VIEW.z': -2.0, 'SV_IsFrontFace': True})
+        return rsurface.evaluate_recipe(recipe, values, lambda node, args: [0.5, 0.5, 0.5, 1.0])
+
+    def test_key_and_ambient_factors_share_one_albedo(self):
+        """The jelly lights its colour by the key light (in a shadow select, times AO) and the ambient light with one
+        coefficient: multiplied out, that coefficient is its albedo; its rim is the unlit colour."""
+        from rc2016.games.rcra import surface as rsurface
+        recipe = self._recipe(rsurface.surface, 'material/characters/npc/npc_mrfunguy_jelly/npc_mrfunguy_jelly.material')
+        self.assertIn(rsurface.FORWARD_ALBEDO_NOTE, recipe['limitations'])
+        out = self._evaluate(recipe)
+        self.assertGreater(out['albedo.r'], 0.0)
+        self.assertGreater(out['unlit.r'], 0.0)
+
+    def test_different_diffuse_coefficients_draw_the_own_key_light(self):
+        from rc2016.games.rcra import surface as rsurface
+        path = 'material/characters/enemy/enm_amoeboid_large/enm_amoeboid_large.material'
+        recipe = self._recipe(rsurface.surface, path)
+        self.assertTrue(any(line.startswith(rsurface.FORWARD_OWN_LIGHT_NOTE.split('(%s)')[0])
+                            for line in recipe['limitations']))
+        self.assertGreater(self._evaluate(recipe)['unlit.r'], 0.0)   # the rim, with every light source 0
+        own = self._recipe(rsurface.forward_specular, path)
+        self.assertIn(rsurface.FORWARD_OWN_SPECULAR_NOTE, own['limitations'])
+        self.assertTrue({'LIGHT.r', 'L.x'} <= set(own['inputs']))
+        self.assertFalse([n for n in own['inputs'] if n.startswith('ENGINE.')])
+
+    def test_unlit_effects_of_light_state(self):
+        """Unlit materials: an exposure-scaled arc glows at the review exposure 1; a planet's terminator takes the review
+        key direction; glass that reads the key light and the default probe is black (both 0 under the profile)."""
+        from rc2016.games.rcra import surface as rsurface
+        arc = self._recipe(rsurface.surface, 'material/visualeffect/global/gbl_electricity_arc_mesh_01/'
+                                             'gbl_electricity_arc_mesh_01.material')
+        self.assertGreater(self._evaluate(arc)['unlit.r'], 1.0)
+        planet = self._recipe(rsurface.surface, 'material/environment/molonoth/unique/mol_uniq_planet_surface_01/'
+                                                'mol_uniq_planet_surface_01.material')
+        self.assertIn(rsurface.FORWARD_DIRECTION_NOTE, planet['limitations'])
+        self.assertFalse([n for n in planet['inputs'] if n.startswith(('L.', 'LIGHT.', 'ENGINE.'))])
+        glass = self._recipe(rsurface.surface, 'material/visualeffect/global/gbl_debris_chunk_rotating_01/'
+                                               'gbl_glass_chunk_rotating_01_unlit.material')
+        self.assertIn(rsurface.FORWARD_BLACK_NOTE, glass['limitations'])
+        self.assertTrue(any(line.startswith(rsurface.FORWARD_UNLIT_LIGHT_NOTE.split('(%s)')[0])
+                            for line in glass['limitations']))
+
+    def test_masked_unlit_colour_is_not_zero(self):
+        """The rotating debris chunk's colour is masked by its texels: drawn, not taken for 0 (UVs and vertex colour in
+        [0, 1] in the zero test)."""
+        from rc2016.games.rcra import surface as rsurface
+        recipe = self._recipe(rsurface.surface, 'material/visualeffect/global/gbl_debris_chunk_rotating_01/'
+                                                'gbl_debris_chunk_rotating_01_unlit.material')
+        self.assertIn(rsurface.FORWARD_UNLIT_NOTE, recipe['limitations'])
+
+    def test_goo_decal_lights_the_scene_behind(self):
+        from rc2016.games.rcra import surface as rsurface
+        recipe = self._recipe(rsurface.forward, 'material/visualeffect/character/enemy/enm_fx_goo_decal_simple_alt/'
+                                                'enm_fx_goo_decal_simple_alt.material')
+        self.assertTrue({'lit_background.r', 'background.r'} <= set(recipe['terms']))
+        self.assertTrue(any(rsurface.LIT_BACKGROUND_SPECULAR_NOTE in line for line in recipe['limitations']))
+
     def test_forward_alpha_carries_the_draw_alpha(self):
         from rc2016.games.rcra import surface as rsurface
         from rc2016.games.rcra.texture import texture_size

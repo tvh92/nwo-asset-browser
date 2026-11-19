@@ -263,6 +263,62 @@ class CaseTests(unittest.TestCase):
             self.assertEqual({k: got[out[k]] for k in out}, {k: want[terms[k]] for k in terms}, v)
 
 
+class FactorSplitTests(unittest.TestCase):
+    """surface._factor_split: F0 + sum Y x L, exact, with L the maximal light subexpressions."""
+
+    @staticmethod
+    def _light(g):
+        return rsurface._reads(g, lambda name: name.startswith(('ENGINE.', 'L.', 'LIGHT.')))
+
+    @staticmethod
+    def _total(g, split):
+        f0, factors = split
+        total = f0
+        for light, y in factors.items():
+            total = g.op('add', total, g.op('mul', y, light))
+        return total
+
+    def _same(self, g, a, b, names):
+        for k, v in enumerate((0.0, 0.3, 0.7, 1.2)):
+            inputs = {n: v + 0.11 * j for j, n in enumerate(names)}
+            inputs['ENGINE.shadow'] = 1.0 if k % 2 else -1.0
+            got, want = (sm5.evaluate(g, [x], inputs)[x] for x in (a, b))
+            self.assertAlmostEqual(got, want, places=5)
+
+    def test_select_on_a_light_condition_splits_per_coefficient(self):
+        """select(shadowed, Y key + spec, spec): with expand the albedo Y stays a coefficient; without, the select is one
+        factor."""
+        g = sm5.Graph()
+        albedo, key, spec = g.input('TEXCOORD.x'), g.input('LIGHT.r'), g.input('ENGINE.g_BrdfLookup.0')
+        lit = g.op('lt', g.const('f', 0.0), g.input('ENGINE.shadow'))
+        colour = g.select(lit, g.op('add', g.op('mul', albedo, key), spec), spec)
+        self.assertEqual(list(rsurface._factor_split(g, colour, self._light(g))[1].values()), [g.const('f', 1.0)])
+        split = rsurface._factor_split(g, colour, self._light(g), expand=True)
+        self.assertIn(albedo, split[1].values())
+        self._same(g, self._total(g, split), colour, ['TEXCOORD.x', 'LIGHT.r', 'ENGINE.g_BrdfLookup.0'])
+
+    def test_products_of_light_terms_multiply_out(self):
+        """(key x shadow) x (albedo x (1 - ao)): with expand the coefficient is the albedo; without, the product stays whole."""
+        g = sm5.Graph()
+        albedo, key, ao = g.input('TEXCOORD.x'), g.input('LIGHT.r'), g.input('ENGINE.ao')
+        colour = g.op('mul', g.op('mul', key, g.input('ENGINE.shadow')),
+                      g.op('mul', albedo, g.op('add', g.const('f', 1.0), g.op('neg', ao))))
+        plain = rsurface._factor_split(g, colour, self._light(g))
+        self.assertEqual(list(plain[1].values()), [g.const('f', 1.0)])
+        expanded = rsurface._factor_split(g, colour, self._light(g), expand=True)
+        self.assertTrue(all(g.value(y) is None for y in expanded[1].values()))   # every coefficient carries the albedo
+        self._same(g, self._total(g, expanded), colour, ['TEXCOORD.x', 'LIGHT.r', 'ENGINE.ao'])
+
+    def test_set_inputs_binds_the_review_direction(self):
+        g = sm5.Graph()
+        term = g.op('sat', g.op('add', g.input('L.y'), g.input('TEXCOORD.x')))
+        bound = rsurface._review_direction(g, {'t': term})['t']
+        names = {g.nodes[i]['name'] for i in g.reachable([bound]) if g.nodes[i]['op'] == 'input'}
+        self.assertEqual(names, {'TEXCOORD.x'})
+        self.assertAlmostEqual(sm5.evaluate(g, [bound], {'TEXCOORD.x': 0.0})[bound], rsurface.REVIEW_KEY_DIRECTION[1],
+                               places=6)
+
+
 class ConstantNormalTests(unittest.TestCase):
     def test_constant_words_invert_the_packing(self):
         for n in ((0.6, 0.0, 0.8), (-0.2, 0.7, -0.68556546), (0.70710677, 0.70710677, 0.0), (0.0, 0.0, 1.0)):
@@ -689,10 +745,13 @@ class RealSurfaceTests(unittest.TestCase):
         self.assertTrue(rsurface.reads_scene(rsurface.export_recipe(result)))
         self.assertTrue(any(rsurface.UNLIT_BACKGROUND_NOTE in line for line in result['limitations']))
 
-    def test_background_lit_by_specular_light_is_unsupported(self):
-        with self.assertRaisesRegex(rsurface.Unsupported, 'more than one light factor'):
-            self.forward_of('material/visualeffect/character/enemy/enm_fx_goo_decal_simple_alt/enm_cord_juice_decal'
-                            '.material')
+    def test_background_specular_factor_is_left_out(self):
+        """The goo decal also passes the scene behind through a specular factor: the profile's zero specular light leaves
+        it out, and the diffuse factor lights the scene behind as albedo."""
+        result = self.forward_of('material/visualeffect/character/enemy/enm_fx_goo_decal_simple_alt/enm_cord_juice_decal'
+                                 '.material')
+        self.assertIn('lit_background.r', result['terms'])
+        self.assertTrue(any(rsurface.LIT_BACKGROUND_SPECULAR_NOTE in line for line in result['limitations']))
 
     @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
     def test_blender_forward_nodes_bake_to_the_recipe(self):

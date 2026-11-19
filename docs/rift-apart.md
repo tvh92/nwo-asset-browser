@@ -594,23 +594,31 @@ Bit `0x200` marks a forward technique:
 
 Blended materials sit on most of them. An opaque material on one is drawn opaque in the forward layer: the engine's blend enum describes opaque as "GBuffer or Forward layer". Where the draw reads the material bit is not traced. `material.forward_technique` reads the bit.
 
-For such an opaque material, `surface.surface` takes the albedo and an unlit colour from the forward program (`surface.forward_albedo`). The program is translated with every light source symbolic (`_forward_split`: the key light as `L` and `LIGHT`, unshadowed, the others `ENGINE.*`), and each colour channel must split exactly into F0 + Y_d × L_d + Y_s × L_s (`_factor_split`). The light factors are sorted by what they read:
+For such an opaque material, `surface.surface` takes the albedo and an unlit colour from the forward program (`surface.forward_albedo`). The program is translated with every light source symbolic (`_forward_split`: the key light as `L` and `LIGHT`, unshadowed, the others `ENGINE.*`), and each colour channel is split exactly into F0 + Y_d × L_d + Y_s × L_s (`_factor_split`). The split goes through add, negate, a multiply or divide by a light-free value and a select on a light-free condition. It also has two exact rewrites:
+
+- **A select on a light-dependent condition** (shadow cascades, the side of N·L) whose arms have one F0 becomes F0 + Σ Y × select(c, L_a, L_b), the arms' factors grouped by coefficient.
+- **A product of two light-dependent values** ((key light × shadows) × (albedo × AO)) is multiplied out into its cross terms, (A0 + Σ Y_a L_a)(B0 + Σ Y_b L_b). This is tried only when a channel does not split without it. It keeps the result exact up to float rounding, but it can move part of a diffuse light into a factor that reads the BRDF lookup.
+
+The light factors are then sorted by what they read:
 
 - **Specular** (L_s): it reads a specular input (`SPECULAR_INPUTS`: the BRDF lookup, reflections, probes).
-- **Diffuse** (L_d): it reads a light colour, the key light's `LIGHT` or another engine light (ambient fill, GI, the light grid). There may be at most one.
-- **Neither:** a factor that reads only the key light's direction (the planet surfaces' terminator) or an exposure value (`EXPOSURE_INPUTS`, such as `m_ToneMapAnchor`) is not light. The split fails.
+- **Diffuse** (L_d): it reads a light colour, the key light's `LIGHT` or another engine light (ambient fill, GI, the light grid). Factors with one coefficient are one diffuse light, their sum. The coefficients count as one when they are the same node, or equal at random inputs and texels. More than one coefficient takes the fallback below.
+- **Key-light direction only:** a factor that reads `L` but no light colour (the planet surfaces' terminator) is not light. It joins F0, with `L` at a review direction (`REVIEW_KEY_DIRECTION`, game (0.303, 0.808, 0.505): from above and in front; `FORWARD_DIRECTION_NOTE`).
 
-A material without the lit bit must have no light factor at all; its program reads light state only for effects (a terminator, a probe tint, `m_ActualLuminance`), so such a factor also fails the split.
+A material without the lit bit has no diffuse or specular light. Its program may still read a light source for an effect, such as the key light's colour or the default probe; those factors are 0, as the forward profile has every light source (`FORWARD_UNLIT_LIGHT_NOTE`).
 
 From the split:
 
 - **Albedo:** Y_d, the colour the program lights diffusely, replaces the stub's black albedo (`FORWARD_ALBEDO_NOTE`). The renderer lights it with its own diffuse light, as the scene behind a lit blended material is lit ([Forward profile](#forward-profile)). Without a diffuse factor the albedo stays black (`FORWARD_UNLIT_ONLY_NOTE`).
-- **Unlit colour:** F0 reads no light source: an emissive part, or the whole colour of an unlit program. When it is not 0 at random inputs and texels (`_unlit_zero`), it becomes the terms `unlit.r/g/b` (`FORWARD_UNLIT_NOTE`), which a renderer adds after the lit terms in scene-linear units, negative values clamped to 0. F0 must not read the scene behind (`g_FrameBuffer`): the photo-mode filters do.
+- **Unlit colour:** F0 reads no light source: an emissive part, or the whole colour of an unlit program. When it is not 0 at random inputs and texels (`_unlit_zero`), it becomes the terms `unlit.r/g/b` (`FORWARD_UNLIT_NOTE`), which a renderer adds after the lit terms in scene-linear units, negative values clamped to 0. F0 must not read the scene behind (`g_FrameBuffer`): the photo-mode filters do. The zero test draws UVs and the vertex colour (squared, never negative) from [0, 1] and the other inputs from [−1, 1], over 24 trials, so a colour masked by a texel or a UV range is not taken for 0.
+- **Black:** with no diffuse, specular or unlit part, the forward colour is 0 and the material is drawn black (`FORWARD_BLACK_NOTE`). For example, the discoball test material's colour multiplies by its own zero constants.
 - **Kept from the stub:** the normal, F0, gloss and occlusion.
 
-When the split fails, or both parts are 0, the material stays black and its limitation gives the reason (`FORWARD_TECHNIQUE_NOTE`).
+**Different diffuse coefficients** (`_ManyDiffuse`, `FORWARD_OWN_LIGHT_NOTE`): one albedo cannot carry them, so the albedo stays black. The unlit colour is the program's colour with every light source 0 (the forward profile), and `forward_specular` returns the whole key-light term (`_own_light`: the colour with the `ENGINE.*` inputs 0, minus that with `LIGHT` also 0). The viewer adds that term once per review light; the ambient light, local lights and reflections are not drawn. Blender has no per-light program, so it draws the unlit colour alone.
 
-For a lit material the viewer also draws the program's own specular term (`surface.forward_specular`, `FORWARD_SPECULAR_NOTE`), as it draws a blended material's [own key light](#own-key-light). The term is the sum of the specular factors' Y_s × L_s, with every `ENGINE.*` input set to 0 as the forward profile has them (`_zero_inputs`), so only the key light remains: its highlight, without reflections. Setting them to 0 rebuilds the term with constant folding, and a product with 0 folds to 0 only when the other factor has known bounds, so the result stays exact (a reflection weight times a zero reflection). The term must be linear in `LIGHT` and 0 at `LIGHT` = 0, and the viewer adds it once per review light to the lit G-buffer surface. Blender has no per-light program, so there the stub's F0 gives the specular.
+When the split fails otherwise, the material stays black and its limitation gives the reason (`FORWARD_TECHNIQUE_NOTE`).
+
+For a lit material the viewer also draws the program's own specular term (`surface.forward_specular`, `FORWARD_SPECULAR_NOTE`; the whole key-light term in the fallback, `FORWARD_OWN_SPECULAR_NOTE`), as it draws a blended material's [own key light](#own-key-light). The term is the sum of the specular factors' Y_s × L_s, with every `ENGINE.*` input set to 0 as the forward profile has them (`_zero_inputs`), so only the key light remains: its highlight, without reflections. Setting them to 0 rebuilds the term with constant folding, and a product with 0 folds to 0 only when the other factor has known bounds, so the result stays exact (a reflection weight times a zero reflection). The term must be linear in `LIGHT` and 0 at `LIGHT` = 0, and the viewer adds it once per review light to the lit G-buffer surface. Blender has no per-light program, so there the stub's F0 gives the specular.
 
 On Ratchet's eye (`basic_eye`), Y_d is the eye colour texture at a view-dependent coordinate (it reads the view offset, the tangent frame and the eye displacement texture), F0 evaluates to 0, and Y_s is 1. Its specular term is the cornea's highlight, a sharp lobe (about 24 × `LIGHT` with the light, the view and the normal aligned).
 
@@ -663,7 +671,7 @@ With the neutral profile, over all programs (`ready` means no output depends on 
 
 These counts take the neutral profile alone: no material constants or textures and no engine resources. What stays unknown in them is engine data that profile leaves unbound: per-object and per-material records, the scene G-buffer and depth, light-grid and probe buffers. The bindings the browser uses resolve them:
 - **G-buffer writers:** 5,712 of 5,721 materials translate ([Surface terms](#surface-terms)). The other nine have no graph in the install.
-- **Forward programs:** 1,744 of 1,747 blended materials ([Forward profile](#forward-profile)). The forward programs' own key-light term translates for 678 of the 792 lit ones ([Own key light](#own-key-light)).
+- **Forward programs:** all 1,747 blended materials ([Forward profile](#forward-profile)). The forward programs' own key-light term translates for 678 of the 792 lit ones ([Own key light](#own-key-light)).
 
 With the vertex bindings of [Vertex programs](#vertex-programs), which bind the vertex streams and leave the force-field bitset empty, all five vertex slots translate for the 207 graphs that materials use (583 of 583 uses); the 208th, `gbl_displacement_singularity`, has no material.
 
@@ -752,7 +760,8 @@ A lit material's background coefficient could carry the forward lighting the pro
 
 - **B reads none of them:** the scene passes through unlit whatever the lights, and the profile's B is the game's: the shockwaves, ground waves and portal energy (10 materials, whose split matches the unsplit program within 8 × 10⁻⁸ relative).
 - **B = B0 + Y × L:** the program lights the scene behind as albedo. L is one engine factor per channel that also lights the program's own colour and reads no specular input (`SPECULAR_INPUTS`): the forward diffuse light, key light × shadows (cascades, cloud shadows, gobo) × N·L plus (1 − the BRDF lookup's diffuse term) × the ambient fill or light grid, distant GI and AO. In `gbl_heat_distortion_01`, B is 0 with every light zero and 1 with only the ambient fill at 1. `surface._factor_split` finds L; B0 and Y are free of every symbolic value and become the terms `background` and `lit_background`, and a renderer supplies its own diffuse light for L (26 materials: heat distortion, goo and water splat decals, ripples, bubbles, liquids). Over them, A + (B0 + Y × L) × background matches the program within float rounding (3.8 × 10⁻⁵ relative at random engine values).
-- **Otherwise** it stays unsupported: three goo decals (`fx_goo_decal_simple_alt`) also pass the background through a specular factor (the BRDF lookup's scale term and the gloss reflection constants).
+- **B also has specular factors:** the three goo decals (`fx_goo_decal_simple_alt`) also pass the background through a specular factor (the BRDF lookup's scale term and the gloss reflection constants). The forward profile's specular light is 0, so those factors are left out (`LIT_BACKGROUND_SPECULAR_NOTE`), and the one diffuse factor gives Y as above. Their diffuse factor does not light the decal's own colour A, so it qualifies by reading a diffuse light colour (`DIFFUSE_LIGHT_INPUTS`: the key light's colour or the ambient fill).
+- **Otherwise** it stays unsupported: more than one diffuse factor in B.
 
 **Scene mode.** A program that reads the scene behind other than as an affine tint keeps it: the screen blend curves of the holograms and camera panes (`bg < 0.5 ? 2ab : …`), a vignette's contrast power, the absolute value or saturate of a distorted scene, and particles that read one background channel into all three. `surface.forward` then returns the whole target with `BACKGROUND.rgba` as inputs and a background tint of 0 (`reads_scene`), labelled (`SCENE_NOTE`). A lit one qualifies only when its target reads the scene and the light sources in separate summands (`surface._separable` over the symbolic translation), so the scene passes through unlit. The symbolic values are the light sources only: the unbound `GlobalWorldCBuffer` constants and the lighting textures; view and draw settings (clip plane, depth of field, temporal jitter, alpha overrides) keep their profile values. The viewer samples the inputs from a copy of its frame taken before the batch; Blender has no node for the scene behind, so these materials keep their G-buffer surface there.
 
@@ -789,7 +798,7 @@ The default follows the slot type, the high u32 of the slot hash. Each default i
 
 107 slot bindings in the install name a texture that is not installed. The engine also builds "Asset Missing" textures (opaque blue) and "Asset Error" textures (opaque red), but a material texture never shows them. The missing hook runs while the reference is created, and the loader's default replaces its proxy afterwards.
 
-**Coverage:** 1,744 of 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0), 27 of them in scene mode, which Blender does not draw. Not translated: the three goo decals that light the scene behind them through a specular factor.
+**Coverage:** all 1,747 blended materials (the 77 cube-map materials translate; the cube arrays among them are all read at index 0), 27 of them in scene mode, which Blender does not draw.
 
 ### Render flags
 
@@ -963,7 +972,7 @@ Values a material does not own are bound and listed in its limitations:
 - **Neutral draw:** no dissolve, opaque, no render flags (lighting class 0), shader time 0.
 - **Volume flags:** the per-tile bitset of engine flag volumes (`g_VolumeFlagBitsetView`, whose bits index the boxes in `GlobalVolumeFlagBuffer`) is empty in every pass, so no flag volume covers the material. Rain on glass and the rain, snow and puddle writers read it to find shelters.
 - **Material LOD distance:** the per-material and per-subset records (`g_MaterialView.m_LodDist`, `g_ModelSubsetView.m_MaterialLodDist`, `shaders.NEUTRAL_RECORDS`) hold no distance, like the neutral object's override. Writers then take no LOD fade, so they draw at full detail. Other members of these records are not bound. The material record's alpha (`g_MaterialView.m_Alpha`) is 1, opaque, as the neutral object's.
-- **Review values:** screen position for dither, LOD fade and adapted luminance 1.
+- **Review values:** screen position for dither, LOD fade, and the exposure at 1: the adapted and measured luminance and the tone-map anchor (`m_AdaptedLuminance`, `m_ActualLuminance`, `m_ToneMapAnchor`), which emissive effects such as the electricity arcs scale by. The review render has no automatic exposure.
 - **View direction:** under the review screen position the camera sits at the shaded point, so a writer that normalises the direction to the camera (tangent-space parallax in the holo and dimensional glass, fresnel, the emissive sequence, the two-layer snow) gets a normalised zero vector, NaN. When a term depends on NaN, `surface` translates the writer again with the forward profile's view (`_ViewBindings`: `VIEW`, `CAMERA`, see [Forward profile](#forward-profile)) and uses that when no NaN is left, with a limitation saying so (449 materials). The snow writers then read the deformable-snow map, `g_DeformablesView`, bound empty (0) as its constants are.
 - **Undefined terms:** 77 writers still divide by a per-object value the neutral object holds at 0: the stadium crowd's vertex-animation frame (0/0) and a butterfly wing's random seed. Their limitations say which terms are undefined (`NAN_NOTE`); renderers resolve the NaN by D3D rules.
 - **Loop flags in float registers:** an unrolled loop can keep its exit flag as a boolean mask in a register that later iterations read as a float (`bits2f(b2i(c))`, NaN when set: the parallax loop of `jn_glass_01_opaque`). It becomes `select(c, NaN, 0)`, and `_prune_nan` then rebuilds every select whose arms reach a NaN with its condition known in each arm (through not, and, or, and the selects the condition reads, such as the loop counter), so selects on a condition that follows take their arm. The loop's own conditions rule the flag out of every term, so no NaN is left; the prune is exact, and a NaN a term does read stays.
@@ -1089,20 +1098,17 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 
 ### Not translated
 
-- **Blended materials whose forward program does not translate** (3 of 1,747), or that read the scene behind in scene mode (27): Blender gets their G-buffer surface, opaque.
+- **Blended materials that read the scene behind in scene mode** (27 of 1,747): Blender gets their G-buffer surface, opaque.
 - **Forward lighting in Blender:** Blender's lights shade the G-buffer surface, which assumes that the forward program lights the same terms as the deferred apply. The viewer uses the program's own key-light term ([Own key light](#own-key-light)). Only that term is used: the programs' local light lists, probes and reflections are not (the review rig has no light grid).
 - **Lighting classes in Blender:** classes 1 to 5 are lit with the class-0 BRDF there; the viewer runs their own programs ([Lighting classes](#lighting-classes)). The viewer does not draw the skin pass's screen-space blur, the shadow-map thickness behind transmission, or the skin profiles, which read 1.
-- **Opaque materials on forward techniques** (245 materials, 44 of them eyes; [Techniques](#techniques)): 195 draw from their forward program.
-  - 66 draw with its diffuse coefficient as albedo, 36 of them eyes (`basic_eye`, the crowd eyeballs, `eye_colortint_random`).
-  - 34 draw with an albedo and an unlit colour, 6 of them eyes (`eye_emissive`, `basic_eye_holo`, `basic_eye_dimensional`), the rest flares, arcs and glows.
-  - 95 draw with an unlit colour alone: 62 materials without the lit bit (holograms, tracers, glows, screen effects) and 33 lit ones without a diffuse factor (`cy_solid_color`, `hero_solid_color_fresnel`).
+- **Opaque materials on forward techniques** (245 materials, 44 of them eyes; [Techniques](#techniques)): 232 draw from their forward program.
+  - 73 draw with its diffuse coefficient as albedo, 36 of them eyes (`basic_eye`, the crowd eyeballs, `eye_colortint_random`).
+  - 44 draw with an albedo and an unlit colour, 6 of them eyes (`eye_emissive`, `basic_eye_holo`, `basic_eye_dimensional`), the rest flares, arcs, glows, and the jellies and gels whose key and ambient light share one albedo.
+  - 110 draw with an unlit colour alone: unlit holograms, tracers, glows and screen effects, the electricity arcs at the review exposure, the planet surfaces with the review key direction, and lit materials without a diffuse factor (`cy_solid_color`, `hero_solid_color_fresnel`).
+  - 2 draw with the fallback for different diffuse coefficients: the amoeboid (its rim as the unlit colour) and a dirt debris chunk. The viewer adds the program's whole key-light term; Blender draws the unlit colour alone.
+  - 3 draw black, as the game does: the discoball test material (its own constants are 0) and two unlit glass chunks whose colour is the key light's colour times the engine's default probe, both 0 under the profile.
 
-  The viewer adds the key-light specular term of the 100 with an albedo; the 33 lit ones without one have no specular term that reads the key light. Their reflections (screen-space, probes) are not drawn, as for every forward program, and Blender draws no specular for them (the stub's F0 is 0). The other 50 keep the black stub, with the reason in their limitations:
-  - 19 have two diffuse light factors with different coefficients (jellies, gels, the dimensionator crystal, a debris chunk);
-  - 13 have an unlit part that reads the scene behind (photo-mode filters);
-  - 9 are unlit but read light values for an effect (a terminator, a probe tint, `m_ActualLuminance`);
-  - 7 have a light factor that reads no light colour: six planet surfaces (the key light's direction alone) and `wpn_warp_rifle_enemy_comp` (`m_ToneMapAnchor`);
-  - 2 have a colour of 0.
+  The viewer adds the key-light term of 125 of the lit ones; the other 35 have no term that reads the key light. Their reflections (screen-space, probes) are not drawn, as for every forward program, and Blender draws no specular for them (the stub's F0 is 0). The other 13 keep the black stub, with the reason in their limitations: twelve photo-mode filters and a distortion bubble, whose unlit colour reads the scene behind.
 - **Instance effects:** a material the plain instance draw skips ([Material alpha](#material-alpha)) may still be drawn by a per-instance effect overlay or a raised instance alpha. Neither is decoded, so such a layer is not drawn.
 
 ## Evidence tool
