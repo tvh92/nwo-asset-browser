@@ -257,10 +257,10 @@ class SourcePreviewLoader:
         # Texture reads from the list, the grid's thumbnails and the preview share the archive's file handle.
         self.texture_lock=threading.Lock()
 
-    def pose(self, clip_index):
+    def pose(self, clip_index, root_motion=False):
         with self.lock:
             if self.animation is None:raise ValueError('No animation library is loaded for this model')
-            return self.animation.pose(clip_index)
+            return self.animation.pose(clip_index,root_motion)
 
     def _ensure_archive(self, source_root):
         source_root=Path(source_root).expanduser().resolve()

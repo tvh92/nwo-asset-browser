@@ -67,12 +67,13 @@ class ExportOptions:
     file_suffix: str = ''            # appended to the model stem in file names, e.g. '_cutscenes'
     skeleton: bool = True            # False: static meshes, no joints or skin weights, so no animations either
     attachments: bool = True         # also the model's bangle_set/*_attach parts, skinned to its rig (one armature)
+    root_motion: bool = False        # move the skeleton by each clip's root motion (games that decode it: Rift Apart)
 
     def key(self):
         d = asdict(self)
         d.pop('blender'); d.pop('skip_existing')
         d['formats'] = sorted(d['formats']); d['clips'] = list(d['clips'])
-        for name in ('cinematic', 'cinematic_only', 'borrowed', 'file_suffix'):   # absent from keys of exports that predate them
+        for name in ('cinematic', 'cinematic_only', 'borrowed', 'file_suffix', 'root_motion'):   # absent from keys of exports that predate them
             if not d[name]:
                 d.pop(name)
         if d['skeleton']:   # the default is left out, so keys of exports that predate the option still match
@@ -585,20 +586,22 @@ class Tracks:
         return len(self.translation)
 
 
-_TRACK_MEMO = weakref.WeakKeyDictionary()   # AnimationLibrary -> {clip index: (kind, fps, Tracks)}
+_TRACK_MEMO = weakref.WeakKeyDictionary()   # AnimationLibrary -> {(clip index, root motion): (kind, fps, Tracks)}
 
 
-def clip_tracks(library, index):
-    """(kind, fps, Tracks) for one clip, or raises ValueError when unplayable. Memoised per library and clip."""
+def clip_tracks(library, index, root_motion=False):
+    """(kind, fps, Tracks) for one clip, or raises ValueError when unplayable. Memoised per library, clip and
+    ``root_motion`` (``AnimationLibrary.clip_frames``)."""
     memo = _TRACK_MEMO.setdefault(library, {})
-    if index not in memo:
-        memo[index] = _clip_tracks(library, index)
-    return memo[index]
+    key = (index, bool(root_motion))
+    if key not in memo:
+        memo[key] = _clip_tracks(library, index, root_motion)
+    return memo[key]
 
 
-def _clip_tracks(library, index):
+def _clip_tracks(library, index, root_motion=False):
     from rc2016.formats.clips import worlds_batch
-    clip, kind, frames = library.clip_frames(index)
+    clip, kind, frames = library.clip_frames(index, root_motion) if root_motion else library.clip_frames(index)
     fps = float(clip['metadata'].get('sample_rate_fps') or 30.0)
     tracks = Tracks(*local_trs_batch(library.rows, worlds_batch(library.rows, frames, library.inheritance)))
     return kind, fps, tracks
@@ -913,7 +916,7 @@ class ModelExporter:
             for i in wanted:
                 self._check()
                 try:
-                    kind, fps, tracks = clip_tracks(library, i)
+                    kind, fps, tracks = clip_tracks(library, i, options.root_motion)
                     clips_out.append(dict(name=labels[i], kind=kind, fps=fps, tracks=tracks,
                                           source=library.clips[i].get('source', 'animset'),
                                           asset=library.clips[i]['animset'], offset=library.clips[i]['offset']))
@@ -922,6 +925,9 @@ class ModelExporter:
                                         source=library.clips[i].get('source', 'animset'),
                                         asset=library.clips[i]['animset'], offset=library.clips[i]['offset']))
             self.log(f'  {len(clips_out)} clip(s) decoded' + (f', {len(skipped)} skipped' if skipped else ''))
+            if options.root_motion and clips_out:
+                notes.append('Clips move by their root motion since their first frame, on the joints without a parent; '
+                             'additive layers and clips without root motion play in place.')
 
         folder.mkdir(parents=True, exist_ok=True)
         written = []

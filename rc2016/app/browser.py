@@ -453,6 +453,13 @@ class AssetBrowser:
         self.borrowed_check=ttk.Checkbutton(anim,text='Borrowed animsets',variable=self.borrowed_var,command=self._reload_clips)
         self.borrowed_check.grid(row=5,column=0,columnspan=5,sticky='w',pady=(2,0))
         tip('Also offer animsets the game pairs with another model whose rest rig matches this one (the Blender build\'s --borrow-animset rule). The first use reads every actor, so it is slow.',self.borrowed_check)
+        self.root_motion_var=remember_var(self.tk.BooleanVar(value=False),'model.root_motion')
+        self.root_motion_check=ttk.Checkbutton(anim,text='Root motion',variable=self.root_motion_var,command=self._root_motion_changed)
+        self.root_motion_check.grid(row=6,column=0,columnspan=5,sticky='w',pady=(2,0))
+        tip('Move the model along the clip\'s own root motion, from where the clip starts: a walk travels forward, a turn '
+            'on the spot turns the whole body, a cutscene shot follows its path through the scene (it may leave the view). '
+            'Off, clips play in place, as their joint tracks store them. Rift Apart only; additive layers stay in place.',
+            self.root_motion_check)
         self._fill_clip_menu([])
         self.anim_box.grid_remove()   # shown only for a model with clips (_show_animation)
         self.frame_text=tk.StringVar(value='')
@@ -737,6 +744,8 @@ class AssetBrowser:
         self._show_animation(bool(clips))
         usable=bool(clips) and self.viewport.can_animate
         self._enable_clip_controls(usable)
+        game=getattr(self.source_loader,'game',None)
+        self.root_motion_check.configure(state='normal' if usable and game is not None and game.has('root_motion') else 'disabled')
         if usable:self._offer_all()
         if not clips:
             self.frame_text.set(payload.get('animation_note') or ('Static model' if payload.get('kind')=='static' else ''))
@@ -775,12 +784,24 @@ class AssetBrowser:
         self.playback.offer_all(*self._sequence_lists())
 
     def _request_clip(self,index):
-        self.anim_work.submit(self._decode_clip,index)
+        self.anim_work.submit(self._decode_clip,index,self._root_motion())
 
-    def _decode_clip(self,index):
+    def _root_motion(self):
+        """Whether clips play with their root motion: the box is ticked and the game decodes it."""
+        game=getattr(self.source_loader,'game',None)
+        return bool(self.root_motion_var.get()) and game is not None and game.has('root_motion')
+
+    def _root_motion_changed(self):
+        """Root motion was switched: the clip shown is decoded again; Play all drops the clips it read ahead."""
+        if self.playback.sequence is not None:
+            self.playback.sequence.cache.clear()
+        elif 0<=self.clip_index<len(self.clip_labels):
+            self._choose_clip(self.clip_index,self.clip_choice.get())
+
+    def _decode_clip(self,index,root_motion=False):
         """Worker side: the clip's pose, or the reason it does not decode, tagged with the clip."""
         try:
-            return dict(clip=index,pose=self.source_loader.pose(index))
+            return dict(clip=index,pose=self.source_loader.pose(index,root_motion))
         except Exception as error:
             return dict(clip=index,error=str(error))
 

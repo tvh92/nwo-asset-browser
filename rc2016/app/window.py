@@ -73,6 +73,10 @@ HELP = {
     "cutscenes": ("Adds the real-time cutscene shots of the model (the performances the game plays in its cutscenes) "
                   "to its animation list. Some models have animations only there, so with this off they export "
                   "without any clip.\n\nOnly applies with Include animations and Skeleton on."),
+    "root_motion": ("Moves each clip's skeleton along the clip's own root motion, from where the clip starts: a walk "
+                    "travels forward, a turn on the spot turns the whole body, a cutscene shot follows its path through "
+                    "the scene. Off, clips play in place, as their joint tracks store them.\n\nRift Apart only. Additive "
+                    "layers always play in place. Only applies with Include animations and Skeleton on."),
     "attachments": ("Some characters keep detachable armour plates and panels as separate models (the folder next to the "
                     "model named bangle_set). On, they are exported together with the body, skinned to its skeleton, so "
                     "they move with it in one file, each as its own object that can be hidden. Off exports the body only.\n\n"
@@ -250,6 +254,7 @@ class AssetBrowserApp:
         self.export_dds_var = remember_var(tk.BooleanVar(value=False), "export.dds")
         self.export_animations_var = remember_var(tk.BooleanVar(value=False), "export.animations")
         self.export_cutscenes_var = remember_var(tk.BooleanVar(value=True), "export.cutscenes")
+        self.export_root_motion_var = remember_var(tk.BooleanVar(value=False), "export.root_motion")
         self.export_skeleton_var = remember_var(tk.BooleanVar(value=True), "export.skeleton")
         self.export_attachments_var = remember_var(tk.BooleanVar(value=True), "export.attachments")
         self.export_lod_var = remember_var(tk.StringVar(value="Highest"), "export.lod", ("Highest", "Lowest", "All"))
@@ -538,8 +543,12 @@ class AssetBrowserApp:
                                               variable=self.export_cutscenes_var)
         self.cutscene_check.grid(row=4, column=0, columnspan=3, sticky="w", padx=(22, 0))
         self._gate("animation", HELP["cutscenes"], self.cutscene_check, None)
+        self.root_motion_check = ttk.Checkbutton(include, text="Root motion (clips travel: walks move forward, turns turn)",
+                                                 variable=self.export_root_motion_var)
+        self.root_motion_check.grid(row=5, column=0, columnspan=3, sticky="w", padx=(22, 0))
+        self._gate("root_motion", HELP["root_motion"], self.root_motion_check, None)
         picker = ttk.Frame(include)
-        picker.grid(row=5, column=0, columnspan=3, sticky="w", padx=(22, 0))
+        picker.grid(row=6, column=0, columnspan=3, sticky="w", padx=(22, 0))
         self.picker_check = ttk.Checkbutton(picker, text="Animation picker: ask which clips to export when a model has more than",
                                             variable=self.picker_var)
         self.picker_check.pack(side="left")
@@ -550,13 +559,13 @@ class AssetBrowserApp:
         for widget in (self.picker_check, self.picker_spin, self.picker_unit):
             self._gate("animation", HELP["picker"], widget, None)
         self.lod_label = ttk.Label(include, text="Detail level (LOD)")
-        self.lod_label.grid(row=6, column=0, sticky="w", pady=(6, 2))
+        self.lod_label.grid(row=7, column=0, sticky="w", pady=(6, 2))
         self.lod_box = ttk.Combobox(include, textvariable=self.export_lod_var, values=("Highest", "Lowest", "All"),
                                     state="readonly", width=10)
-        self.lod_box.grid(row=6, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+        self.lod_box.grid(row=7, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 2))
         self.attachments_check = ttk.Checkbutton(include, text="Attached parts (armour plates and panels, skinned to the body)",
                                                  variable=self.export_attachments_var)
-        self.attachments_check.grid(row=7, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        self.attachments_check.grid(row=8, column=0, columnspan=3, sticky="w", pady=(6, 2))
         self._tip(HELP["attachments"], self.attachments_check)
 
         programs = ttk.LabelFrame(window, text="Programs", padding=8)
@@ -601,7 +610,8 @@ class AssetBrowserApp:
         self._tip(HELP["reset"], reset)
 
         for variable in (*self.export_format_vars.values(), self.export_textures_var, self.export_dds_var,
-                         self.export_animations_var, self.export_cutscenes_var, self.export_skeleton_var, self.export_attachments_var,
+                         self.export_animations_var, self.export_cutscenes_var, self.export_root_motion_var,
+                         self.export_skeleton_var, self.export_attachments_var,
                          self.export_lod_var, self.blend_scene_var, self.backend_var, self.group_blend_var, self.picker_var):
             variable.trace_add("write", lambda *_args: self._options_changed())
         self._options_changed()
@@ -664,6 +674,7 @@ class AssetBrowserApp:
         self.animation_check.configure(state="normal" if animation and self.export_skeleton_var.get() else "disabled")
         self.cutscene_check.configure(state="normal" if animation and self.export_skeleton_var.get() and self.export_animations_var.get() else "disabled")
         animated = animation and self.export_skeleton_var.get() and self.export_animations_var.get()
+        self.root_motion_check.configure(state="normal" if animated and self._game_has("root_motion") else "disabled")
         self.picker_check.configure(state="normal" if animated else "disabled")
         self.picker_spin.configure(state="normal" if animated and self.picker_var.get() else "disabled")
         self.picker_unit.configure(style="TLabel" if animated and self.picker_var.get() else "Disabled.TLabel")
@@ -683,6 +694,9 @@ class AssetBrowserApp:
                 parts.append("textures" if self.export_textures_var.get() else "no textures")
             if self.export_skeleton_var.get():
                 parts.append("all animations" if animation and self.export_animations_var.get() else "no animations")
+                if (animation and self.export_animations_var.get() and self.export_root_motion_var.get()
+                        and self._game_has("root_motion")):
+                    parts.append("root motion")
             else:
                 parts.append("no skeleton or animations")
             if not blend and self.export_lod_var.get() != "Highest":
@@ -698,7 +712,8 @@ class AssetBrowserApp:
                              skeleton=self.export_skeleton_var.get(), attachments=self.export_attachments_var.get(),
                              lod=self.export_lod_var.get(), blender=self.blender_var.get().strip(),
                              skip_existing=True, cinematic=animations and self.export_cutscenes_var.get(),
-                             borrowed=animations and self.browser.borrowed_var.get())
+                             borrowed=animations and self.browser.borrowed_var.get(),
+                             root_motion=animations and self._game_has("root_motion") and self.export_root_motion_var.get())
 
     def _path_row(self, parent, row: int, label: str, variable, command, tooltip: str) -> None:
         ttk = self.ttk

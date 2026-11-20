@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 # What a game may offer. The UI disables a tab or control whose capability the current game lacks.
-CAPABILITIES = frozenset({'models', 'textures', 'export', 'animation', 'levels', 'flash', 'pipeline', 'decoded_shading'})
+CAPABILITIES = frozenset({'models', 'textures', 'export', 'animation', 'root_motion', 'levels', 'flash', 'pipeline',
+                          'decoded_shading'})
 CACHE_ROOT = Path(__file__).resolve().parents[2] / '.cache'
 APP_TITLE = 'R&C Asset Browser'
 # Hooks a game may supply; each one missing raises NotImplementedError when called.

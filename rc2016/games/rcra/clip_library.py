@@ -19,7 +19,8 @@ by joint coverage alone:
   ``.cinematic2`` (the asset that depends on it) is its source.
 
 Each found clip is still classified on its first frame; one that does not drive the skeleton is listed as
-unplayable.
+unplayable. ``root_displacement`` gives a clip's root motion since its first frame, which ``clip_frames``
+applies on request.
 """
 from __future__ import annotations
 
@@ -31,8 +32,8 @@ from pathlib import Path
 import numpy as np
 
 from rc2016.common import sha
-from rc2016.games.rcra.animation import decode_clip, header
-from rc2016.viewer.animation import AnimationLibrary
+from rc2016.games.rcra.animation import decode_clip, header, motion
+from rc2016.viewer.animation import AnimationLibrary, _quat_mul, _quat_rotate
 
 CUTSCENE_SOURCE = 'cinematic2'
 PERFORMER = re.compile(r'_shot\d+[a-z]?_(.+)$')
@@ -230,6 +231,25 @@ class RcraAnimationLibrary(AnimationLibrary):
 
     def _decode_clip(self, clip, first_frames=None):
         return decode_clip(self._bytes(clip), self.names, first_frames=first_frames, label=clip['name'])
+
+    def root_displacement(self, index, count):
+        """The clip's root motion (``rcra.animation.motion``) since its first frame: record f relative to record 0,
+        for ``count`` frames (a closing record past them is not played; a frame past the records keeps the last).
+        None when the clip has no root motion records or they do not read."""
+        try:
+            found = motion(self._bytes(self.clips[index]))
+        except ValueError:
+            return None
+        if found is None or not len(found['rotation_xyzw']) or count < 1:
+            return None
+        q, t = found['rotation_xyzw'], found['translation']
+        take = np.minimum(np.arange(count), len(q) - 1)
+        q, t = q[take], t[take]
+        x, y, z, w = q[0]
+        inverse = np.array([-x, -y, -z, w])
+        rotation = np.array([_quat_mul(inverse, row) for row in q])
+        translation = np.array([_quat_rotate(inverse, row - t[0]) for row in t])
+        return rotation, translation
 
     def with_cinematic(self, archive=None, model_path=None, replace=False, sources=None):
         """Copy that also offers the model's cutscene shots (``cutscene_clips``); with ``replace`` only them."""

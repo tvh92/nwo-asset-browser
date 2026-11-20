@@ -25,8 +25,23 @@ An additive clip may give a joint the packed scale 0x8000 on every axis: a joint
 read as one by ``animation_transforms.packed_scales``.
 
 Clips without joint tracks (only custom float tracks, sections 0x14014CB6/0x116EB684) are not skeletal and
-raise ``UnsupportedClipError``. Root motion (0x3976E44C, 0xE08AA35F), triggers, morph and face sections
-are not read.
+raise ``UnsupportedClipError``.
+
+``motion`` reads the root motion section 0xE08AA35F: a start transform, then one record per frame (plus,
+in some clips, a closing one), each the root's rotation and translation relative to the start:
+
+  +0   u8 record format (0: 16-byte records, 1: 24-byte records), u8 kind (0: no records, 2, 3), u16 records
+  +4   f32 start rotation xyzw; +32 f32 1.0, then f32 start translation xyz
+  +64  u32 bytes from +124 (records, zero-padded so the section is a multiple of 16), u32 frames; +76 f32 minimum xyz and
+       +100 f32 maximum xyz of the root translation over the clip (start + start rotation * record)
+  +124 records. Format 0: i16 rotation xyzw (unit at 32767), i16 translation xyz, u8 exponent e (the
+       translation is the integer times 2^-e), u8 a value of kind 3 (locomotion) clips that is not read.
+       Format 1: u64 smallest-three rotation (three signed 20-bit fields from bit 0, each times
+       sqrt(1/2) / (2^19 - 1), in xyzw order without the largest; bits 60-61 its index; that component is
+       positive), f32 translation xyz, u32 a value that is not read (0 in all but 171 cutscene clips).
+
+The 0x3976E44C path section (two 4x4 float matrices) is not read; neither are triggers, morph and face
+sections.
 """
 from __future__ import annotations
 
@@ -211,3 +226,69 @@ def decode_clip(data, names=None, first_frames=None, label=''):
         'base_tail_hex': base[16 * count:16 * count + 32 * tail_blocks].hex(),
         'channels': channels,
     }
+
+
+MOTION = 0xE08AA35F
+MOTION_HEADER = 124
+SMALLEST_THREE = math.sqrt(0.5) / ((1 << 19) - 1)
+
+
+def _smallest_three(words):
+    """Unit quaternions xyzw (N, 4) of u64 smallest-three words (see the module notes)."""
+    fields = np.stack([(words >> np.uint64(20 * k)) & np.uint64(0xFFFFF) for k in range(3)], 1).astype(np.int64)
+    small = np.where(fields >= 1 << 19, fields - (1 << 20), fields) * SMALLEST_THREE
+    largest = ((words >> np.uint64(60)) & np.uint64(3)).astype(np.intp)
+    require(not (words >> np.uint64(62)).any(), 'nonzero top bits in a smallest-three rotation')
+    rotation = np.empty((len(words), 4))
+    rows = np.arange(len(words))
+    rotation[rows, largest] = np.sqrt(np.clip(1.0 - (small * small).sum(1), 0.0, None))
+    others = (np.arange(4)[None, :] != largest[:, None])
+    rotation[others] = small.ravel()
+    return rotation
+
+
+def motion(data):
+    """The root motion of a clip asset (section 0xE08AA35F), or None when the clip has none.
+
+    Returns dict(start_rotation_xyzw, start_translation, rotation_xyzw (R, 4), translation (R, 3), bounds),
+    where record r places the root at start * record (rotation start_q * q, translation start_t +
+    start_q * t). R is the frame count or one more (a closing record, as with the frame table). A clip with
+    no records returns empty arrays; its root stays at the start."""
+    dat1, table = clip_dat1(data)
+    if MOTION not in table:
+        return None
+    offset, size = table[MOTION]
+    return motion_section(dat1[offset:offset + size])
+
+
+def motion_section(section):
+    """``motion`` of the bytes of one 0xE08AA35F section."""
+    size = len(section)
+    require(size >= 128, 'truncated root motion section')
+    layout, kind, count = struct.unpack_from('<BBH', section, 0)
+    require(layout in (0, 1) and kind in (0, 2, 3), 'unknown root motion record format')
+    start_q = np.array(struct.unpack_from('<4f', section, 4))
+    start_t = np.array(struct.unpack_from('<3f', section, 36))
+    body_bytes, _frames = struct.unpack_from('<II', section, 64)
+    bounds = (struct.unpack_from('<3f', section, 76), struct.unpack_from('<3f', section, 100))
+    require(MOTION_HEADER + body_bytes == size, 'root motion record size mismatch')
+    if kind == 0:
+        count = 0
+    stride = 24 if layout else 16
+    require(stride * count <= body_bytes and not any(section[MOTION_HEADER + stride * count:]),
+            'root motion records overrun or nonzero padding')
+    records = np.frombuffer(section, np.uint8, stride * count, MOTION_HEADER).reshape(count, stride)
+    if layout:
+        rotation = _smallest_three(records[:, :8].copy().view('<u8').ravel())
+        translation = records[:, 8:20].copy().view('<f4').reshape(count, 3).astype(float)
+    else:
+        values = records.copy().view('<i2').reshape(count, 8).astype(float)
+        rotation = values[:, :4] / 32767.0
+        norms = np.linalg.norm(rotation, axis=1)
+        require(bool(np.all(np.abs(norms - 1.0) < 1e-3)), 'root motion rotation is not a unit quaternion')
+        rotation /= norms[:, None]
+        translation = values[:, 4:7] * np.exp2(-records[:, 14].astype(float))[:, None]
+    require(np.isfinite(start_q).all() and np.isfinite(start_t).all() and np.isfinite(translation).all(),
+            'non-finite root motion')
+    return dict(start_rotation_xyzw=start_q, start_translation=start_t, rotation_xyzw=rotation,
+                translation=translation, bounds=bounds, layout=layout, kind=kind)

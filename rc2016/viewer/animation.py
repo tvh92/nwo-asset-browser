@@ -7,7 +7,8 @@ matrices). The skin matrix of joint j at a frame is ``world_j @ inverse_bind_j``
 in native units (checked: identity at rest to ~1e-6 on Toxic Crab and Clank).
 
 Viewing aid only: constant per-frame sampling at source fps, no blending,
-root motion, attachments or runtime layers. Additive-style clips are shown
+attachments or runtime layers. Root motion is applied on request where the game
+decodes it (Rift Apart, ``root_displacement``). Additive-style clips are shown
 standalone (rest T + delta T, rest Q * delta Q, rest S * delta S), as the
 pipeline's preview note does. Inheritance follows the pipeline: the model's bundled profile rule, else the
 single inverse-bind-compatible rule, else ``segment_scale_compensation_bit0``.
@@ -124,6 +125,39 @@ def _quat_mul(a, b):
     bx, by, bz, bw = b
     return [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
             aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz]
+
+
+def _quat_rotate(q, v):
+    x, y, z, w = q
+    u = np.array([x, y, z], float)
+    v = np.asarray(v, float)
+    return v + 2.0 * np.cross(u, np.cross(u, v) + w * v)
+
+
+def apply_root_motion(rows, frames, rotation, translation):
+    """``frames`` with every joint without a parent moved by the root displacement of its frame.
+
+    ``rotation`` (F, 4) xyzw and ``translation`` (F, 3) are the root's motion since the clip's first frame. A
+    parentless joint's local transform T R S becomes D T R S (D the displacement), so its children follow and
+    scale is untouched. A parentless joint the frame does not sample is added at its rest values first."""
+    tops = [r for r in rows if r['parent'] < 0]
+    moved = []
+    for number, frame in enumerate(frames):
+        d_q, d_t = rotation[number], translation[number]
+        sampled = {row['hash'] for row in frame}
+        frame = list(frame) + [dict(hash=r['hash'], name=r.get('name'), scale=list(r['scale']),
+                                    rotation_xyzw=list(r['rotation_xyzw']), translation=list(r['translation']))
+                               for r in tops if r['hash'] not in sampled]
+        top = {r['hash']: r for r in tops}
+        out = []
+        for row in frame:
+            if row['hash'] in top:
+                q = row['rotation_xyzw'] or top[row['hash']]['rotation_xyzw']
+                row = dict(row, rotation_xyzw=[float(v) for v in _quat_mul(d_q, q)],
+                           translation=[float(v) for v in _quat_rotate(d_q, row['translation']) + d_t])
+            out.append(row)
+        moved.append(out)
+    return moved
 
 
 class AnimationLibrary:
@@ -263,12 +297,18 @@ class AnimationLibrary:
         """The ``animation_samples.decode_clip`` dict of one clip entry."""
         return decode_clip(self.animset_data[clip['animset']], clip['offset'], self.names, first_frames=first_frames)
 
-    def clip_frames(self, index):
+    def root_displacement(self, index, count):
+        """Per frame of clip ``index``, the root's rotation xyzw (count, 4) and translation (count, 3) since its first
+        frame, or None for a clip without root motion. R&C 2016 clips carry none that is decoded."""
+        return None
+
+    def clip_frames(self, index, root_motion=False):
         """(decoded clip, kind, frames) for clip ``index``: the source samples as this model plays them.
 
         Additive-style clips become standalone poses on the rest pose; absolute clips of an animset built for a
         model of other proportions get their translations moved onto this rig (``retarget``) when they sit on that
-        model's rig (``clip_fits_source``). Raises NotPlayable
+        model's rig (``clip_fits_source``). With ``root_motion`` an absolute clip's skeleton also moves by the
+        clip's root displacement (``root_displacement``, applied to the joints without a parent). Raises NotPlayable
         for a clip that does not drive the skeleton."""
         entry = self.clips[index]
         clip = self._decode_clip(entry)
@@ -287,12 +327,17 @@ class AnimationLibrary:
             joints = self.retarget[entry['animset']]['joints']
             if frames and clip_fits_source(frames[0], joints):
                 frames = retarget_frames(frames, joints)
+        if root_motion and kind != 'relative/additive-style layer':
+            displacement = self.root_displacement(index, len(frames))
+            if displacement is not None:
+                frames = apply_root_motion(self.rows, frames, *displacement)
         return clip, kind, frames
 
-    def pose(self, index):
-        """Per-frame skin matrices (joints x 4 x 4, preview basis) for clip ``index``."""
+    def pose(self, index, root_motion=False):
+        """Per-frame skin matrices (joints x 4 x 4, preview basis) for clip ``index``; ``root_motion`` as in
+        ``clip_frames``."""
         entry = self.clips[index]
-        clip, kind, frames = self.clip_frames(index)
+        clip, kind, frames = self.clip_frames(index, root_motion)
         inverse = np.stack(self.inverse)
         poses = []
         for frame in frames:

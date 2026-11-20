@@ -28,13 +28,13 @@ Each `Game` record declares its capabilities and supplies hooks: model decode, m
 
 ### What Rift Apart supports
 
-Rift Apart's capabilities are `models`, `textures`, `export` and `animation`:
+Rift Apart's capabilities are `models`, `textures`, `export`, `animation` and `root_motion`:
 
 - **Supported:**
   - Browsing.
-  - The 3D model view, with skeletal [animation](#animation) playback. The Shaded mode draws each material's own translated program where it translates ([In the viewer](#in-the-viewer)), and the labelled preview elsewhere.
+  - The 3D model view, with skeletal [animation](#animation) playback, optionally with the clip's [root motion](#root-motion). The Shaded mode draws each material's own translated program where it translates ([In the viewer](#in-the-viewer)), and the labelled preview elsewhere.
   - The Textures tab.
-  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
+  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion). Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
 - **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart".
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
@@ -267,7 +267,8 @@ Four things differ from 2016:
 | `0x2BB5BC8F` base | Joint records and scale tail as in 2016; one additive clip adds the 4-byte (u16 joint, u16 value) records the built header counts, which are not read |
 
 A clip with only custom float tracks (`0x14014CB6`/`0x116EB684`: camera and property curves) is not skeletal and is
-refused. Root motion (`0x3976E44C`, `0xE08AA35F`), triggers, morph and face sections are not read.
+refused. The root motion section `0xE08AA35F` is read by `motion` ([Root motion](#root-motion)); the path section
+`0x3976E44C` (two 4x4 float matrices), triggers, morph and face sections are not read.
 
 **Scale sentinel.** In 10 additive clips (bladeball turns, horned-toad aim and look layers, the emergency-raft
 wobble) a joint's packed scale is `0x8000` on all three axes, which would be −8. `packed_scales` reads it as one,
@@ -280,6 +281,59 @@ skeletal: custom-track clips and one camera-shake clip. No decoded clip uses the
 
 **Check.** On `amb_fish_01`, frame 0 of `Swimming_Idle` matches the model's rest S/Q/T with a median translation
 difference of 1.1e-4.
+
+### Root motion
+
+The joint tracks play in place: a walk, a dash or a cutscene shot's travel through the scene is not in the body
+joints but in the clip's root motion section `0xE08AA35F`, which every clip carries. `rcra.animation.motion` reads
+it:
+
+| Offset | Field |
+| --- | --- |
+| +0 | u8 record format (0 or 1), u8 kind (0: no records, 2, 3), u16 record count |
+| +4 | f32 start rotation xyzw |
+| +32 | f32 1.0, then f32 start translation xyz |
+| +64 | u32 bytes from +124 (the records, zero-padded so the section is a multiple of 16), u32 frame count |
+| +76, +100 | f32 minimum and maximum xyz of the root translation over the clip |
+| +124 | the records |
+
+A record is the root's rotation q and translation t relative to the start: the root sits at rotation `start_q * q`
+and translation `start_t + start_q * t`. There is one record per frame, or one more (a closing record, as with
+the frame table). Record 0 has the identity rotation.
+
+- **Format 0** (16 bytes; animset clips): i16 rotation xyzw with unit length at 32767, i16 translation xyz, u8
+  exponent e (the translation is the integer times 2^-e, 12 in most records), and a u8 that only kind-3
+  (locomotion) clips set. That byte is not read.
+- **Format 1** (24 bytes; mostly cutscene shots): a u64 smallest-three rotation, f32 translation xyz, and a u32 that
+  171 cutscene clips set. That u32 is not read. The rotation word holds three signed 20-bit fields from bit 0, each
+  times sqrt(1/2) / (2^19 - 1). They are the components other than the largest, in xyzw order, and bits 60-61 give
+  the largest one's index. That component is sqrt(1 - the others' squares), so it is positive.
+
+**Coverage.** All 23,317 installed clips read. 10,464 have records (3,700 in format 0, 6,764 in format 1). In each
+of them the stored minimum and maximum equal those of `start_t + start_q * t` within quantization: format 0's
+exponent 8 is a step of 1/256. The other clips have no records, so their root stays at the start. Every format-0
+rotation has unit length at 32767. Across a change of the largest component, the format-1 rotation is continuous
+up to sign.
+
+**Checks.** In Ratchet's `walk_forward_wrench` the `sync` joint's world translation is minus the root's (start plus record),
+while `pelvis` does not move. Ratchet's 90° idle turns, walks and runs keep a planted foot in place only with the
+root motion added. Without it, the foot slides at walking speed. Speed of the planted foot, median over the clip,
+in units per second (`tests/test_rcra_animation.py`):
+
+| Clip | In place | With root motion |
+| --- | --- | --- |
+| `walk_forward_wrench_hero_ratchet` | 1.01 | 0.10 |
+| `idle_turn_left_90_right_foot_hero_ratchet` | 0.47 | 0.005 |
+
+In 637 of the 734 moving clips offered to Rivet's model the pelvis stays in place while the root travels. Among them are 229 of 247
+cutscene shots, whose roots travel up to 1,945 units through the scene. The others move the body inside the clip
+as well, such as jump arcs and attack lunges.
+
+**Playback.** `RcraAnimationLibrary.root_displacement` gives the root's motion since the clip's first frame
+(record 0 inverted, times record f). A closing record past the last frame is not played. With `root_motion`,
+`AnimationLibrary.clip_frames` applies it to the joints without a parent: their local T R S becomes D T R S. This
+drives the viewer's **Root motion** box ([viewer](viewer.md#animation-playback)) and the export's *Root motion* option.
+The scene placement of the start transform is not used, and neither is the `0x3976E44C` path section.
 
 ### Skinning
 
@@ -320,7 +374,8 @@ The clip notes take about 8 s to compute, off the Tk thread.
 
 ### Not decoded
 
-- Root-motion paths.
+- The path section `0x3976E44C` and the unread record values of the root motion section (the kind-3 byte, the
+  format-1 u32).
 - Clip blending and additive partners. Additive clips are previewed on the rest pose, as in 2016.
 - Face performance clips (`.performanceclip`) and the phoneme and viseme pose clips their performance sets use.
 - Vertex-animation textures over time: the viewer and exports draw the pose at shader time 0 ([Vertex programs](#vertex-programs)).

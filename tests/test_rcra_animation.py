@@ -144,6 +144,102 @@ class SyntheticClipTests(unittest.TestCase):
             ra.decode_clip(bytes(corrupt))
 
 
+def motion_section(layout, kind, records, count, frames, start_q=(0, 0, 0, 1), start_t=(0, 0, 0)):
+    """A 0xE08AA35F section: the 124-byte header, then ``records``, zero-padded so the section is a multiple of 16."""
+    body = records + bytes(-(124 + len(records)) % 16)
+    head = bytearray(124)
+    struct.pack_into('<BBH', head, 0, layout, kind, count)
+    struct.pack_into('<4f', head, 4, *start_q)
+    struct.pack_into('<4f', head, 32, 1.0, *start_t)
+    struct.pack_into('<II', head, 64, len(body), frames)
+    return bytes(head) + body
+
+
+def smallest_three(q):
+    """The u64 smallest-three word of unit quaternion ``q`` (xyzw)."""
+    q = np.asarray(q, float)
+    largest = int(np.argmax(np.abs(q)))
+    q = -q if q[largest] < 0 else q
+    fields = [int(round(v / ra.SMALLEST_THREE)) & 0xFFFFF for v in np.delete(q, largest)]
+    return fields[0] | fields[1] << 20 | fields[2] << 40 | largest << 60
+
+
+def yaw(degrees):
+    half = np.radians(degrees) / 2
+    return np.array([0.0, np.sin(half), 0.0, np.cos(half)])
+
+
+class RootMotionTests(unittest.TestCase):
+    def test_sixteen_byte_records(self):
+        records = b''.join(struct.pack('<7hBB', *[round(v * 32767) for v in yaw(a)], tx, 0, tz, exponent, 165)
+                           for a, tx, tz, exponent in ((0, 0, 0, 12), (90, 4096, -2048, 12), (180, 3, 0, 1)))
+        found = ra.motion(build_clip([(0, 0)] * 3, extra={ra.MOTION: motion_section(0, 3, records, 3, 3, start_t=(1, 2, 3))}))
+        np.testing.assert_allclose(found['start_translation'], [1, 2, 3])
+        np.testing.assert_allclose(found['translation'], [[0, 0, 0], [1, 0, -0.5], [1.5, 0, 0]])
+        np.testing.assert_allclose(found['rotation_xyzw'][1], yaw(90), atol=1e-4)
+        self.assertEqual((found['layout'], found['kind']), (0, 3))
+
+    def test_twenty_four_byte_records(self):
+        rotations = [yaw(0), yaw(-170), np.array([0.5, -0.5, 0.5, 0.5])]
+        records = b''.join(struct.pack('<Q3fI', smallest_three(q), *t, 0x40)
+                           for q, t in zip(rotations, ([0, 0, 0], [1.5, -2.0, 300.25], [0, 1, 0])))
+        found = ra.motion(build_clip([(0, 0)] * 3, extra={ra.MOTION: motion_section(1, 2, records, 3, 3)}))
+        for got, want in zip(found['rotation_xyzw'], rotations):
+            self.assertAlmostEqual(abs(float(np.dot(got, want))), 1.0, places=9)   # q and -q are one rotation
+        np.testing.assert_allclose(found['translation'][1], [1.5, -2.0, 300.25])
+
+    def test_no_records_and_no_section(self):
+        found = ra.motion(build_clip([(0, 0)] * 3, extra={ra.MOTION: motion_section(1, 0, b'', 0, 3)}))
+        self.assertEqual((found['rotation_xyzw'].shape, found['translation'].shape), ((0, 4), (0, 3)))
+        self.assertIsNone(ra.motion(build_clip([(0, 0)] * 3)))
+
+    def test_rejections(self):
+        good = motion_section(0, 2, struct.pack('<7hBB', 0, 0, 0, 32767, 0, 0, 0, 12, 0), 1, 1)
+        for section, message in (
+                (good[:-1], 'record size'),
+                (good[:-1] + b'\x01', 'padding'),
+                (bytes([0, 2]) + good[2:124] + struct.pack('<7hBB', 0, 0, 0, 16000, 0, 0, 0, 12, 0) + good[140:], 'unit'),
+                (bytes([2]) + good[1:], 'record format')):
+            with self.assertRaisesRegex(ValueError, message):
+                ra.motion_section(section)
+
+    def test_library_displacement_is_relative_to_the_first_record(self):
+        from rc2016.games.rcra.clip_library import RcraAnimationLibrary
+        records = b''.join(struct.pack('<Q3fI', smallest_three(q), *t, 0)
+                           for q, t in ((yaw(90), [1, 0, 0]), (yaw(180), [1, 0, -2]), (yaw(180), [1, 0, -4])))
+        data = build_clip([(0, 0)] * 2, extra={ra.MOTION: motion_section(1, 2, records, 3, 2)})
+        library = RcraAnimationLibrary.__new__(RcraAnimationLibrary)
+        library.clips, library._last = [dict(key=7)], (7, data)
+        rotation, translation = library.root_displacement(0, 2)   # the closing record is not played
+        np.testing.assert_allclose(translation, [[0, 0, 0], [2, 0, 0]], atol=1e-6)   # (0, 0, -2) in the first record's frame
+        self.assertAlmostEqual(abs(float(np.dot(rotation[1], yaw(90)))), 1.0, places=9)
+        rotation, translation = library.root_displacement(0, 5)   # frames past the records keep the last one
+        np.testing.assert_allclose(translation[4], [4, 0, 0], atol=1e-6)
+
+    def test_apply_root_motion_moves_the_whole_skeleton(self):
+        from rc2016.formats.skeleton import worlds
+        from rc2016.viewer.animation import apply_root_motion
+        rows = [dict(hash='0x1', name='root', parent=-1, flags=0, scale=[2.0, 2.0, 2.0], rotation_xyzw=[0, 0, 0, 1],
+                     translation=[0.0, 1.0, 0.0]),
+                dict(hash='0x2', name='child', parent=0, flags=0, scale=[1.0, 1.0, 1.0], rotation_xyzw=list(yaw(30)),
+                     translation=[0.0, 0.0, 1.0]),
+                dict(hash='0x3', name='other_top', parent=-1, flags=0, scale=[1.0, 1.0, 1.0], rotation_xyzw=[0, 0, 0, 1],
+                     translation=[3.0, 0.0, 0.0])]
+        frame = [dict(hash='0x1', scale=[2.0, 2.0, 2.0], rotation_xyzw=list(yaw(10)), translation=[0.5, 1.0, 0.0]),
+                 dict(hash='0x2', scale=[1.0, 1.0, 1.0], rotation_xyzw=None, translation=[0.0, 0.0, 1.0])]
+        d_q, d_t = yaw(90), np.array([1.0, 0.0, 2.0])
+        moved = apply_root_motion(rows, [frame], d_q[None], d_t[None])[0]
+        x, y, z, w = d_q
+        displacement = np.eye(4)
+        displacement[:3, :3] = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
+        displacement[:3, 3] = d_t
+        expected = [displacement @ m for m in worlds(rows, frame)]
+        for got, want in zip(worlds(rows, moved), expected):   # the unsampled parentless joint is added and moved too
+            np.testing.assert_allclose(got, want, atol=1e-12)
+
+
 class SkinBatchTests(unittest.TestCase):
     def test_groups_of_one_and_several_influences(self):
         # 18 vertices: a full one-influence group (joint 2), then a two-vertex group of (joint, weight) pairs.
@@ -264,6 +360,29 @@ class RealAnimationTests(unittest.TestCase):
         # The far tail is the armpit pinch of linear blend skinning (sub-millimetre shirt edges on the upper-arm
         # twist joints as the T-pose arms come down), so the bound is on the 99th percentile.
         self.assertLess(float(np.percentile(ratio, 99)), 1.5)   # measured 1.37
+
+    def test_root_motion_plants_ratchets_feet(self):
+        # The joint tracks walk and turn on the spot, so a planted foot slides; the root motion moves the body
+        # under it. Speed of the slower foot (the planted one), median over the clip, in units per second.
+        from rc2016.formats.clips import worlds_batch
+        library = self.library(self.RATCHET)
+        names = [r['name'] for r in library.rows]
+        feet = [names.index('LF_ball'), names.index('RT_ball')]
+
+        def planted(index, root_motion):
+            clip, _kind, frames = library.clip_frames(index, root_motion)
+            spots = worlds_batch(library.rows, frames, library.inheritance)[:, feet][..., :3, 3]   # (frames, feet, xyz)
+            speed = np.linalg.norm(np.diff(spots, axis=0), axis=2) * clip['metadata']['sample_rate_fps']
+            return float(np.median(speed.min(axis=1)))
+
+        for name, still in (('walk_forward_wrench_hero_ratchet', 0.15), ('idle_turn_left_90_right_foot_hero_ratchet', 0.02)):
+            index = next(i for i, c in enumerate(library.clips) if c['path'].endswith(f'/{name}.animclip'))
+            in_place, moved = planted(index, False), planted(index, True)
+            self.assertGreater(in_place, 0.3, name)    # measured 1.01 (walk) and 0.47 (turn)
+            self.assertLess(moved, still, name)        # measured 0.10 and 0.005
+        # A clip without root motion records plays as before.
+        index = library.labels().index('hero_ratchet: relaxed_neutral_idle_hero_ratchet')
+        self.assertEqual(library.clip_frames(index, True)[2][0], library.clip_frames(index)[2][0])
 
 
 if __name__ == '__main__':
