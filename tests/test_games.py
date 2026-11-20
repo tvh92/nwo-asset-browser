@@ -85,14 +85,15 @@ class DetectionTests(unittest.TestCase):
 
 class GameRecordTests(unittest.TestCase):
     def test_rc2016_declares_everything_but_root_motion_and_faces_and_keeps_its_caches_in_place(self):
-        self.assertEqual(RC2016.capabilities, games.CAPABILITIES - {'root_motion', 'face_performances', 'layer_partners'})
+        self.assertEqual(RC2016.capabilities, games.CAPABILITIES - {'root_motion', 'face_performances', 'layer_partners',
+                                                                       'vertex_animation'})
         # The exact folder the loader and level viewer used before the seam, so nothing is rescanned.
         self.assertEqual(RC2016.cache_dir(), Path(__file__).resolve().parents[1] / '.cache')
         self.assertEqual(RCRA.cache_dir(), CACHE_ROOT / 'rcra')
 
     def test_rift_apart_capabilities(self):
         self.assertEqual(RCRA.capabilities, {'models', 'textures', 'export', 'animation', 'root_motion', 'face_performances',
-                                             'layer_partners'})
+                                             'layer_partners', 'vertex_animation'})
         self.assertTrue(RCRA.has_animation_library())
         self.assertFalse(RC2016.has_animation_library())   # 2016 finds its animsets through the scan's index
         for capability in ('levels', 'flash', 'pipeline', 'decoded_shading'):

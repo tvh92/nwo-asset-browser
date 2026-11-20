@@ -13,7 +13,12 @@ model units and ``TEXCOORD2.xyz`` the world normal. Every other engine constant 
 no wind or ambient animation, no force fields, a plain object. A second translation under ``CHECK_VIEW`` tells a placement
 that depends on the view, which is not applied. ``evaluate`` runs a translation on a model's vertices (numpy, float32 as
 the GPU), reading the material's textures (``TextureReader``); ``deform_model`` applies it to a decoded model, so the viewer
-and every export draw the vertices where the game places them at that state. Motion over time stays a limitation.
+and every export draw the vertices where the game places them at that state.
+
+The shader timer (``TIMER``) is an input of the translation, not a constant: ``at_rest`` runs it at 0, and a mesh whose
+vertices also differ at ``CHECK_TIME`` moves over time. ``deform_model`` then sets ``decoded['vertex_motion']``, a
+``VertexMotion`` that runs those meshes' programs at any shader time (the viewer's Vertex animation, the export's baked
+frames). Every other engine constant stays at its rest value.
 
 The draw's render flags (MatDrawCB) are the plain instance draw's: base 0x1 and the material's lit bit (RiftApart.exe
 0x1411212d0; another packet kind uses 0x2, and the programs test the two low bits only together). 0x8000 is clear: the
@@ -59,8 +64,9 @@ CHECK_VIEW = ((13.0, -7.0, 5.0), np.array([[2.0, 0.5, 0.0, 0.0], [0.0, 3.0, 0.25
 CHECK_TIME = 0.75          # seconds of shader time: tells a deformation that moves over time
 TIMER = 'GlobalWorldCBuffer.m_ShaderTimer'
 REST_NOTE = ('Vertex program at rest: shader time 0, no wind, ambient animation or force fields, a plain object '
-             '(identity transform, custom values, random seed and creation time 0); the game moves these vertices over '
-             'time, which is not drawn.')
+             '(identity transform, custom values, random seed and creation time 0).')
+TIME_NOTE = (' The vertices also move over shader time: Vertex animation in the 3D view plays them, and exports can bake '
+             'them as morph target frames.')
 MOVE_TOLERANCE = 1e-5       # model units: a smaller change is the stored vertex
 
 
@@ -149,6 +155,8 @@ class _VertexBindings(sm5.Bindings):
                 return g.const('f', float(value))
         if name in self.values:
             return g.const('f', self.values[name])
+        if name == TIMER:   # an input, so one translation runs at any shader time (at_rest: 0)
+            return g.input(TIMER, 'f')
         self.engine.add(name)
         return g.const('f', 0.0)
 
@@ -567,6 +575,7 @@ def at_rest(pair, inputs, reader, rows, offset, normals, with_tangents=False):
     tangent terms."""
     local = {k: (v[rows] if np.ndim(v) else v) for k, v in inputs.items()}
     local[VERTEX_ID] = rows
+    local.setdefault(TIMER, F32(0.0))
     rest, check = run(pair['rest'], local, reader, len(rows)), run(pair['view'], local, reader, len(rows))
     positions, other = world(rest, REVIEW_VIEW), world(check, CHECK_VIEW)
     if positions is None or other is None:
@@ -590,6 +599,47 @@ def at_rest(pair, inputs, reader, rows, offset, normals, with_tangents=False):
             limit = float(np.finfo(np.float32).max)
             w = np.clip(w, -limit, limit)
     return positions + offset, normal, tangent, w
+
+
+def at_time(recipe, local, reader, offset, normals, seconds):
+    """(positions, normals) of the vertices of ``local`` (per-vertex inputs already cut to them, with VERTEX_ID) at shader
+    time ``seconds`` under the review view, positions in the decoder's frame; None where the clip w is not 1."""
+    local = dict(local)
+    local[TIMER] = F32(seconds)
+    out = run(recipe, local, reader, len(local[VERTEX_ID]))
+    positions = world(out, REVIEW_VIEW)
+    if positions is None:
+        return None
+    return positions + offset, unit_normals(out, normals)
+
+
+class VertexMotion:
+    """The meshes of a decoded model whose vertex programs move over shader time. ``at(seconds)`` gives
+    {mesh index: (positions, normals)} in the decoder's frame (positions with the decoder's offset, as the mesh's own);
+    a group that stops evaluating (non-finite values) is left out of that call."""
+
+    def __init__(self):
+        self.groups = []   # (recipe, local inputs, reader, offset, stored normals, [(mesh index, start, count)])
+
+    def add(self, recipe, local, reader, offset, normals, meshes):
+        self.groups.append((recipe, local, reader, offset, normals, meshes))
+
+    @property
+    def meshes(self):
+        return [index for group in self.groups for index, _start, _count in group[5]]
+
+    def at(self, seconds):
+        out = {}
+        for recipe, local, reader, offset, normals, meshes in self.groups:
+            try:
+                result = at_time(recipe, local, reader, offset, normals, seconds)
+            except (Unsupported, sm5.Unknown, ValueError, KeyError, OSError):
+                continue
+            if result is None or not (np.all(np.isfinite(result[0])) and np.all(np.isfinite(result[1]))):
+                continue
+            for index, start, count in meshes:
+                out[index] = (result[0][start:start + count], result[1][start:start + count])
+        return out
 
 
 def moved(positions, normals, stored_positions, stored_normals):
@@ -649,8 +699,9 @@ def _material_meshes(source, decoded):
     return groups
 
 
-def _group_states(source, key, graph, meshes, layout, inputs, offset):
-    """{id(mesh): (state, note)} of one material's meshes, run as one batch; moved meshes are updated in place."""
+def _group_states(source, key, graph, meshes, layout, inputs, offset, motion=None):
+    """{id(mesh): (state, note)} of one material's meshes, run as one batch; moved meshes are updated in place. A batch
+    whose vertices differ at CHECK_TIME is added to ``motion`` (a VertexMotion)."""
     pair = cached_recipes(source, graph, source.asset_data(key), layout)
     if 'error' in pair:
         return {id(m): ('error', ERROR_NOTE % (SLOT, pair['error'])) for m in meshes}
@@ -665,11 +716,28 @@ def _group_states(source, key, graph, meshes, layout, inputs, offset):
         return {id(m): ('view', VIEW_NOTE % SLOT) for m in meshes}
     extra = (BILINEAR_NOTE if 'bilinear' in reader.notes else '') + ''.join(
         ' ' + n for n in pair['rest'].get('limitations', []))
+    rows = np.concatenate(spans)
+    local = {k: (v[rows] if np.ndim(v) else v) for k, v in inputs.items()}
+    local[VERTEX_ID] = rows
+    later = None
+    if motion is not None:
+        try:
+            later = at_time(pair['rest'], local, reader, offset, stored, CHECK_TIME)
+        except (Unsupported, sm5.Unknown, ValueError, KeyError, OSError):
+            later = None
+        if later is not None and not (np.all(np.isfinite(later[0])) and np.all(np.isfinite(later[1]))
+                                      and moved(later[0], later[1], result[0], result[1])):
+            later = None
+        if later is not None:
+            starts = np.cumsum([0] + [len(s) for s in spans])
+            motion.add(pair['rest'], local, reader, offset, stored,
+                       [(m['index'], int(s), len(span)) for m, s, span in zip(meshes, starts, spans)])
+        extra += TIME_NOTE if later is not None else ''
     states, at = {}, 0
     for mesh, span in zip(meshes, spans):
         positions, normals, tangents, w = (r[at:at + len(span)] if r is not None else None for r in result)
         at += len(span)
-        if not moved(positions, normals, mesh['positions'], mesh['normals']):
+        if not moved(positions, normals, mesh['positions'], mesh['normals']) and later is None:
             states[id(mesh)] = ('still', None)
             continue
         old = np.asarray(mesh['positions'], np.float64)
@@ -692,11 +760,12 @@ def deform_model(source, decoded, data):
     material, state 'moved', 'still', 'view' or 'error', note) and ``decoded['material_notes']`` {material path: [note]}."""
     rows, notes = [], {}
     groups = _material_meshes(source, decoded)
+    motion = VertexMotion()
     if groups:
         layout = model_layout(data)
         inputs, offset, _count = vertex_streams(data)
     for key, (graph, path, meshes) in groups.items():
-        states = _group_states(source, key, graph, meshes, layout, inputs, offset)
+        states = _group_states(source, key, graph, meshes, layout, inputs, offset, motion)
         for mesh in meshes:
             state, note = states[id(mesh)]
             rows.append(dict(mesh=mesh['index'], material=path, state=state, note=note,
@@ -705,4 +774,5 @@ def deform_model(source, decoded, data):
                 notes[path].append(note)
     decoded['vertex_programs'] = sorted(rows, key=lambda r: r['mesh'])
     decoded['material_notes'] = notes
+    decoded['vertex_motion'] = motion if motion.groups else None
     return decoded

@@ -70,13 +70,14 @@ class ExportOptions:
     root_motion: bool = False        # move the skeleton by each clip's root motion (games that decode it: Rift Apart)
     performances: bool = False       # also the face performances (voice-line lip sync; Rift Apart)
     layer_bases: bool = False        # additive layers over their first partner clip (layer_partners; Rift Apart)
+    vertex_animation: bool = False   # bake vertex-program motion over shader time as morph-target frames (Rift Apart)
 
     def key(self):
         d = asdict(self)
         d.pop('blender'); d.pop('skip_existing')
         d['formats'] = sorted(d['formats']); d['clips'] = list(d['clips'])
         for name in ('cinematic', 'cinematic_only', 'borrowed', 'file_suffix', 'root_motion', 'performances',
-                     'layer_bases'):   # absent from keys of exports that predate them
+                     'layer_bases', 'vertex_animation'):   # absent from keys of exports that predate them
             if not d[name]:
                 d.pop(name)
         if d['skeleton']:   # the default is left out, so keys of exports that predate the option still match
@@ -434,6 +435,31 @@ def selected_meshes(decoded, lod, look):
 # The shape key that keeps a mesh's stored vertices when a decoder moved them (Rift Apart vertex programs at rest,
 # rc2016.games.rcra.vertex.STORED_SHAPE): a glTF morph target at weight 0, a shape key in Blender.
 STORED_SHAPE = 'stored vertices'
+VERTEX_SECONDS, VERTEX_FPS = 4.0, 15   # the shader time an export bakes (ExportOptions.vertex_animation)
+VERTEX_ANIMATION = 'Vertex animation'   # its glTF animation
+
+
+def vertex_frames(motion, parts, seconds=VERTEX_SECONDS, fps=VERTEX_FPS):
+    """Bake ``motion`` (``rcra.vertex.VertexMotion``) at shader times 0, 1/fps, ... ``seconds``: each part whose mesh
+    moves gets ``arrays['frames']`` [(position deltas, normal deltas or None)] from its exported vertices. Returns the
+    times baked ([] when no part moves)."""
+    times = np.arange(int(round(seconds * fps)) + 1, dtype=np.float64) / fps
+    moving = {p.get('mesh_index'): p for p in parts if p.get('mesh_index') in set(motion.meshes)}
+    if not moving:
+        return []
+    for part in moving.values():
+        part['arrays']['frames'] = []
+    for t in times:
+        found = motion.at(float(t))
+        for index, part in moving.items():
+            a = part['arrays']
+            positions, normals = found.get(index, (None, None))
+            if positions is None or len(positions) != len(a['positions']):   # a time that does not evaluate: rest
+                a['frames'].append((np.zeros_like(a['positions']), None))
+                continue
+            delta_n = None if a['normals'] is None else (_unit_normals(np.asarray(normals, np.float32)) - a['normals'])
+            a['frames'].append((np.asarray(positions, np.float32) - a['positions'], delta_n))
+    return [float(t) for t in times]
 # Rift Apart's decoded vertex tangent (native axes) and its TEXCOORD3.w as one glTF custom attribute (xyz, w): Blender's
 # importer keeps it as a point attribute of this name (rc2016.export.rcra_blender.TANGENT_ATTRIBUTE). One attribute, since
 # the importer pairs two custom attributes of a primitive with each other's data when its set order differs.
@@ -916,7 +942,15 @@ class ModelExporter:
         parts = []
         for mesh in meshes:
             material = (mesh.get('material') or {}).get('index')
-            parts.append(dict(name=f"{stem}_mesh{mesh['index']:02d}", material=material, arrays=mesh_arrays(mesh, joint_count)))
+            parts.append(dict(name=f"{stem}_mesh{mesh['index']:02d}", material=material, arrays=mesh_arrays(mesh, joint_count),
+                              mesh_index=mesh['index']))
+        baked = []
+        if options.vertex_animation and decoded.get('vertex_motion') is not None:
+            baked = vertex_frames(decoded['vertex_motion'], parts)
+            if baked:
+                notes.append(f'Vertex programs baked over {VERTEX_SECONDS:g} s of shader time at {VERTEX_FPS} fps: one morph '
+                             f'target per frame ("time <seconds>") and the animation "{VERTEX_ANIMATION}" that steps '
+                             'through them. Wind, force fields and other engine inputs stay at rest.')
         unweighted = sum((p['arrays']['skin'] or {}).get('unweighted', 0) for p in parts)
         if unweighted:
             notes.append(f'{unweighted} vertices without skin weights follow the root joint.')
@@ -991,7 +1025,7 @@ class ModelExporter:
         if options.textures and any(f in options.formats for f in ('gltf', 'obj')):
             tex_dir.mkdir(exist_ok=True)
         if need_gltf:
-            gltf = self._build_gltf(stem, parts, maps, library if joint_count else None, clips_out, shapes)
+            gltf = self._build_gltf(stem, parts, maps, library if joint_count else None, clips_out, shapes, baked)
             doc, blob = gltf.finish(embed=True)
             if 'gltf' in options.formats:
                 file_doc, file_blob = gltf.finish(embed=False, texture_dir='textures')
@@ -1121,7 +1155,7 @@ class ModelExporter:
         return found, notes
 
     # -- glTF assembly
-    def _build_gltf(self, stem, parts, maps, library, clips, shapes=()):
+    def _build_gltf(self, stem, parts, maps, library, clips, shapes=(), baked=()):
         g = GLTF('R&C PS4 asset browser export')
         doc = g.doc
         material_ids = {}
@@ -1183,6 +1217,18 @@ class ModelExporter:
                         if a['normals'] is not None:
                             target['NORMAL'] = g.accessor(stored['normals'] - a['normals'] if stored else np.zeros_like(a['normals']),
                                                           'VEC3', 34962)
+                    elif isinstance(number, tuple):   # a baked vertex-program frame: its deltas, zero where still
+                        frames, count = a.get('frames'), len(a['positions'])
+                        if frames:
+                            deltas, normal_deltas = frames[number[1]]
+                            target = dict(POSITION=g.accessor(np.ascontiguousarray(deltas, np.float32), 'VEC3', 34962, minmax=True))
+                            if a['normals'] is not None:
+                                target['NORMAL'] = (g.accessor(np.ascontiguousarray(normal_deltas, np.float32), 'VEC3', 34962)
+                                                    if normal_deltas is not None else g.sparse(count, (), np.zeros((0, 3)), 'VEC3'))
+                        else:
+                            target = dict(POSITION=g.sparse(count, (), np.zeros((0, 3)), 'VEC3', minmax=True))
+                            if a['normals'] is not None:
+                                target['NORMAL'] = g.sparse(count, (), np.zeros((0, 3)), 'VEC3')
                     else:                # a blend shape: sparse deltas at the vertices it moves
                         index, deltas, normal_deltas = a['morphs'].get(number, (np.zeros(0, np.int64), np.zeros((0, 3)), np.zeros((0, 3))))
                         count = len(a['positions'])
@@ -1196,10 +1242,13 @@ class ModelExporter:
             """Append the glTF mesh of ``members``; returns its targets (None: stored vertices, n: blend shape n)."""
             targets = [None] if any(p['arrays'].get('stored') is not None for p in members) else []
             targets += sorted({n for p in members for n in p['arrays'].get('morphs') or {}})
+            if any(p['arrays'].get('frames') for p in members):
+                targets += [('frame', k) for k in range(len(baked))]
             entry = dict(name=name, primitives=[primitive(p, skinned, targets) for p in members])
             if targets:
                 entry.update(weights=[0.0] * len(targets),
-                             extras=dict(targetNames=[STORED_SHAPE if n is None else shapes[n] for n in targets]))
+                             extras=dict(targetNames=[STORED_SHAPE if n is None else f'time {baked[n[1]]:.3f}'
+                                                      if isinstance(n, tuple) else shapes[n] for n in targets]))
             doc['meshes'].append(entry)
             return targets
 
@@ -1263,14 +1312,27 @@ class ModelExporter:
                         samplers.append(dict(input=single if const else times, output=output, interpolation='LINEAR'))
                         channels.append(dict(sampler=len(samplers) - 1, target=dict(node=node, path=path)))
                 weights = clip.get('morph_weights')
-                for node, targets in shaped.items():   # blend-shape weights; the stored vertices stay at 0
-                    if weights is None or not any(n is not None for n in targets):
+                for node, targets in shaped.items():   # blend-shape weights; stored vertices and baked frames stay at 0
+                    if weights is None or not any(isinstance(n, int) for n in targets):
                         continue
-                    columns = np.stack([np.zeros(frames, np.float32) if n is None else weights[:frames, n] for n in targets], 1)
+                    columns = np.stack([weights[:frames, n] if isinstance(n, int) else np.zeros(frames, np.float32)
+                                        for n in targets], 1)
                     samplers.append(dict(input=times, output=g.accessor(columns.astype(np.float32).reshape(-1), 'SCALAR'),
                                          interpolation='LINEAR'))
                     channels.append(dict(sampler=len(samplers) - 1, target=dict(node=node, path='weights')))
                 doc['animations'].append(dict(name=clip['name'], samplers=samplers, channels=channels))
+        framed = {node: targets for node, targets in shaped.items() if any(isinstance(n, tuple) for n in targets)}
+        if framed:   # the baked vertex-program frames: frame k at full weight at time k / fps, blended between frames
+            times = g.accessor(np.asarray(baked, np.float32), 'SCALAR', minmax=True)
+            samplers, channels = [], []
+            for node, targets in framed.items():
+                columns = np.zeros((len(baked), len(targets)), np.float32)
+                for column, n in enumerate(targets):
+                    if isinstance(n, tuple):
+                        columns[n[1], column] = 1.0
+                samplers.append(dict(input=times, output=g.accessor(columns.reshape(-1), 'SCALAR'), interpolation='LINEAR'))
+                channels.append(dict(sampler=len(samplers) - 1, target=dict(node=node, path='weights')))
+            doc.setdefault('animations', []).append(dict(name=VERTEX_ANIMATION, samplers=samplers, channels=channels))
         return g
 
     def _write_obj_materials(self, folder, stem, maps, tex_dir, texture_files):

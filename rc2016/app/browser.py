@@ -411,6 +411,15 @@ class AssetBrowser:
                                           command=self._native_translation_changed)
         self.experimental_check=ttk.Checkbutton(materials,text='Experimental previews',variable=self.experimental_materials_var,
                                                 command=self._experimental_materials_changed)
+        self.vertex_motion_var=remember_var(self.tk.BooleanVar(value=False),'model.vertex_animation')
+        self.vertex_motion_check=ttk.Checkbutton(materials,text='Vertex animation',variable=self.vertex_motion_var,
+                                                 command=self._vertex_motion_changed)
+        self.motion_work=LatestWork();self.motion_job=None;self.motion_busy=False;self.motion_start=0.0
+        tip('Play the vertex programs that move this model\'s vertices over time (crowds and other vertex-animation '
+            'textures, flags, wind sway, rotating parts) on the shader clock, from time 0. The 3D view shows the newest '
+            'frame the worker has finished, so a heavy model (the stadium crowd: about 3 frames a second) steps. Off '
+            'shows time 0. Wind, force fields and other engine inputs stay at rest. Shown only for models with such '
+            'programs (Rift Apart).',self.vertex_motion_check)
         tip('Shade materials from their translated game shader program instead of the generic reading. Replaces the fallback rules only; exact hand-decoded rules stay.\nShown when a material of this model has a translation; Shaded mode only.',self.native_check)
         tip('Best-effort material previews: pinned Novalis mountain and terrain materials, plus a generic adapter that substitutes viewer geometry for inputs that are not bound (matte lighting; paint and UVs inferred, runtime unverified).\nReplaces the native translation where one exists. Not game-equivalent.\nShown when a material of this model has such a preview; Shaded mode only.',self.experimental_check)
         materials.grid_remove()
@@ -1199,11 +1208,52 @@ class AssetBrowser:
         self.native_check.grid_remove();self.experimental_check.grid_remove()
         if self.native_applicable:self.native_check.grid(row=0,column=0,sticky='w')
         if self.experimental_applicable:self.experimental_check.grid(row=0,column=1,sticky='w',padx=(8,0))
-        applicable=self.native_applicable or self.experimental_applicable
+        motion=payload.get('vertex_motion') is not None
+        self.vertex_motion_check.grid(row=1,column=0,columnspan=2,sticky='w') if motion else self.vertex_motion_check.grid_remove()
+        self._vertex_motion_changed()
+        applicable=self.native_applicable or self.experimental_applicable or motion
         self.materials_group.grid() if applicable else self.materials_group.grid_remove()
         # A toggle that is hidden must not keep changing the picture.
         self.viewport.set_experimental_materials(self.experimental_applicable and self.experimental_materials_var.get())
         self._sync_material_state()
+
+    def _vertex_motion_changed(self):
+        """Vertex animation switched, or another model shown: run the shader clock from 0 for a model with vertex
+        motion while the box is ticked, else stop it and show time 0."""
+        import time
+        if self.motion_job is not None:
+            self.app.root.after_cancel(self.motion_job);self.motion_job=None
+        payload=self.source_payload
+        if payload is not None and payload.get('vertex_motion') is not None and self.vertex_motion_var.get():
+            self.motion_start=time.monotonic();self.motion_busy=False
+            self._motion_tick()
+        else:
+            self.motion_work.submit(lambda:None);self.motion_busy=False
+            self.viewport.set_vertex_motion(None)
+
+    def _motion_tick(self):
+        """Ask the worker for the vertices at the shader time now, unless it is still on the last one."""
+        import time
+        self.motion_job=None
+        payload=self.source_payload
+        if self.closed or payload is None or payload.get('vertex_motion') is None or not self.vertex_motion_var.get():return
+        if not self.motion_busy:
+            self.motion_busy=True
+            self.motion_work.submit(self._motion_frame,payload,time.monotonic()-self.motion_start)
+        self.motion_job=self.app.root.after(33,self._motion_tick)
+
+    def _motion_frame(self,payload,seconds):
+        """Worker side: the payload's vertex motion at ``seconds`` (texture reads share the archive's lock)."""
+        try:
+            with self.source_loader.texture_lock:
+                return dict(payload=payload,frame=payload['vertex_motion'](seconds))
+        except Exception:   # a time that does not evaluate keeps the frame shown; the clock goes on
+            return dict(payload=None,frame=None)
+
+    def _motion_done(self,result):
+        self.motion_busy=False
+        if result.get('payload') is self.source_payload and self.vertex_motion_var.get():
+            self.viewport.set_vertex_motion(result['frame'])
 
     def _render_details(self):
         # Source facts from the game files first; a saved build in the output root, when present, below.
@@ -1295,7 +1345,7 @@ class AssetBrowser:
         self.app.root.after(100,self._drain)
 
     def _drain_once(self):
-        for worker,kind in [(self.meta_work,'metadata'),(self.detail_work,'details'),(self.artifact_work,'artifact'),(self.source_work,'source'),(self.anim_work,'animation'),(self.clip_list_work,'clip_list')]:
+        for worker,kind in [(self.meta_work,'metadata'),(self.detail_work,'details'),(self.artifact_work,'artifact'),(self.source_work,'source'),(self.anim_work,'animation'),(self.clip_list_work,'clip_list'),(self.motion_work,'motion')]:
             try:
                 while True:
                     generation,payload,error=worker.events.get_nowait()
@@ -1341,6 +1391,7 @@ class AssetBrowser:
                         self.model_info.set('\n'.join(t for t in (self.viewport.shading_error,getattr(self.viewport,'shading_warning','')) if t))
                     elif kind=='animation':self._clip_decoded(payload)
                     elif kind=='clip_list':self._apply_clip_list(payload)
+                    elif kind=='motion':self._motion_done(payload)
                     elif kind=='artifact':self._open(payload)
             except queue.Empty:pass
         self.model_textures.drain();self.archive_textures.drain()
@@ -1368,7 +1419,7 @@ class AssetBrowser:
         self._close_clip_picker()   # release the grabbed Animation list before anything below can wait
         self.closed=True
         self.playback.close()
-        self.meta_work.close();self.detail_work.close();self.artifact_work.close();self.source_work.close();self.anim_work.close();self.clip_list_work.close()
+        self.meta_work.close();self.detail_work.close();self.artifact_work.close();self.source_work.close();self.anim_work.close();self.clip_list_work.close();self.motion_work.close()
         self.model_textures.close();self.archive_textures.close();self.flash_tab.close();self.level_panel.close()
         self.gallery.close()
         self.links.close()

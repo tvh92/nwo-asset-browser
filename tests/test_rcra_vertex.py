@@ -219,6 +219,7 @@ class RealVertexProgramTests(unittest.TestCase):
         for v in (mesh['first_vertex'], mesh['first_vertex'] + mesh['vertex_count'] - 1):
             scalar = {k: (float(a[v]) if a.dtype.kind == 'f' else int(a[v])) for k, a in inputs.items()}
             scalar[rv.VERTEX_ID] = v
+            scalar[rv.TIMER] = 0.0   # the shader timer is an input; the at-rest pose is time 0
 
             def resource(node, args):
                 out = reader(node, [np.asarray([a]) for a in args])

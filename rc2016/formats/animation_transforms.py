@@ -65,8 +65,9 @@ Unlisted scales default to one. Other negative packed scales are not yet validat
 
 SCALE_SENTINEL on all three axes of a Rift Apart additive clip (built flag 0x40, ``additive_flag``) marks a
 joint whose scale the layer leaves alone, read as the multiplicative identity (one). The reading is inferred,
-not traced in the runtime: all 10 installed cases sit on joints with an identity base rotation, no scale
-channel and a translation under 0.01.
+not traced in the runtime (the tail reader was not found in RiftApart.exe): the value occurs only in additive
+clips (41 records in 10 clips), where every other scale is a factor near one, and all its joints have an identity
+base rotation, no scale channel and a translation under 0.01 (docs/rift-apart.md, Scale sentinel).
 """
     tail = bytes.fromhex(clip['base_tail_hex'])
     require(len(tail) == clip['metadata']['unknown_u32_28'] * 32, 'base scale block count mismatch')

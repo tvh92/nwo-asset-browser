@@ -162,7 +162,9 @@ class PlumbingTests(unittest.TestCase):
         normals = np.tile([0.0, 0.0, 1.0], (3, 1))
         arrays = ((ctypes.c_float * 9)(*vertices.ravel()), (ctypes.c_float * 9)(*normals.ravel()))
         view = SimpleNamespace(_morphs=[(np.array([1]), np.array([[0.0, 0.0, 2.0]], np.float32), np.array([[1.0, 0.0, 0.0]], np.float32))],
-                               _mesh=(vertices, None, normals), _arrays=arrays, _stale=set(), _morphed=False)
+                               _mesh=(vertices, None, normals), _arrays=arrays, _stale=set(), _morphed=False,
+                               _morph_weights=None, _motion=None)
+        view._refresh_vertices = lambda: ModelViewport._refresh_vertices(view)
         ModelViewport.set_morph(view, [0.5])
         moved = np.frombuffer(arrays[0], np.float32).reshape(3, 3)
         np.testing.assert_allclose(moved[1], [0, 0, 1.0])

@@ -469,6 +469,8 @@ class ModelViewport(_TkFrame):
         self._stale = set()        # id(ctypes array) whose contents changed since their buffer was filled
         self._morphs = None        # payload blend shapes: [(vertex indices, position deltas, normal deltas)]
         self._morphed = False      # the vertex and normal arrays hold a blend of shapes, not the rest mesh
+        self._morph_weights = None  # the blend-shape weights set_morph last set
+        self._motion = None        # vertex-program motion: (vertex indices, positions, normals) replacing the rest ones
         self._buffer_ext = None    # GL buffer entry points, False when unavailable
         self._camera = None
         self._bounds = None
@@ -506,6 +508,7 @@ class ModelViewport(_TkFrame):
         self._release_textures()
         self._payload = payload
         self._morphs, self._morphed = (payload.get('morphs') or {}).get('targets'), False
+        self._morph_weights = self._motion = None
         if self._shading_draw_failed:   # a failed draw belongs to the previous model; the next one tries the shaded path again
             self._shading_draw_failed, self.shading_error = False, None
         alpha = payload.get('rock_alpha') or []
@@ -571,13 +574,32 @@ class ModelViewport(_TkFrame):
         """Blend-shape weights for the next frame, one per payload shape (None or all zero: the rest mesh). The rest
         vertices and normals plus the weighted deltas (normals renormalised) replace the mesh arrays, whose GPU buffers
         are refilled on the next draw. Does not draw; ``set_pose`` does."""
-        import numpy as np
         if not self._morphs or self._mesh is None or self._arrays is None:
             return
-        active = [] if weights is None else [(float(w), t) for w, t in zip(weights, self._morphs) if w and len(t[0])]
-        if not active and not self._morphed:
+        self._morph_weights = weights
+        self._refresh_vertices()
+
+    def set_vertex_motion(self, frame):
+        """Vertices a material's vertex program moves over time (the payload's ``vertex_motion`` at some shader time):
+        (vertex indices, positions, normals) that replace the rest ones before blend shapes are added, or None for the
+        rest mesh. Draws."""
+        if self._mesh is None or self._arrays is None or (frame is None and self._motion is None):
+            return
+        self._motion = frame
+        self._refresh_vertices()
+        self._draw()
+
+    def _refresh_vertices(self):
+        """The mesh arrays from the rest mesh, the vertex motion and the blend-shape weights."""
+        import numpy as np
+        weights, targets = self._morph_weights, self._morphs or ()
+        active = [] if weights is None else [(float(w), t) for w, t in zip(weights, targets) if w and len(t[0])]
+        if not active and self._motion is None and not self._morphed:
             return
         vertices, normals = np.array(self._mesh[0], dtype=np.float64), np.array(self._mesh[2], dtype=np.float64)
+        if self._motion is not None:
+            index, positions, motion_normals = self._motion
+            vertices[index], normals[index] = positions, motion_normals
         for weight, (index, positions, normal_deltas) in active:
             np.add.at(vertices, index, weight * positions)
             np.add.at(normals, index, weight * normal_deltas)
@@ -587,7 +609,7 @@ class ModelViewport(_TkFrame):
         for array, values in ((self._arrays[0], vertices), (self._arrays[1], normals)):
             np.frombuffer(array, dtype=np.float32)[:] = values.astype(np.float32).ravel()
             self._stale.add(id(array))
-        self._morphed = bool(active)
+        self._morphed = bool(active) or self._motion is not None
 
     def set_lighting(self, lighting=None, tonemap=None):
         """Choose the lighting (LIGHTINGS) and tonemap (TONEMAPS). The shared HDRI's lighting maps are

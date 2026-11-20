@@ -81,6 +81,12 @@ HELP = {
                           "speaks for, one clip per line (Ratchet has 1,535). Each moves the jaw, teeth and tongue on "
                           "the rest pose, and the lips through the model's blend shapes (morph targets).\n\nRift Apart "
                           "only. Only applies with Include animations and Skeleton on."),
+    "vertex_animation": ("Some materials move their vertices over time with their own vertex program: crowds and other "
+                         "vertex-animation textures, flags, wind sway, rotating parts. On, 4 seconds of that motion "
+                         "are baked at 15 frames a second: one morph target (shape key) per frame and an animation "
+                         "'Vertex animation' that steps through them. Off, the vertices stay at shader time 0. Wind, "
+                         "force fields and other engine inputs stay at rest.\n\nRift Apart only. Large: the stadium "
+                         "crowd adds 61 copies of its moving vertices."),
     "layer_bases": ("Additive layers (aims, head looks, leans, twitches) add to another clip in the game. On, each layer "
                     "that shares an animation graph node with ordinary clips is exported over the best-named of them, "
                     "and its animation is named '<layer> (over <clip>)'. Which of them the game uses at a moment is "
@@ -266,6 +272,7 @@ class AssetBrowserApp:
         self.export_root_motion_var = remember_var(tk.BooleanVar(value=False), "export.root_motion")
         self.export_faces_var = remember_var(tk.BooleanVar(value=False), "export.face_performances")
         self.export_layers_var = remember_var(tk.BooleanVar(value=False), "export.layer_bases")
+        self.export_vertex_var = remember_var(tk.BooleanVar(value=False), "export.vertex_animation")
         self.export_skeleton_var = remember_var(tk.BooleanVar(value=True), "export.skeleton")
         self.export_attachments_var = remember_var(tk.BooleanVar(value=True), "export.attachments")
         self.export_lod_var = remember_var(tk.StringVar(value="Highest"), "export.lod", ("Highest", "Lowest", "All"))
@@ -566,6 +573,10 @@ class AssetBrowserApp:
                                             variable=self.export_layers_var)
         self.layers_check.grid(row=7, column=0, columnspan=3, sticky="w", padx=(22, 0))
         self._gate("layer_partners", HELP["layer_bases"], self.layers_check, None)
+        self.vertex_check = ttk.Checkbutton(include, text="Vertex animation (bake 4 s of vertex-program motion as shape keys)",
+                                            variable=self.export_vertex_var)
+        self.vertex_check.grid(row=11, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        self._gate("vertex_animation", HELP["vertex_animation"], self.vertex_check, None)
         picker = ttk.Frame(include)
         picker.grid(row=8, column=0, columnspan=3, sticky="w", padx=(22, 0))
         self.picker_check = ttk.Checkbutton(picker, text="Animation picker: ask which clips to export when a model has more than",
@@ -630,7 +641,7 @@ class AssetBrowserApp:
 
         for variable in (*self.export_format_vars.values(), self.export_textures_var, self.export_dds_var,
                          self.export_animations_var, self.export_cutscenes_var, self.export_root_motion_var, self.export_faces_var,
-                         self.export_layers_var, self.export_skeleton_var, self.export_attachments_var,
+                         self.export_layers_var, self.export_vertex_var, self.export_skeleton_var, self.export_attachments_var,
                          self.export_lod_var, self.blend_scene_var, self.backend_var, self.group_blend_var, self.picker_var):
             variable.trace_add("write", lambda *_args: self._options_changed())
         self._options_changed()
@@ -696,6 +707,7 @@ class AssetBrowserApp:
         self.root_motion_check.configure(state="normal" if animated and self._game_has("root_motion") else "disabled")
         self.faces_check.configure(state="normal" if animated and self._game_has("face_performances") else "disabled")
         self.layers_check.configure(state="normal" if animated and self._game_has("layer_partners") else "disabled")
+        self.vertex_check.configure(state="normal" if pipeline and not blend and self._game_has("vertex_animation") else "disabled")
         self.picker_check.configure(state="normal" if animated else "disabled")
         self.picker_spin.configure(state="normal" if animated and self.picker_var.get() else "disabled")
         self.picker_unit.configure(style="TLabel" if animated and self.picker_var.get() else "Disabled.TLabel")
@@ -736,7 +748,8 @@ class AssetBrowserApp:
                              borrowed=animations and self.browser.borrowed_var.get(),
                              root_motion=animations and self._game_has("root_motion") and self.export_root_motion_var.get(),
                              performances=animations and self._game_has("face_performances") and self.export_faces_var.get(),
-                             layer_bases=animations and self._game_has("layer_partners") and self.export_layers_var.get())
+                             layer_bases=animations and self._game_has("layer_partners") and self.export_layers_var.get(),
+                             vertex_animation=self._game_has("vertex_animation") and self.export_vertex_var.get())
 
     def _path_row(self, parent, row: int, label: str, variable, command, tooltip: str) -> None:
         ttk = self.ttk

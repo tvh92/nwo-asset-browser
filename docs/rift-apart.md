@@ -272,10 +272,16 @@ refused. The root motion section `0xE08AA35F` is read by `motion` ([Root motion]
 ([Blend shapes](#blend-shapes)).
 
 **Scale sentinel.** In 10 additive clips (bladeball turns, horned-toad aim and look layers, the emergency-raft
-wobble) a joint's packed scale is `0x8000` on all three axes, which would be −8. `packed_scales` reads it as one,
-the identity of the additive preview's scale product. This is inferred, not traced in the runtime: every such joint
-has an identity base rotation, no scale channel and a translation under 0.01. The same value in a clip without the
-additive flag, and any other high-bit scale, is still refused (as in 2016, whose clips carry no additive flag).
+wobble) a joint's packed scale is `0x8000` on all three axes, which would be −8 or −16 (exponent 12 or 11).
+`packed_scales` reads it as one, the identity of a layer's scale factor. The corpus supports a marker rather than a
+value: over all skeletal clips the value occurs only in these additive clips (41 records), never with another value on
+the same joint, and every other scale of an additive clip is a factor near one (5,420 records exactly one, the rest
+0.97 to 0.999), so no arithmetic reading of `0x8000` (±8, ±16) fits beside them. Every such joint also has an identity
+base rotation, no scale channel and a translation under 0.01. It is still not traced in the runtime: the clip loader
+(`RiftApart.exe` 0x140F27100) keeps the base-state pointer at +0x88 and the scale-tail block count at +0x7A of its clip
+object, but the code that reads the tail was not found, and the animation code holds no scalar compare against
+`0x8000` or −32768. The same value in a clip without the additive flag, and any other high-bit scale, is still
+refused (as in 2016, whose clips carry no additive flag).
 
 **Coverage.** Of the 23,317 installed clips, 21,377 are skeletal and all of them decode. The other 1,940 are not
 skeletal: custom-track clips and one camera-shake clip. No decoded clip uses the collapsed-rotation sentinel.
@@ -476,7 +482,6 @@ that `Shooter_Aim_Idle_Fwd_Pitch` plays over `shooter_aim_idle_fwd` and moves it
   blend weights, and the base of a layer whose node holds no absolute clip ([Additive layers](#additive-layers)).
 - The per-channel u32 after the clip morph channel hashes, and the last u32 of the model morph info header.
 - The face pose clips' group names (`0x495BA079`), and the gesture clips some performance sets also play.
-- Vertex-animation textures over time: the viewer and exports draw the pose at shader time 0 ([Vertex programs](#vertex-programs)).
 
 ## Textures
 
@@ -1073,7 +1078,7 @@ The subset record (`g_ModelSubsetView`) gives the stream offsets, the scale and 
 **Bindings** (`vertex.translate`; review values, labelled `REST_NOTE`):
 - **Draw:** `MatDrawCB.m_RenderFlags` holds the plain instance draw's 0x1 and the material's lit bit ([Render flags](#render-flags)). The programs test the two low bits only together and write no geometry when both are clear: all 583 material uses translate the same with 0x2. With 0x8000 clear they read the model's colour section through `g_MainPaintVBView`. All 583 read the colour, and their translations are the same as with 0x8000 set and the section bound as `g_MainColorVBView`.
 - **Object:** the neutral object of [Per-object values](#per-object-values), and the same transform as its previous one.
-- **Engine:** shader time 0 and every other engine constant 0: no wind, no ambient animation, no force fields (the per-tile force-field bitset is empty).
+- **Engine:** the shader timer `GlobalWorldCBuffer.m_ShaderTimer` is an input of the translation, run at 0 for the at-rest pose (Motion over time, below). Every other engine constant is 0: no wind, no ambient animation, no force fields (the per-tile force-field bitset is empty).
 - **View:** the camera at the origin with world axes and an identity world-to-clip matrix, so `SV_POSITION.xyz` is the moved position in model units and `TEXCOORD2.xyz` the world normal.
 
 **View check.** A second translation moves the camera and uses another affine world-to-clip matrix (`CHECK_VIEW`). When the world positions or normals it gives differ from the review view's, the placement depends on the view (screen-space glitches, camera-facing geometry) and the stored vertices are drawn, labelled (`VIEW_NOTE`). A program that writes a clip w other than 1 counts as view-dependent too.
@@ -1095,9 +1100,15 @@ All 583 translate. Slots 3, 10, 13 and 17 place every vertex where slot 7 does, 
 - **Notes:** each material's note reaches the viewer's material list (`decoded['material_notes']`) and `export.json`. `decoded['vertex_programs']` holds one row per mesh: state, note and largest offset.
 - **Caching:** both translations are kept in the source's translation disk cache, keyed by the material, the graph, the model's stream layout and `vertex.CODE_SHA256`. A cold load of the stadium crowd (550 meshes, 92 materials) takes about 5 s.
 
+**Motion over time.** A batch whose vertices differ at shader time 0.75 s (`CHECK_TIME`) from time 0 moves over time. `deform_model` keeps such batches in `decoded['vertex_motion']`, a `vertex.VertexMotion`: its recipe, the vertices' inputs, texture reader and stored normals. `at(seconds)` runs them at any shader time (`vertex.at_time`) and returns each moving mesh's positions and normals, at time 0 the at-rest ones. The mesh's note says it moves (`TIME_NOTE`).
+- **Viewer:** **Vertex animation** (Materials group, shown for such a model, off by default and remembered) runs the shader clock from 0 in real time. A worker evaluates the newest time (`loader._motion_payload`), and the viewport puts those vertices in place of the rest ones before blend shapes are added (`ModelViewport.set_vertex_motion`). Evaluation per frame: the flag 2 ms, the swarmer 16 ms (27 meshes), the stadium crowd 337 ms with all its LODs (550 meshes, 553,153 vertices), so a heavy model steps at the rate its frames finish.
+- **Export:** **Vertex animation** under Options bakes 4 s at 15 fps (`models.vertex_frames`): one morph target per frame, named `time <seconds>`, and the glTF animation `Vertex animation`, whose weights put frame k at full weight at time k / 15 and blend linearly between frames. Blender imports them as shape keys and an action. It is large: each frame is a full copy of the moving vertices' deltas.
+- Wind, force fields, the object's custom values and the camera stay at their rest values over time. The baked span is not the motion's period: the crowd's frame index loops every 1 / 0.1277 s (7.8 s).
+
+`tests/test_vertex_motion.py` checks the timer input, a motion batch, the payload, the viewport replacement and the baked export without game files. With `RCRA_GAME` it checks that the swarmer and the flag move between 0 and 0.5 s with time 0 equal to the at-rest vertices, and that a still plant has no motion.
+
 **Limitations:**
-- Motion over time is not drawn.
-- On a skinned mesh, the at-rest offset is added to the bind pose, so its joints carry it; the game adds it after skinning, in object space.
+- On a skinned mesh, the at-rest offset (and the motion over time) is added to the bind pose, so its joints carry it; the game adds it after skinning, in object space.
 - A moved mesh takes the program's tangent output (`TEXCOORD3`) with its normal. Where that output does not translate, the stored tangent stays, and the note says so.
 
 ### Fur materials

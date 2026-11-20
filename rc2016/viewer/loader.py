@@ -77,6 +77,29 @@ def _morph_payload(decoded, meshes):
     return dict(morphs=dict(names=[s['name'] for s in shapes],hashes=[s['hash'] for s in shapes],targets=targets))
 
 
+def _motion_payload(decoded, meshes):
+    """{'vertex_motion': at} for a model whose vertex programs move over shader time on the shown meshes (Rift Apart,
+    ``rcra.vertex.VertexMotion``), else {}. ``at(seconds)`` gives (payload vertex indices, positions, normals) in the
+    display basis, or None when nothing evaluates at that time."""
+    motion=decoded.get('vertex_motion')
+    if motion is None:return {}
+    wanted=set(motion.meshes);starts={};base=0
+    for mesh in meshes:
+        if mesh['index'] in wanted:starts[mesh['index']]=base
+        base+=len(mesh['positions'])
+    if not starts:return {}
+
+    def at(seconds):
+        index,positions,normals=[],[],[]
+        for mesh,(p,n) in motion.at(seconds).items():
+            if mesh in starts:
+                index.append(np.arange(starts[mesh],starts[mesh]+len(p),dtype=np.int64))
+                positions.append(_basis_array(p));normals.append(_basis_array(n))
+        if not index:return None
+        return np.concatenate(index),np.concatenate(positions).astype(np.float32),np.concatenate(normals).astype(np.float32)
+    return dict(vertex_motion=at)
+
+
 def _mesh_payload_arrays(decoded, meshes, selected):
     """mesh_payload for decode_model(..., as_arrays=True) meshes: vertices, normals and triangles
     as numpy arrays (viewport.prepare_viewport takes them as-is); uvs, skin and rock alpha as the
@@ -121,7 +144,7 @@ def _mesh_payload_arrays(decoded, meshes, selected):
         triangles.append(tris+base if base else tris)
         base+=count;triangle_total+=len(tris)
     if not base or not triangle_total:raise ValueError('Selected source look/LOD has no geometry')
-    return dict(**_morph_payload(decoded,meshes),vertices=np.concatenate(vertices),normals=np.concatenate(normals),
+    return dict(**_morph_payload(decoded,meshes),**_motion_payload(decoded,meshes),vertices=np.concatenate(vertices),normals=np.concatenate(normals),
                 raw_vectors=np.concatenate(raw_vectors) if raw_vector_eligible and len(raw_vectors)==len(vertices) else None,
                 static_vector_eligible=bool(raw_vector_eligible and len(raw_vectors)==len(vertices)),
                 tangents=np.concatenate(tangents) if len(tangents)==len(vertices) else None,
