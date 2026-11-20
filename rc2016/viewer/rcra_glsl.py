@@ -32,6 +32,13 @@ apply program, translated (rc2016.games.rcra.lighting.direct, the receipt's ``li
 rcraLight and called once per light. Ambient light is the rig's, with the class-0 BRDF (GGX alpha = r^4, r = 0.9725 -
 0.7514 gloss) and occlusion on ambient light only. A receipt without a lighting recipe takes the class-0 BRDF for its
 lights too: Smith joint visibility approximation, Schlick with F90 = 1, Lambert.
+
+Ambient light under the Shared HDRI lighting: a receipt with an ``ambient`` recipe (rc2016.games.rcra.lighting.ambient, the
+class's apply program with the key light off) draws it as rcraGameAmbient once the viewport has the review probe
+(uRcraProbeOn): its default-probe reads look up the probe cube (uRcraProbe, the review environment prefiltered by the
+engine's probe program, rc2016.games.rcra.probe) at the program's own lod, along the program's direction turned into the
+environment's world frame (uViewToWorld . vNativeToView); its BRDF lookup reads slice 0 of the engine's table (uRcraBrdf,
+rc2016.games.rcra.engine_tables) with a linear clamp sampler, as the game's g_LinearClampSampler. Otherwise the rig's ambient.
 """
 from __future__ import annotations
 
@@ -40,7 +47,7 @@ import hashlib
 import json
 import math
 
-EMITTER_VERSION = 4
+EMITTER_VERSION = 5
 PASS_UNIFORM = 'uRcraPass'   # forward programs: 0 the multiply pass (background factor), 1 the colour pass
 COLOUR_VARYING = 'vRcraColour'
 GEOMETRY = {'TEXCOORD.x': 'vUV.x', 'TEXCOORD.y': 'vUV.y', 'TEXCOORD1.x': 'vUV1.x', 'TEXCOORD1.y': 'vUV1.y',
@@ -60,6 +67,10 @@ SHELL_BLEND = 'fur_shell'
 SHELL_UNIFORMS = ('uFurLayer', 'uFurInverse', 'uFurLength', 'uFurOffsetScale')
 SHELL_CONTROL = 'g_FurControlMap'   # the shell vertex program's offset scale (blue), read in the vertex stage
 SCENE_UNIFORMS = ('uSceneColour', 'uHasSceneColour', 'uSceneDepth', 'uHasSceneDepth', 'uSceneDepthInfo')
+AMBIENT_UNIFORMS = ('uRcraProbe', 'uRcraBrdf', 'uRcraProbeOn')   # the game's ambient light: probe cube, BRDF lookup, ready
+PROBE_BINDING, BRDF_BINDING = 'g_EnvProbeDefault', 'g_BrdfLookup'
+BRDF_SIZE = 64   # rc2016.games.rcra.engine_tables.SIZE
+AMBIENT_LAYOUTS = {PROBE_BINDING: dict(kind='probe'), BRDF_BINDING: dict(kind='lut')}
 LIMITATION = ('Viewer: the draw is unmirrored (render flag 0x10000 clear); vertex colour is the '
               'model\'s colour section squared, as the engine squares it, with its bytes read in R, G, B, A order (the '
               'game\'s view format is not read), 1 without one, and no per-object paint; the review rig and environment '
@@ -163,6 +174,17 @@ class _Emitter:
         u, v = self.value(n['args'][0]), self.value(n['args'][1])
         name = '%ss%d' % (self.prefix, i)
         sampler = uniform(binding)
+        if layout['kind'] == 'probe':   # the review probe at the program's own lod (sample_l: args 0 to 2, lod arg 4)
+            expr = 'rcraProbe(vec3(%s, %s, %s), %s)' % (u, v, self.value(n['args'][2]), self.value(n['args'][4]))
+            self.lines.append('    vec4 %s = %s;' % (name, expr))
+            self.samples[i] = name
+            return name
+        if layout['kind'] == 'lut':   # the BRDF lookup's slice 0
+            if self.recipe['nodes'][n['args'][2]].get('value') != 0.0:
+                raise ValueError('The BRDF lookup is read at a slice other than 0')
+            self.lines.append('    vec4 %s = rcraBrdf(%s, %s);' % (name, u, v))
+            self.samples[i] = name
+            return name
         if layout['kind'] == 'cube':
             expr = 'textureCube(%s, vec3(%s, %s, %s))' % (sampler, u, v, self.value(n['args'][2]))
         elif layout['kind'] == 'slice':
@@ -249,9 +271,9 @@ LIGHT_SIGNATURE = ('vec3 rcraLight(vec3 rN, vec3 rView, float rDepth, vec3 rA, v
 CLASS_LIT = """
 vec3 rcraClassLit(vec3 Nv, vec3 Vv, vec3 albedo, vec3 F0, float gloss, float occlusion, vec3 Nw, vec4 E, float E4) {
     if (!uLightingEnabled) return albedo;
-    vec3 lit = rcraAmbient(Nv, Vv, albedo, F0, gloss, occlusion);
     vec3 n = dot(Nw, Nw) > 0.0 ? normalize(Nw) : normalize(Nv * vNativeToView);
     vec3 view = vTintViewOffset; float depth = max(-vPos.z, 1e-4);
+    vec3 lit = %(ambient)s;
     lit += rcraLight(n, view, depth, albedo, F0, gloss, occlusion, E, E4, normalize(rigKey() * vNativeToView),
                      keyColour() / PI, diffuseScale());
     if (dot(fillColour(), vec3(1.0)) > 0.0)
@@ -266,9 +288,46 @@ vec3 rcraClassLit(vec3 Nv, vec3 Vv, vec3 albedo, vec3 F0, float gloss, float occ
 """
 
 
-def light_source(recipe):
+RIG_AMBIENT = 'rcraAmbient(Nv, Vv, albedo, F0, gloss, occlusion)'
+GAME_AMBIENT = ('(uRcraProbeOn ? rcraGameAmbient(n, view, depth, albedo, F0, gloss, occlusion, E, E4) : '
+                'rcraAmbient(Nv, Vv, albedo, F0, gloss, occlusion))')
+AMBIENT_SIGNATURE = ('vec3 rcraGameAmbient(vec3 rN, vec3 rView, float rDepth, vec3 rA, vec3 rF, float rG, float rO, vec4 rE, '
+                     'float rE4)')
+AMBIENT_HELPERS = """
+uniform samplerCube uRcraProbe; uniform sampler2D uRcraBrdf; uniform bool uRcraProbeOn;
+// The review probe along a game-space direction, at an explicit lod (sample_l): the cube is in the environment's world frame.
+vec4 rcraProbe(vec3 d, float lod) {
+#ifdef GL_ARB_shader_texture_lod
+    return textureCubeLod(uRcraProbe, uViewToWorld * (vNativeToView * d), lod);
+#else
+    return textureCube(uRcraProbe, uViewToWorld * (vNativeToView * d));
+#endif
+}
+// Slice 0 of the engine's BRDF lookup, linear and clamped to the edge texels' centres as a clamp sampler reads it.
+vec4 rcraBrdf(float u, float v) {
+    return texture2D(uRcraBrdf, clamp(vec2(u, v), vec2(0.5 / %(size)s.0), vec2(1.0 - 0.5 / %(size)s.0)));
+}
+""" % dict(size=BRDF_SIZE)
+
+
+def ambient_source(recipe):
+    """GLSL of rcraGameAmbient for an ambient recipe: the class's apply program with the key light off, one statement per
+    node, returning the ambient colour (albedo included)."""
+    emitter = _Emitter(recipe, AMBIENT_LAYOUTS, 'a', inputs=LIGHT_INPUTS)
+    t = emitter.term
+    colour = 'vec3(%s, %s, %s)' % (t('ambient.r'), t('ambient.g'), t('ambient.b'))
+    lines = emitter.lines
+    if any('rcraInf' in line or 'rcraNan' in line for line in lines):
+        lines.insert(0, NON_FINITE_LINE)
+    body = '\n'.join(lines + ['    return %s;' % colour])
+    return '\n// Ambient light: lighting class %d apply program at 0x%X, key light off (rc2016.games.rcra.lighting.ambient)\n%s {\n%s\n}\n' % (
+        recipe.get('lighting_class', 0), recipe.get('offset', 0), AMBIENT_SIGNATURE, body)
+
+
+def light_source(recipe, ambient=None):
     """GLSL of rcraLight and rcraClassLit for a lighting recipe: the class's apply program, one statement per node,
-    returning albedo x diffuse x rKd + specular."""
+    returning albedo x diffuse x rKd + specular; with an ``ambient`` recipe, rcraGameAmbient too, which rcraClassLit uses
+    while the review probe is ready."""
     emitter = _Emitter(recipe, {}, 'l', inputs=LIGHT_INPUTS)
     t = emitter.term
     diffuse = 'vec3(%s, %s, %s)' % (t('diffuse.r'), t('diffuse.g'), t('diffuse.b'))
@@ -277,8 +336,10 @@ def light_source(recipe):
     if any('rcraInf' in line or 'rcraNan' in line for line in lines):
         lines.insert(0, NON_FINITE_LINE)
     body = '\n'.join(lines + ['    return rA * %s * rKd + %s;' % (diffuse, specular)])
-    return '\n// Lighting class %d: apply program at 0x%X, translated (rc2016.games.rcra.lighting)\n%s {\n%s\n}\n%s' % (
-        recipe.get('lighting_class', 0), recipe.get('offset', 0), LIGHT_SIGNATURE, body, CLASS_LIT)
+    extra = AMBIENT_HELPERS + ambient_source(ambient) if ambient else ''
+    return extra + '\n// Lighting class %d: apply program at 0x%X, translated (rc2016.games.rcra.lighting)\n%s {\n%s\n}\n%s' % (
+        recipe.get('lighting_class', 0), recipe.get('offset', 0), LIGHT_SIGNATURE, body,
+        CLASS_LIT % dict(ambient=GAME_AMBIENT if ambient else RIG_AMBIENT))
 
 
 class _PerLightEmitter(_Emitter):
@@ -483,7 +544,7 @@ def fragment_source(receipt):
         declarations += 'varying vec4 vFurShell;   // shell_vertex_source: 32 t\', offset term, base flag, culled\n'
     if scene:
         declarations += 'uniform sampler2D uSceneColour; uniform vec4 uSceneDepthInfo;   // frame copy, viewport size\n'
-    light = light_source(lighting) if lighting else ''
+    light = light_source(lighting, receipt.get('ambient')) if lighting else ''
     if any('rcraInf' in line or 'rcraNan' in line for line in body) or 'rcraInf' in light or 'rcraNan' in light:
         declarations += NON_FINITE_DECLARATION
     if any('rcraInf' in line or 'rcraNan' in line for line in body):
@@ -501,8 +562,10 @@ def reads_scene(recipe):
     return any(n['op'] == 'input' and n.get('name', '').startswith('BACKGROUND.') for n in recipe['nodes'])
 
 
-def receipt_sha256(surface, forward, blend, layouts, lighting=None):
+def receipt_sha256(surface, forward, blend, layouts, lighting=None, ambient=None):
     payload = dict(version=EMITTER_VERSION, surface=surface, forward=forward, blend=blend, layouts=layouts)
     if lighting:
         payload['lighting'] = lighting
+    if ambient:
+        payload['ambient'] = ambient
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()

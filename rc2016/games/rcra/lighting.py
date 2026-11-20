@@ -374,7 +374,9 @@ def profile_texel(texels, index):
     return tuple(float(x) for x in texels[k]) if 0 <= k < len(texels) else (0.0, 0.0, 0.0, 0.0)
 
 
-def _portable(g, terms):
+def _portable(g, terms, sampled=()):
+    """The terms rewritten to portable operations; texture reads raise Unsupported unless their binding is in ``sampled``
+    (kept as sample nodes for the renderer)."""
     from rc2016.games.rcra import surface as rsurface
     bad = {g.nodes[i]['op'] for i in g.reachable(list(terms.values()))} - rsurface.PORTABLE_OPS
     if bad:
@@ -386,8 +388,10 @@ def _portable(g, terms):
     bad = {g.nodes[i]['op'] for i in g.reachable(list(terms.values()))} - rsurface.PORTABLE_OPS
     if bad:
         raise rsurface.Unsupported('Apply program keeps non-portable operations: ' + ', '.join(sorted(bad)))
-    if any(g.nodes[i]['op'] in ('sample', 'load') for i in g.reachable(list(terms.values()))):
-        raise rsurface.Unsupported('Apply program reads an engine texture')
+    for i in g.reachable(list(terms.values())):
+        n = g.nodes[i]
+        if n['op'] in ('sample', 'load') and (n['op'] == 'load' or n.get('binding') not in sampled):
+            raise rsurface.Unsupported('Apply program reads an engine texture (%s)' % n.get('binding'))
     return rsurface._prune_nan(g, terms)
 
 
@@ -415,6 +419,143 @@ def direct(root, cls, disk=None):
         result = translate(dxbc.shader(blob), cls)
         g = result['graph']
         result.update(textures={}, limitations=[class_note(cls, offset)],
+                      inputs=sorted({g.nodes[i]['name'] for i in g.reachable(list(result['terms'].values()))
+                                     if g.nodes[i]['op'] == 'input'}))
+        recipe = rsurface.fold_nan(rsurface.export_recipe(result))
+        recipe.update(offset=offset, zeroed=result['zeroed'], lighting_class=cls)
+        if key:
+            disk.put(key, _encode(recipe))
+    with _LOCK:
+        _RECIPES[memo] = recipe
+    return recipe
+
+
+# ------------------------------------------------------------------------------------------------ ambient light
+# The apply programs' own ambient light: the program with the key light off, so its output is the ambient alone. Its sources
+# are bound for a scene that has only the environment: the light grid empty (lookups and cells 0), no local probes (empty
+# lists), no screen-space reflections, distant GI or ambient fill, and the review environment as the default probe
+# (g_EnvProbeDefault, rc2016.games.rcra.probe), with the engine's BRDF lookup (g_BrdfLookup, rc2016.games.rcra.engine_tables).
+# Both stay texture samples in the recipe, for the renderer to look up. m_LightGridIntensity, which scales the probe's
+# ambient and reflections, is a review value of 1.
+# The light grid (camera-centred, 512 units each way) blends each point between the grid's radiance and the default probe by a
+# probe weight: the eight corner cells' max(cell data.w & 0x3C0, lookup word & 0x3FC), averaged by the trilinear and facing
+# weights, over 960 (outside the grid's extent the weight is 960). The same weight scales the probe's reflection by the
+# grid's irradiance over the probe's. The review scene has no grid: every lookup word is GRID_PROBE_WORD (weight 960) and
+# every cell is empty, so the program lights each point from the default probe alone, the grid's radiance cancels exactly,
+# and the reflection scale is the probe's own (its lod-5 radiance at the normal over that at the reflection).
+AMBIENT_SAMPLED = ('g_EnvProbeDefault', 'g_BrdfLookup')
+GRID_LOOKUP = 'g_LightGridLookup'
+GRID_PROBE_WORD = 0x3C0
+AMBIENT_EMPTY = ('g_LightGridData', 'g_SSRFinalTex', 'g_GiDistantSamples', 'g_GiDistantHeight', 'g_EnvProbeArray',
+                 'g_EnvProbeEnvs', 'g_LightVolumes', 'g_SsgiHistoryTex', 'g_GiPrepassOutput')
+AMBIENT_REVIEW = {'GlobalWorldCBuffer.m_LightGridIntensity': 1.0}
+AMBIENT_TERMS = ('ambient.r', 'ambient.g', 'ambient.b')
+AMBIENT_NOTE = ("Ambient light from lighting class %d's own apply program (%s at 0x%X): the review environment as the "
+                "engine's default probe, prefiltered by the engine's probe program, and the engine's BRDF lookup; no light "
+                "grid (every cell hands its points to the default probe: lookup words 0x3C0, empty cells), local "
+                "probes, screen-space reflections, distant GI or ambient fill, and m_LightGridIntensity 1 (review values).")
+
+
+class _AmbientBindings(_ApplyBindings):
+    """_ApplyBindings with the key light off and the ambient sources of AMBIENT_SAMPLED / AMBIENT_EMPTY."""
+
+    def constant(self, name):
+        if name.startswith('GlobalWorldCBuffer.m_KeyLightColorLinear'):
+            return self.graph.const('f', 0.0)
+        if name in AMBIENT_REVIEW:
+            return self.graph.const('f', AMBIENT_REVIEW[name])
+        return super().constant(name)
+
+    def resource(self, graph, op, binding, args):
+        if binding in AMBIENT_SAMPLED and op.startswith('sample'):
+            return None   # a sample node, looked up by the renderer
+        if binding == GRID_LOOKUP:
+            return [graph.const('i', GRID_PROBE_WORD)] * 4
+        if binding in AMBIENT_EMPTY:
+            return [graph.const('i' if op.startswith('ld') else 'f', 0)] * 4
+        return super().resource(graph, op, binding, args)
+
+
+def _light_free(g, terms, trials=24):
+    """True when the terms do not change with the key light's direction (the key light is off) at random inputs and texels."""
+    import random
+    from collections import defaultdict
+    names = {g.nodes[i]['name'] for i in g.reachable(list(terms.values())) if g.nodes[i]['op'] == 'input'}
+    if not names & {'L.x', 'L.y', 'L.z'}:
+        return True
+    rng = random.Random(11)
+    roots = list(terms.values())
+    texels = {}
+
+    def sample(node, _args):
+        return texels.setdefault(node.get('binding'), [rng.uniform(0.05, 0.95) for _ in range(4)])
+    for _trial in range(trials):
+        texels.clear()
+        values = defaultdict(float, {name: rng.uniform(-1.0, 1.0) for name in names})
+        values.update(DEPTH=rng.uniform(0.2, 8.0), gloss=rng.random(), occlusion=rng.random())
+        outs = []
+        for _light in range(2):
+            values.update({'L.' + c: rng.uniform(-1.0, 1.0) for c in 'xyz'})
+            outs.append(sm5.evaluate(g, roots, values, sample))
+        if any(outs[0][r] != outs[1][r] and not (outs[0][r] != outs[0][r] and outs[1][r] != outs[1][r]) for r in roots):
+            return False
+    return True
+
+
+def translate_ambient(shader, cls):
+    """dict(graph, terms {ambient.r/g/b}, zeroed): class ``cls``'s apply output with the key light off (the whole colour,
+    albedo included; class 1 as albedo x diffuse + specular), the default probe and BRDF lookup as sample nodes."""
+    from rc2016.games.rcra import surface as rsurface
+    bindings = _AmbientBindings(cls)
+    translator = sm5.Translator(shader, bindings)
+    bindings.graph = translator.g
+    tr = rsurface._run(translator)
+    g = tr.graph
+    stores = {}
+    for store in tr.stores:
+        stores.setdefault(store['binding'], store)
+    if APPLY_OUTPUT not in stores:
+        raise rsurface.Unsupported('Apply program writes no %s' % APPLY_OUTPUT)
+    for address in bindings.profile_addresses:
+        _check_profile_address(g, address, cls)
+    terms = {}
+    for c, name in enumerate(AMBIENT_TERMS):
+        colour = stores[APPLY_OUTPUT]['values'][c]
+        if cls == 1:   # the skin pass: albedo x diffuse + specular
+            colour = g.op('add', g.op('mul', g.input('albedo.' + 'rgb'[c], 'f'), colour),
+                          stores[SPECULAR_OUTPUT]['values'][c])
+        terms[name] = colour
+    replace = {i: g.const(n['type'], 0) for i, n in enumerate(g.nodes)
+               if n['op'] == 'input' and n['name'].split('.')[0] in THREAD_INPUTS}
+    terms = rsurface._substitute(g, terms, replace)
+    unknown = g.unknowns(list(terms.values()))
+    if unknown:
+        raise rsurface.Unsupported('Apply program ambient depends on unknown values: ' + ', '.join(unknown[:3]))
+    terms = _portable(g, terms, AMBIENT_SAMPLED)
+    if not _light_free(g, terms):
+        raise rsurface.Unsupported('Apply program ambient reads the key light direction')
+    terms = rsurface._substitute(g, terms, {i: g.const('f', 0.0) for i, n in enumerate(g.nodes)
+                                            if n['op'] == 'input' and n['name'] in ('L.x', 'L.y', 'L.z')})
+    terms = _fold_unused_profile(g, terms, cls)
+    return dict(graph=g, terms=terms, zeroed=sorted(bindings.zeroed))
+
+
+def ambient(root, cls, disk=None):
+    """The ambient-light recipe of class ``cls`` (export_recipe shape, terms ambient.r/g/b, with sample nodes on
+    AMBIENT_SAMPLED), cached as ``direct``."""
+    from rc2016.games.rcra import surface as rsurface
+    offset, blob = programs(root)[cls]
+    tag = 'rcra-ambient:%d:%s' % (cls, _code_key())
+    memo = (tag, hashlib.sha256(blob).hexdigest())
+    with _LOCK:
+        if memo in _RECIPES:
+            return _RECIPES[memo]
+    key = disk.key(blob, [], tag) if disk is not None else None
+    recipe = _decode(disk.get(key)) if key else None
+    if recipe is None:
+        result = translate_ambient(dxbc.shader(blob), cls)
+        g = result['graph']
+        result.update(textures={}, limitations=[AMBIENT_NOTE % (cls, EXECUTABLE, offset)],
                       inputs=sorted({g.nodes[i]['name'] for i in g.reachable(list(result['terms'].values()))
                                      if g.nodes[i]['op'] == 'input'}))
         recipe = rsurface.fold_nan(rsurface.export_recipe(result))

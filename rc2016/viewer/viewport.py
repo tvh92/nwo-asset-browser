@@ -2078,6 +2078,113 @@ class ModelViewport(_TkFrame):
             self._shading.glActiveTexture(self.GL_TEXTURE0 + unit)
             self._gl.glBindTexture(self.GL_TEXTURE_2D, 0)
 
+    RCRA_PROBE_UNIT, RCRA_BRDF_UNIT = 19, 20   # Rift Apart ambient light: the review probe cube and the BRDF lookup
+
+    def _apply_rcra_ambient(self, u, receipt):
+        """Bind the review probe and the engine's BRDF lookup for a Rift Apart receipt with an ``ambient`` recipe
+        (rc2016.viewer.rcra_glsl.ambient_source) and set uRcraProbeOn; off while they are not ready."""
+        sh = self._shading
+        textures = self._rcra_ambient_textures(receipt) if receipt.get('ambient') else None
+        if u.get('uRcraProbeOn', -1) != -1:
+            sh.glUniform1i(u['uRcraProbeOn'], 1 if textures else 0)
+        if not textures:
+            return
+        gl = self._gl
+        sh.glActiveTexture(self.GL_TEXTURE0 + self.RCRA_PROBE_UNIT)
+        gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP, textures[0])
+        sh.glActiveTexture(self.GL_TEXTURE0 + self.RCRA_BRDF_UNIT)
+        gl.glBindTexture(self.GL_TEXTURE_2D, textures[1])
+        sh.glActiveTexture(self.GL_TEXTURE0)
+        if u.get('uRcraProbe', -1) != -1:
+            sh.glUniform1i(u['uRcraProbe'], self.RCRA_PROBE_UNIT)
+        if u.get('uRcraBrdf', -1) != -1:
+            sh.glUniform1i(u['uRcraBrdf'], self.RCRA_BRDF_UNIT)
+
+    def _rcra_ambient_textures(self, receipt):
+        """(probe cube, BRDF lookup) GL names for the Rift Apart ambient light under the Shared HDRI lighting, or None. The
+        probe (rc2016.games.rcra.probe: the review HDRI without its sun, prefiltered by the engine's probe program) is built
+        once per HDRI and install on a worker thread, cached on disk, and uploaded here with the world strength applied."""
+        state = self._lighting_state()
+        root = receipt.get('engine_root')
+        if not state['hdri'] or not root or not self._environment or not getattr(self._shading, 'supports_parallax', True):
+            return None   # the probe reads need textureCubeLod (GL_ARB_shader_texture_lod, as parallax does)
+        key = (root, self._environment.get('sha256'), self._environment.get('strength'))
+        build = self.__dict__.get('_rcra_probe')
+        if build is None or build['key'] != key:
+            if build is not None:
+                self._delete_rcra_probe(build)
+            build = self._rcra_probe = dict(key=key, levels=None, lut=None, names=None, error=None)
+            self._start_rcra_probe(build, root)
+        if build['names'] is None and build['levels'] is not None:
+            build['names'] = self._upload_rcra_probe(build)
+        return build['names'] or None
+
+    def _start_rcra_probe(self, build, root):
+        import threading
+
+        def work():
+            try:
+                from rc2016.games.rcra import engine_tables, probe
+                from rc2016.viewer.environment import CACHE_DIR, review_residual
+                image, _key = review_residual()
+                lut = engine_tables.brdf_lookup(root)[0]
+                build['levels'], build['lut'] = probe.cached_probe_levels(root, image, CACHE_DIR), lut
+            except Exception as error:   # the rig's ambient stays; the reason is kept for the status line
+                build['error'] = '%s: %s' % (type(error).__name__, error)
+                self.shading_warning = 'Rift Apart ambient light: ' + build['error']
+            try:
+                self.after(0, self._schedule_draw)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _upload_rcra_probe(self, build):
+        """(cube, 2D) GL names of the probe levels (RGB16F, every mip, trilinear, seamless) and the BRDF lookup's slice 0
+        (RGBA16F, linear, clamped), or (0, 0) on a GL error."""
+        import numpy as np
+        gl = self._gl
+        strength = float(self._environment.get('strength', 1.0))
+        names = []
+        cube = ctypes.c_uint(0)
+        gl.glGetError()
+        gl.glGenTextures(1, ctypes.byref(cube))
+        gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP, cube.value)
+        gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
+        for level, faces in enumerate(build['levels']):
+            for face in range(6):
+                data = np.ascontiguousarray(faces[face] * strength, np.float32)
+                gl.glTexImage2D(self.GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, 0x881B, data.shape[1], data.shape[0], 0,
+                                0x1907, self.GL_FLOAT, data.ctypes.data_as(ctypes.c_void_p))   # GL_RGB16F from RGB float
+        for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, 0x2703), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                 (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F), (0x8072, 0x812F),
+                                 (0x813C, 0), (0x813D, len(build['levels']) - 1)):   # LINEAR_MIPMAP_LINEAR, base and max level
+            gl.glTexParameteri(self.GL_TEXTURE_CUBE_MAP, parameter, value)
+        gl.glEnable(self.GL_TEXTURE_CUBE_MAP_SEAMLESS)
+        gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP, 0)
+        names.append(cube.value)
+        lut = ctypes.c_uint(0)
+        gl.glGenTextures(1, ctypes.byref(lut))
+        gl.glBindTexture(self.GL_TEXTURE_2D, lut.value)
+        data = np.ascontiguousarray(build['lut'], np.float32)
+        gl.glTexImage2D(self.GL_TEXTURE_2D, 0, 0x881A, data.shape[1], data.shape[0], 0, 0x1908, self.GL_FLOAT,
+                        data.ctypes.data_as(ctypes.c_void_p))   # GL_RGBA16F from RGBA float
+        for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                 (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F)):
+            gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
+        gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+        names.append(lut.value)
+        if gl.glGetError():
+            self._delete_rcra_probe(dict(names=tuple(names)))
+            build['error'] = 'GL upload failed'
+            return (0, 0)
+        return tuple(names)
+
+    def _delete_rcra_probe(self, build):
+        for name in build.get('names') or ():
+            if name:
+                self._gl.glDeleteTextures(1, ctypes.byref(ctypes.c_uint(name)))
+        build['names'] = None
+
     def _apply_material(self, u, entry, level):
         """Bind one material's textures and set its uniforms on the current opaque program."""
         from rc2016.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT, LEAF_CMA_TEXTURE_UNIT, RETICLE_TEXTURE_UNIT
@@ -2092,6 +2199,8 @@ class ModelViewport(_TkFrame):
                 cube = len(textures[api]) > 2 and textures[api][2]   # a Rift Apart cube map (_upload_cube)
                 gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP if cube else self.GL_TEXTURE_2D, textures[api][0])
                 sh.glUniform1i(u[f'uNativeTex{api}'], unit)
+            if translation.get('kind') == 'rcra':
+                self._apply_rcra_ambient(u, translation)
             return
         for unit, role, has, srgb in ((PARALLAX_HEIGHT_TEXTURE_UNIT, "_parallax_height", "uHasParallaxHeight", None), (GLOW_PARALLAX_TEXTURE_UNIT, "_glow_parallax", "uHasGlowParallax", "uSrgbGlowParallax"), (TINT_DETAIL_TEXTURE_UNIT, "_tint_detail", "uHasTintDetail", "uSrgbTintDetail"), (0, "_c", "uHasC", "uSrgbC"), (1, "_g", "uHasG", "uSrgbG"), (2, "_n", "uHasN", None),
                                       (PICK_TEXTURE_UNIT, "_pick", "uHasP", "uSrgbP"),

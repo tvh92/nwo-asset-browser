@@ -327,5 +327,35 @@ def environment_maps(settings=None):
     return maps
 
 
+def review_residual(settings=None):
+    """(image, key): the shared HDRI without its sun, tilted and turned as environment_maps lights with (equirectangular,
+    rows top first, Blender world directions, world strength not applied), and a key naming the HDRI and its rotation.
+    Cached under .cache/environment."""
+    import numpy as np
+    settings = settings or shared_lighting()
+    hdri = Path(settings['hdri_path'])
+    digest = hashlib.sha256(hdri.read_bytes()).hexdigest()
+    tilt = float(settings.get('hdri_rotation_x_degrees', 0.0))
+    turn = float(settings.get('hdri_rotation_z_degrees', 0.0))
+    key = f'{digest[:16]}_x{tilt:g}_z{turn:g}_v{ENVIRONMENT_VERSION}'
+    cache = CACHE_DIR / f'{key}_residual.npy'
+    if cache.is_file():
+        try:
+            return np.load(cache), key
+        except (OSError, ValueError):
+            pass
+    residual, _direction, _sun = extract_sun(read_exr(hdri))
+    image = rotate(residual, tilt, turn).astype(np.float32)
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = cache.with_suffix('.tmp.npy')
+        np.save(temporary, image)
+        temporary.replace(cache)
+    except OSError:
+        pass
+    return image, key
+
+
 __all__ = ['LIGHTINGS', 'ROUGHNESS_LEVELS', 'TONEMAPS', 'direction_uv', 'environment_maps', 'equirect_directions', 'extract_sun',
-           'mapping_matrix', 'prefiltered_bands', 'read_exr', 'rotate', 'rotate_z', 'sh_irradiance', 'shared_lighting']
+           'mapping_matrix', 'prefiltered_bands', 'read_exr', 'review_residual', 'rotate', 'rotate_z', 'sh_irradiance',
+           'shared_lighting']

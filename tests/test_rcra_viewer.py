@@ -15,6 +15,7 @@ from rc2016.viewer.viewport import forward_rule, split_forward, TRANSLATED_FORWA
 GAME = os.environ.get('RCRA_GAME')
 DOME = 'characters/enemy/enm_neo_nefarious_trooper/materials/enm_neo_nefarious_trooper_dome.material'
 EYE = 'characters/hero/hero_clank/materials/hero_clank_eyeinner.material'
+CLANK_BODY = 'characters/hero/hero_clank/materials/hero_clank_body_aniso.material'   # lighting class 4
 VOLUME = 'material/characters/hero/hero_mj_invisible_transition_01/dimension_swap_proto_frame_grab_01.material'
 PLACEHOLDER = 'characters/hero/hero_clank/materials/hero_clank_antennaglass.material'   # binds the float default_pink_shader_n
 SWARMER = 'characters/enemy/enm_neo_nefarious_swarmer/enm_neo_nefarious_swarmer.model'
@@ -361,6 +362,19 @@ class ViewportDrawTests(unittest.TestCase):
                 check(view, receipt, textures)
             finally:
                 root.destroy()
+
+    def test_class_ambient_links_with_the_probe_uniforms(self):
+        """A lit surface carries its class's ambient recipe; the program declares rcraGameAmbient and keeps the probe, BRDF
+        lookup and switch uniforms live."""
+        def check(view, receipt, _textures):
+            self.assertTrue(receipt.get('ambient'))
+            self.assertTrue(receipt.get('engine_root'))
+            self.assertIn('rcraGameAmbient', rcra_glsl.fragment_source(receipt)['source'])
+            _program, uniforms = view._shading.native_program(receipt, {})
+            sampled = {n['binding'] for n in receipt['ambient']['nodes'] if n['op'] == 'sample'}
+            for name in ('uRcraProbe', 'uRcraProbeOn') + (('uRcraBrdf',) if rcra_glsl.BRDF_BINDING in sampled else ()):
+                self.assertNotEqual(uniforms[name], -1, name)
+        self._link(CLANK_BODY, check)
 
     def test_cube_material_links_and_uploads_its_cube_map(self):
         def check(view, _receipt, textures):

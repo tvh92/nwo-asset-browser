@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from rc2016.games.rcra import lighting
 from rc2016.viewer import rcra_glsl
 
@@ -131,6 +133,34 @@ class ClassTests(unittest.TestCase):
             rough, aniso, rot1, rot2 = lighting.cycles_anisotropic(gloss, second, turn)
             want = 0.5 * (_cycles_lobe(rough, aniso, rot1, tangent, light) + _cycles_lobe(rough, aniso, rot2, tangent, light))
             self.assertAlmostEqual(got, want, delta=1e-4 * max(want, 1.0), msg=str(case))
+
+    def test_probe_records_follow_the_tables(self):
+        from rc2016.games.rcra import probe
+        r = probe.record(2, 3)
+        self.assertEqual((r[0], r[4], r[8], r[12], r[16], r[48], r[52]), (0.0, 3.0, probe.RECORD_TABLES['a'][2], 0.08, 1 / 32,
+                                                                         128.0, 7.0))
+        faces = probe.face_directions(4)
+        self.assertTrue(np.allclose(np.linalg.norm(faces, axis=-1), 1.0))
+        from rc2016.games.rcra.blender_export import cube_lookup
+        marked = np.zeros((6, 4, 4, 3))
+        marked[1, 2, 3] = 1.0
+        self.assertAlmostEqual(float(cube_lookup(marked, faces[1, 2, 3])[0]), 1.0)   # a texel's direction finds that texel
+
+    def test_ambient_emitter_reads_the_probe_at_its_lod(self):
+        nodes = [dict(op='input', type='f', name=n, args=[]) for n in ('normal.x', 'normal.y', 'normal.z', 'gloss')]
+        nodes.append(dict(op='const', type='f', value=0.0, args=[]))
+        nodes.append(dict(op='sample', type='f', binding='g_EnvProbeDefault', opcode='sample_l', args=[0, 1, 2, 0, 3, 3, 3, 3]))
+        nodes.append(dict(op='sample', type='f', binding='g_BrdfLookup', opcode='sample_l', args=[3, 3, 4, 3, 4, 4, 4, 4]))
+        nodes.append(dict(op='channel', type='f', index=0, args=[5]))
+        nodes.append(dict(op='channel', type='f', index=1, args=[6]))
+        nodes.append(dict(op='mul', type='f', args=[7, 8]))
+        recipe = dict(nodes=nodes, terms={'ambient.r': 9, 'ambient.g': 9, 'ambient.b': 9}, lighting_class=0, offset=0)
+        text = rcra_glsl.ambient_source(recipe)
+        self.assertIn('rcraProbe(vec3(rN.x, rN.y, rN.z), rG)', text)
+        self.assertIn('rcraBrdf(rG, rG)', text)
+        nodes[6]['args'][2] = 0   # a slice other than the constant 0
+        with self.assertRaises(ValueError):
+            rcra_glsl.ambient_source(recipe)
 
     def test_profile_texel_is_a_d3d_load(self):
         texels = [(k / 255.0, 0.0, 0.0, 1.0) for k in range(128)]
@@ -348,6 +378,75 @@ class RealLightingTests(unittest.TestCase):
         from rc2016.games.rcra.texture import texture_header
         header = texture_header(self.source, lighting.PROFILE_TEXTURE)
         self.assertEqual((header['format'], header['sd_width'], header['sd_height']), (29, 128, 1))   # RGBA8 sRGB, 1D
+
+    def _furnace(self, cls, albedo, f0, gloss, extra=None, probe=(0.5, 0.7, 1.0)):
+        """The class's ambient over a constant probe, with the engine's BRDF lookup (bilinear, clamped), over the probe."""
+        from rc2016.games.rcra import engine_tables, surface
+        lut = engine_tables.brdf_lookup(GAME)[0]
+
+        def bilinear(u, v):
+            x, y = min(max(u * 64 - 0.5, 0.0), 63.0), min(max(v * 64 - 0.5, 0.0), 63.0)
+            x0, y0 = int(x), int(y)
+            x1, y1 = min(x0 + 1, 63), min(y0 + 1, 63)
+            fx, fy = x - x0, y - y0
+            return list((lut[y0, x0] * (1 - fx) + lut[y0, x1] * fx) * (1 - fy) +
+                        (lut[y1, x0] * (1 - fx) + lut[y1, x1] * fx) * fy)
+        values = {'normal.x': 0.0, 'normal.y': 1.0, 'normal.z': 0.0, 'VIEW.x': 0.6, 'VIEW.y': -1.8, 'VIEW.z': 0.3, 'DEPTH': 2.0,
+                  'gloss': gloss, 'occlusion': 1.0}
+        values.update({'albedo.' + c: albedo for c in 'rgb'}, **{'f0.' + c: f0 for c in 'rgb'})
+        values.update(extra or {'extra.%d' % k: 0.0 for k in range(5)})
+        out = surface.evaluate_recipe(lighting.ambient(GAME, cls), values,
+                                      lambda n, a: bilinear(a[0], a[1]) if n['binding'] == 'g_BrdfLookup' else list(probe) + [1.0])
+        return [out['ambient.' + c] / p for c, p in zip('rgb', probe)]
+
+    def test_ambient_reads_only_the_probe_and_brdf_lookup(self):
+        for cls in lighting.CLASSES:
+            recipe = lighting.ambient(GAME, cls)
+            bindings = {n['binding'] for n in recipe['nodes'] if n['op'] == 'sample'}
+            self.assertTrue(bindings <= set(lighting.AMBIENT_SAMPLED), cls)
+            self.assertIn('g_EnvProbeDefault', bindings, cls)
+            names = {n['name'] for n in recipe['nodes'] if n['op'] == 'input'}
+            self.assertFalse(names & {'L.x', 'L.y', 'L.z', 'LIGHT.r'}, cls)
+
+    def test_ambient_furnace(self):
+        """A white diffuse surface under a constant probe reflects about the probe (the diffuse takes 1 - the lookup's
+        specular part); a white metal (F0 1) about the probe at high gloss. Hair has its own transmission model."""
+        for cls in (0, 1, 2, 4, 5):
+            for gloss in (0.1, 0.5, 0.9):
+                extra = {'extra.%d' % k: 0.0 for k in range(5)}
+                if cls == 4:   # an isotropic lobe: second gloss = gloss
+                    extra.update({'extra.1': 255.0, 'extra.4': float(round(gloss * 127))})
+                for got in self._furnace(cls, 1.0, 0.04, gloss, extra):
+                    self.assertAlmostEqual(got, 1.0, delta=0.08, msg=(cls, gloss))
+        for got in self._furnace(0, 0.0, 1.0, 0.9):
+            self.assertAlmostEqual(got, 1.0, delta=0.02)
+
+    def test_brdf_lookup_is_read_through_its_loader(self):
+        from rc2016.games.rcra import engine_tables
+        lut = engine_tables.brdf_lookup(GAME)
+        self.assertEqual(lut.shape, (4, 64, 64, 4))
+        self.assertFalse(lut[3].any())
+        self.assertFalse(lut[0, :, :, 2:].any())
+        self.assertTrue((lut[0, :, :, :2] >= 0).all() and (lut[0, :, :, :2] <= 1).all())
+        with open(os.path.join(GAME, engine_tables.EXECUTABLE), 'rb') as f:
+            data = bytearray(f.read())
+        image = engine_tables._Image(bytes(data))
+        at = engine_tables.BRDF_LEAS[2][0] - image.base
+        offset = next(raw + at - start for start, _v, raw, rsize in image.sections if start <= at < start + rsize)
+        data[offset + 3] ^= 0x40   # move one loader displacement: a different build
+        with self.assertRaises(ValueError):
+            engine_tables.brdf_tables(bytes(data))
+
+    def test_probe_convolution_keeps_a_constant_environment(self):
+        """The engine's probe program over a constant source returns it unchanged at every output mip (energy is kept)."""
+        import numpy as np
+        from rc2016.games.rcra import probe
+        _offset, blob = probe.program(GAME)
+        chain = probe.box_chain(np.ones((6, probe.SIZE, probe.SIZE, 3), np.float32) * np.array([0.5, 1.0, 2.0], np.float32))
+        for mip in (0, 4):
+            out = probe.convolve(blob, chain, mip, faces=[2])[2]
+            np.testing.assert_allclose(out.reshape(-1, 3), np.broadcast_to([0.5, 1.0, 2.0], (out.shape[0] * out.shape[1], 3)),
+                                       rtol=1e-4)
 
     def test_class_recipes_are_portable_and_read_their_fields(self):
         for cls in lighting.CLASSES:
