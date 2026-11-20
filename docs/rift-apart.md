@@ -833,7 +833,7 @@ The viewer draws the 678 with their own term per review light ([In the viewer](#
 - **Default probe and BRDF lookup:** kept as sample nodes, as for the apply programs. With a probe in the lists, the program also reads the default probe along the reflection at the gloss lod, for the weight the list leaves.
 - **Everything else:** as the apply programs' ambient (grid cells hand their points to the probe, `m_LightGridIntensity` 1), and the key light off.
 
-The term is the colour minus the colour with every probe read 0, and it must double when the probe's radiance doubles (`_check_linear_in_probe`). On the trooper dome the probe array's sharp read looks along exactly the default probe's reflection direction (`test_forward_ambient_reads_one_review_probe`), and every BRDF read that reaches the colour is slice 0.
+The term is the colour minus the colour with every probe read 0, and it must double when the probe's radiance doubles (`_check_linear_in_probe`). On the trooper dome the probe array's sharp read looks along exactly the default probe's reflection direction (`test_forward_ambient_reads_one_review_probe`), and every BRDF read that reaches the colour is slice 0. Of the 678 materials with their own key-light term, 671 translate (every BRDF read slice 0); 4 are not linear in the probe (the planet atmosphere and edge, a screen, a lava splash), and 3 have no probe list (bubbles, debris stuffing). Those keep the surface's ambient light.
 
 #### Missing textures
 
