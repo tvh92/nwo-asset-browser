@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import copy
 import re
+import struct
 import tempfile
 from pathlib import Path
 
@@ -35,8 +36,10 @@ import numpy as np
 
 from rc2016.common import sha
 from rc2016.formats.animation_transforms import sample_transforms
-from rc2016.games.rcra.animation import (decode_clip, header, motion, performance_clip, performance_frames,
+from rc2016.games.rcra.animation import (clip_dat1, decode_clip, header, motion, performance_clip, performance_frames,
                                          pose_table)
+from rc2016.games.rcra.morph import clip_weights, shape_hashes
+from rc2016.games.rcra.toc import sections as dat1_sections
 from rc2016.viewer.animation import AnimationLibrary, _quat_mul, _quat_rotate, on_rest
 
 CUTSCENE_SOURCE = 'cinematic2'
@@ -244,6 +247,11 @@ class RcraAnimationLibrary(AnimationLibrary):
         self.inheritance = inheritance_rule(inspected['profile'])
         self.rest_inheritance = rest_inheritance_rule(inspected['profile'])
         self.names = {int(r['hash'], 16): r['name'] for r in self.rows}
+        dat1 = bytes(model_bytes)[36:]
+        try:   # the model's blend shapes, in its order: a clip's morph channels name them (rcra.morph)
+            self.shape_hashes = shape_hashes(dat1, dat1_sections(dat1))
+        except (ValueError, struct.error):
+            self.shape_hashes = []
         if not clips or not self.rows or len(self.inverse) != len(self.rows):
             return
         animsets = model_animsets(source, model_path)
@@ -306,6 +314,57 @@ class RcraAnimationLibrary(AnimationLibrary):
         finally:
             self.clips = clips
         return [None if c.get('source') == PERFORMANCE else next(notes) for c in clips]
+
+    def morph_weights(self, index, count):
+        """Blend-shape weights of clip ``index`` for its ``count`` frames: (count, shapes) in the model's shape order
+        (``rcra.morph.clip_weights``), or None when the model has no shapes or the clip names none of them. A face
+        performance blends its pose clip's frames by the performance's weights, as its joints do."""
+        if not self.shape_hashes or count < 1:
+            return None
+        entry = self.clips[index]
+        if entry.get('source') == PERFORMANCE:
+            key = _key(self.source, entry['pose'])
+            if key is None:
+                return None
+            pose = self.source.bytes(key)[0]
+            poses = self._channel_weights(pose)
+            if poses is None:
+                return None
+            performance = performance_clip(self._bytes(entry))
+            table = np.asarray(pose_table(pose), np.intp)
+            weight = performance['weight'][:count]
+            weight = weight / np.maximum(1.0, weight.sum(1, keepdims=True))
+            frame_of = np.minimum(table[np.minimum(performance['index'][:count], len(table) - 1)], len(poses) - 1)
+            return np.einsum('fs,fsk->fk', weight, poses[frame_of]).astype(np.float32)
+        weights = self._channel_weights(self._bytes(entry))
+        if weights is None:
+            return None
+        if len(weights) < count:   # a frame past the clip's morph frames keeps the last
+            weights = np.concatenate([weights, np.repeat(weights[-1:], count - len(weights), 0)])
+        return weights[:count]
+
+    def _channel_weights(self, data):
+        """(frames, shapes) weights of a clip asset's morph channels that name this model's shapes, or None."""
+        dat1, table = clip_dat1(data)
+        try:
+            found = clip_weights(dat1, table, header(data)['original_frame_count'])
+        except (ValueError, struct.error):
+            return None
+        if found is None:
+            return None
+        order = {h: i for i, h in enumerate(self.shape_hashes)}
+        columns = [(c, order[h]) for c, h in enumerate(found['hashes']) if h in order]
+        if not columns:
+            return None
+        weights = np.zeros((len(found['weights']), len(self.shape_hashes)), np.float32)
+        weights[:, [s for _c, s in columns]] = found['weights'][:, [c for c, _s in columns]]
+        return weights
+
+    def pose(self, index, root_motion=False):
+        """``AnimationLibrary.pose`` plus ``morph_weights``: (frames, shapes) or None (``morph_weights``)."""
+        result = super().pose(index, root_motion)
+        result['morph_weights'] = self.morph_weights(index, len(result['frames']))
+        return result
 
     def clip_frames(self, index, root_motion=False):
         """``AnimationLibrary.clip_frames``; a face performance blends its pose clip's frames by the performance's

@@ -382,6 +382,26 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
         skin_sections_present=[f'0x{t:08X}' for t in SKIN_SECTIONS if t in table])
 
 
+def attach_shapes(decoded, data):
+    """The model's blend shapes (``rcra.morph.model_shapes``): ``decoded['shapes']`` lists their names and hashes in the
+    model's order, and each mesh a shape moves gets ``morphs``: [(shape number, mesh vertices, position deltas, normal
+    deltas)] in model units. A model whose shapes do not read keeps none, with the reason in ``shape_note``."""
+    from rc2016.games.rcra.morph import model_shapes
+    dat1 = data[HEADER:]
+    meshes = {mesh['index']: mesh for mesh in decoded['meshes']}
+    try:
+        shapes = model_shapes(dat1, dat1_sections(dat1), {i: len(m['positions']) for i, m in meshes.items()})
+    except (ValueError, struct.error) as error:
+        decoded['shapes'], decoded['shape_note'] = [], f'Blend shapes not read: {error}'
+        return
+    decoded['shapes'] = [dict(name=shape['name'], hash=shape['hash']) for shape in shapes]
+    for number, shape in enumerate(shapes):
+        for target in shape['targets']:
+            if target['mesh'] in meshes and len(target['vertices']):
+                meshes[target['mesh']].setdefault('morphs', []).append(
+                    (number, target['vertices'], target['positions'], target['normals']))
+
+
 def decode_for_viewer(source, model_id, source_path, as_arrays):
     """The ``Game.decode_model`` hook: (decoded, data) with packed_sha256, codec and joint_count.
 
@@ -398,6 +418,7 @@ def decode_for_viewer(source, model_id, source_path, as_arrays):
     rigged = '0x%08X' % JOINT_TRANSFORMS in decoded['section_sizes']
     decoded.update(packed_sha256=digest, codec='rcra-dsar', joint_count=len(decoded['joints']) if rigged else 0)
     deform_model(source, decoded, data)
+    attach_shapes(decoded, data)
     decoded['undrawn_materials'] = undrawn_materials(source, decoded['materials'])
     notes = decoded.setdefault('material_notes', {})
     for material_path, note in decoded['undrawn_materials'].items():

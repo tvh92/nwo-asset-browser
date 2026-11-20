@@ -466,6 +466,9 @@ class ModelViewport(_TkFrame):
         self._arrays = None
         self._vbos = {}            # id(ctypes array) -> (GL buffer, array) for the current mesh
         self._vbo_owner = None     # the self._arrays tuple those buffers belong to
+        self._stale = set()        # id(ctypes array) whose contents changed since their buffer was filled
+        self._morphs = None        # payload blend shapes: [(vertex indices, position deltas, normal deltas)]
+        self._morphed = False      # the vertex and normal arrays hold a blend of shapes, not the rest mesh
         self._buffer_ext = None    # GL buffer entry points, False when unavailable
         self._camera = None
         self._bounds = None
@@ -502,6 +505,7 @@ class ModelViewport(_TkFrame):
         """Install a decoded mesh mapping: vertices, triangles, and optional normals."""
         self._release_textures()
         self._payload = payload
+        self._morphs, self._morphed = (payload.get('morphs') or {}).get('targets'), False
         if self._shading_draw_failed:   # a failed draw belongs to the previous model; the next one tries the shaded path again
             self._shading_draw_failed, self.shading_error = False, None
         alpha = payload.get('rock_alpha') or []
@@ -555,7 +559,35 @@ class ModelViewport(_TkFrame):
     def clear_pose(self):
         """Back to the bind/rest pose."""
         self._bones, self._bone_count = None, 0
+        self.set_morph(None)
         self._draw()
+
+    @property
+    def shape_count(self):
+        """Blend shapes of the shown mesh (payload ``morphs``), 0 without."""
+        return len(self._morphs or ())
+
+    def set_morph(self, weights):
+        """Blend-shape weights for the next frame, one per payload shape (None or all zero: the rest mesh). The rest
+        vertices and normals plus the weighted deltas (normals renormalised) replace the mesh arrays, whose GPU buffers
+        are refilled on the next draw. Does not draw; ``set_pose`` does."""
+        import numpy as np
+        if not self._morphs or self._mesh is None or self._arrays is None:
+            return
+        active = [] if weights is None else [(float(w), t) for w, t in zip(weights, self._morphs) if w and len(t[0])]
+        if not active and not self._morphed:
+            return
+        vertices, normals = np.array(self._mesh[0], dtype=np.float64), np.array(self._mesh[2], dtype=np.float64)
+        for weight, (index, positions, normal_deltas) in active:
+            np.add.at(vertices, index, weight * positions)
+            np.add.at(normals, index, weight * normal_deltas)
+        if active:
+            length = np.linalg.norm(normals, axis=1, keepdims=True)
+            normals = np.where(length > 1e-12, normals / np.maximum(length, 1e-12), self._mesh[2])
+        for array, values in ((self._arrays[0], vertices), (self._arrays[1], normals)):
+            np.frombuffer(array, dtype=np.float32)[:] = values.astype(np.float32).ravel()
+            self._stale.add(id(array))
+        self._morphed = bool(active)
 
     def set_lighting(self, lighting=None, tonemap=None):
         """Choose the lighting (LIGHTINGS) and tonemap (TONEMAPS). The shared HDRI's lighting maps are
@@ -1371,6 +1403,7 @@ class ModelViewport(_TkFrame):
             if ext and names:
                 ext["glDeleteBuffers"](len(names), (ctypes.c_uint * len(names))(*names))
             self._vbos, self._vbo_owner = {}, self._arrays
+            self._stale.clear()
 
     def _vptr(self, array, offset=0, target=None):
         """Pointer argument for ``array``: a byte offset into its GPU buffer (bound here), else its client address."""
@@ -1385,7 +1418,11 @@ class ModelViewport(_TkFrame):
             ext["glBindBuffer"](target, name.value)
             ext["glBufferData"](target, ctypes.sizeof(array), ctypes.c_void_p(ctypes.addressof(array)), self.GL_STATIC_DRAW)
             entry = self._vbos[id(array)] = (name.value, array)
+            self._stale.discard(id(array))
         ext["glBindBuffer"](target, entry[0])
+        if id(array) in self._stale:   # blend shapes rewrote the array (set_morph): refill its buffer
+            ext["glBufferData"](target, ctypes.sizeof(array), ctypes.c_void_p(ctypes.addressof(array)), self.GL_STATIC_DRAW)
+            self._stale.discard(id(array))
         return ctypes.c_void_p(offset)
 
     def _unbind_buffers(self):

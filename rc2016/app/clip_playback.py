@@ -227,6 +227,10 @@ class ClipPlayback:
     def show(self, frame: int) -> None:
         count = len(self.animation['frames'])
         self.frame = frame % count
+        morph = getattr(self.viewport, 'set_morph', None)
+        if morph is not None:   # blend-shape weights of the frame (Rift Apart face clips), else the rest shapes
+            weights = self.animation.get('morph_weights')
+            morph(None if weights is None else weights[self.frame])
         self.viewport.set_pose(self.animation['frames'][self.frame])
         rate = '' if self.speed == 1.0 else f'  ·  {self.speed:g}×'
         text = f'{self.frame + 1}/{count} @ {self.animation["fps"]:g} fps{rate}'

@@ -34,7 +34,7 @@ Rift Apart's capabilities are `models`, `textures`, `export`, `animation`, `root
   - Browsing.
   - The 3D model view, with skeletal [animation](#animation) playback, optionally with the clip's [root motion](#root-motion), and the voice lines' [face performances](#face-performances). The Shaded mode draws each material's own translated program where it translates ([In the viewer](#in-the-viewer)), and the labelled preview elsewhere.
   - The Textures tab.
-  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances). Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
+  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances), and blend shapes as morph targets. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
 - **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart".
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
@@ -268,7 +268,8 @@ Four things differ from 2016:
 
 A clip with only custom float tracks (`0x14014CB6`/`0x116EB684`: camera and property curves) is not skeletal and is
 refused. The root motion section `0xE08AA35F` is read by `motion` ([Root motion](#root-motion)); the path section
-`0x3976E44C` (two 4x4 float matrices), triggers, morph and face sections are not read.
+`0x3976E44C` (two 4x4 float matrices) and triggers are not read; the morph sections are read by `rcra.morph`
+([Blend shapes](#blend-shapes)).
 
 **Scale sentinel.** In 10 additive clips (bladeball turns, horned-toad aim and look layers, the emergency-raft
 wobble) a joint's packed scale is `0x8000` on all three axes, which would be −8. `packed_scales` reads it as one,
@@ -416,16 +417,44 @@ only, so neither gets lines. In the browser the lines form their own section of 
 `tests/test_rcra_animation.py` checks Ratchet's `RATC_BOARDS_SLICE1_017`: 497 frames, the jaw closed at silence and
 open up to 9.4°.
 
-**Lips are not moved.** The pose clips also hold morph sections for blend shapes (see Not decoded), so a line shows
-the jaw, teeth and tongue but not the lip shapes.
+**Lips.** The pose clips also carry blend-shape weights. A line blends them by the same performance weights as the
+joints, so the lips move with the jaw ([Blend shapes](#blend-shapes)).
+
+### Blend shapes
+
+`rc2016/games/rcra/morph.py` reads the face shapes of 19 models (Ratchet has 294) and the shape weights of 2,821
+clips: the face pose clips, cutscene shots and some animset clips. Section names follow ALERT `dat1lib`; the layout
+is in the module docstring.
+
+**Model** (`model_shapes`). The morph info section `0x380A5744` lists the shapes, each with a name, a left/right
+mirror partner and one target per mesh it moves. A target's deltas are packed k-bit fields (position xyz, and for
+most shapes normal xyz) times a scale plus a bias, in `0x5E709570`. The vertices they move are (skip, run) words in
+`0xA600C108`, in windows of 2,560 mesh vertices. On Ratchet the deltas of `LF_x` and `RT_x` at mirrored vertices
+differ by a median 0.003 of the shape's largest delta, which is the rounding of their 8-bit fields.
+
+**Clip** (`clip_weights`). The clip morph info `0x277563F5` names its channels by shape name hash and holds a frame
+table: per frame, the count of active channels and a word offset into the frame data `0x69F64588`. There each active
+channel is a bit field (the first absolute, then steps from the previous channel) and a 10-bit value. A channel a
+frame leaves out has weight 0. The weight is the value / 1023; reading 1023 as full weight is inferred, not traced in
+the runtime. Channels are matched to the model's shapes by hash; ones the model lacks are dropped.
+
+**Playback.** `RcraAnimationLibrary.pose` adds the clip's weights per frame (`morph_weights`). A face performance
+blends its pose clip's weight rows by the performance weights, like its joints. The viewport adds the weighted deltas
+to the rest vertices and normals before skinning (`ModelViewport.set_morph`) and refills the vertex buffers.
+
+**Export.** glTF and GLB carry each shape as a sparse morph target, named after the shape. A clip with weights also
+animates the mesh's `weights`, so Blender imports shape keys driven by an action.
+
+`tests/test_rcra_morph.py` checks synthetic shapes and clips, the viewport blend and the sparse accessor. With
+`RCRA_GAME` it checks Ratchet's brow shapes against their mirror partners, the silent frame of `ratchet_phonemes`,
+and that `RATC_BOARDS_SLICE1_017` drives 53 of Ratchet's shapes.
 
 ### Not decoded
 
 - The path section `0x3976E44C` and the unread record values of the root motion section (the kind-3 byte, the
   format-1 u32).
 - Clip blending and additive partners. Additive clips are previewed on the rest pose, as in 2016.
-- Facial blend shapes: the morph sections of pose clips and cutscene shots (`0x277563F5` morph info, `0x69F64588`
-  morph frame data) and whatever model section holds the shapes. Face performances move only joints.
+- The per-channel u32 after the clip morph channel hashes, and the last u32 of the model morph info header.
 - The face pose clips' group names (`0x495BA079`), and the gesture clips some performance sets also play.
 - Vertex-animation textures over time: the viewer and exports draw the pose at shader time 0 ([Vertex programs](#vertex-programs)).
 

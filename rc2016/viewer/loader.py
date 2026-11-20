@@ -59,6 +59,24 @@ def _vertex_colours(decoded, meshes):
     return dict(vertex_colours=np.clip(np.concatenate(parts),0,255).astype(np.uint8))
 
 
+def _morph_payload(decoded, meshes):
+    """{'morphs': dict(names, hashes, targets)} for a model with blend shapes on the shown meshes (Rift Apart,
+    ``rcra.model.attach_shapes``), else {}. ``targets`` holds one (payload vertex indices, position deltas, normal
+    deltas) per shape, in the model's shape order and the display basis; a shape on no shown mesh has empty arrays."""
+    shapes=decoded.get('shapes') or []
+    if not shapes or not any(mesh.get('morphs') for mesh in meshes):return {}
+    parts=[([],[],[]) for _shape in shapes];base=0
+    for mesh in meshes:
+        for number,vertices,positions,normals in mesh.get('morphs') or ():
+            parts[number][0].append(np.asarray(vertices,dtype=np.int64)+base)
+            parts[number][1].append(_basis_array(positions));parts[number][2].append(_basis_array(normals))
+        base+=len(mesh['positions'])
+    targets=[(np.concatenate(i) if i else np.zeros(0,np.int64),
+              np.concatenate(p).astype(np.float32) if p else np.zeros((0,3),np.float32),
+              np.concatenate(n).astype(np.float32) if n else np.zeros((0,3),np.float32)) for i,p,n in parts]
+    return dict(morphs=dict(names=[s['name'] for s in shapes],hashes=[s['hash'] for s in shapes],targets=targets))
+
+
 def _mesh_payload_arrays(decoded, meshes, selected):
     """mesh_payload for decode_model(..., as_arrays=True) meshes: vertices, normals and triangles
     as numpy arrays (viewport.prepare_viewport takes them as-is); uvs, skin and rock alpha as the
@@ -103,7 +121,7 @@ def _mesh_payload_arrays(decoded, meshes, selected):
         triangles.append(tris+base if base else tris)
         base+=count;triangle_total+=len(tris)
     if not base or not triangle_total:raise ValueError('Selected source look/LOD has no geometry')
-    return dict(vertices=np.concatenate(vertices),normals=np.concatenate(normals),
+    return dict(**_morph_payload(decoded,meshes),vertices=np.concatenate(vertices),normals=np.concatenate(normals),
                 raw_vectors=np.concatenate(raw_vectors) if raw_vector_eligible and len(raw_vectors)==len(vertices) else None,
                 static_vector_eligible=bool(raw_vector_eligible and len(raw_vectors)==len(vertices)),
                 tangents=np.concatenate(tangents) if len(tangents)==len(vertices) else None,

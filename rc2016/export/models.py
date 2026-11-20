@@ -480,8 +480,10 @@ def mesh_arrays(mesh, joint_count):
         weights[total[:, 0] <= 0, 0] = 1.0   # unweighted vertices follow joint 0 (the root)
         sets = 2 if np.any(weights[:, 4:] > 0) else 1
         skin = dict(joints=joints[:, :4 * sets], weights=weights[:, :4 * sets].astype(np.float32), sets=sets, unweighted=unweighted)
+    morphs = {number: (np.asarray(vertices, np.int64), np.asarray(deltas, np.float32), np.asarray(normal_deltas, np.float32))
+              for number, vertices, deltas, normal_deltas in mesh.get('morphs') or ()}
     return dict(positions=positions, normals=normals, uvs=uvs, triangles=triangles, skin=skin, stored=stored,
-                tangents=tangents, tangent_w=tangent_w)
+                tangents=tangents, tangent_w=tangent_w, morphs=morphs)
 
 
 def _quat_from_matrix(m):
@@ -636,6 +638,29 @@ class GLTF:
             acc['normalized'] = True
         if minmax:
             flat = array.reshape(array.shape[0], -1)
+            acc['min'] = [float(v) for v in flat.min(axis=0)]
+            acc['max'] = [float(v) for v in flat.max(axis=0)]
+        self.doc['accessors'].append(acc)
+        return len(self.doc['accessors']) - 1
+
+    def sparse(self, count, indices, values, kind, minmax=False):
+        """Accessor of ``count`` elements that are zero except ``values`` at ``indices`` (glTF sparse storage); without
+        indices, an all-zero accessor with no buffer view."""
+        values = np.ascontiguousarray(values, np.float32)
+        acc = dict(componentType=5126, count=int(count), type=kind)
+        if len(indices):
+            order = np.argsort(indices, kind='stable')
+            indices, values = np.asarray(indices)[order], values[order]
+            small = int(indices.max()) <= 65535
+            acc['sparse'] = dict(count=int(len(indices)),
+                                 indices=dict(bufferView=self._view(indices.astype(np.uint16 if small else np.uint32).tobytes()),
+                                              componentType=5123 if small else 5125),
+                                 values=dict(bufferView=self._view(values.tobytes())))
+        if minmax:
+            width = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4}[kind]
+            flat = values.reshape(len(values), width)
+            if len(indices) < count:
+                flat = np.vstack([flat, np.zeros((1, flat.shape[1]), np.float32)])
             acc['min'] = [float(v) for v in flat.min(axis=0)]
             acc['max'] = [float(v) for v in flat.max(axis=0)]
         self.doc['accessors'].append(acc)
@@ -855,6 +880,12 @@ class ModelExporter:
         if options.performances and load_animation and library is not None and library.rows:
             library = library.with_performances()
         meshes = selected_meshes(decoded, options.lod, options.look)
+        # Blend shapes (Rift Apart, rcra.model.attach_shapes): morph targets named in the model's shape order.
+        shapes = [shape['name'] or f"shape_{shape['hash']:08X}" for shape in decoded.get('shapes') or ()]
+        if shapes and any(mesh.get('morphs') for mesh in meshes):
+            notes.append(f'{len(shapes)} blend shapes as morph targets (shape keys); clips with face motion animate their weights.')
+        elif decoded.get('shape_note'):
+            notes.append(decoded['shape_note'])
         game = self.loader.game   # the archive's game (rc2016.games): its material reads and texture export
         material_paths = {m.get('index', i): m.get('path') for i, m in enumerate(decoded['materials'])}
         casters = [m for m in meshes if game.shadow_only(material_paths.get((m.get('material') or {}).get('index')))]
@@ -922,7 +953,8 @@ class ModelExporter:
                 self._check()
                 try:
                     kind, fps, tracks = clip_tracks(library, i, options.root_motion)
-                    clips_out.append(dict(name=labels[i], kind=kind, fps=fps, tracks=tracks,
+                    morph_weights = library.morph_weights(i, len(tracks)) if shapes and hasattr(library, 'morph_weights') else None
+                    clips_out.append(dict(name=labels[i], kind=kind, fps=fps, tracks=tracks, morph_weights=morph_weights,
                                           source=library.clips[i].get('source', 'animset'),
                                           asset=library.clips[i]['animset'], offset=library.clips[i]['offset']))
                 except Exception as error:   # one bad clip must not stop the export
@@ -944,7 +976,7 @@ class ModelExporter:
         if options.textures and any(f in options.formats for f in ('gltf', 'obj')):
             tex_dir.mkdir(exist_ok=True)
         if need_gltf:
-            gltf = self._build_gltf(stem, parts, maps, library if joint_count else None, clips_out)
+            gltf = self._build_gltf(stem, parts, maps, library if joint_count else None, clips_out, shapes)
             doc, blob = gltf.finish(embed=True)
             if 'gltf' in options.formats:
                 file_doc, file_blob = gltf.finish(embed=False, texture_dir='textures')
@@ -1074,7 +1106,7 @@ class ModelExporter:
         return found, notes
 
     # -- glTF assembly
-    def _build_gltf(self, stem, parts, maps, library, clips):
+    def _build_gltf(self, stem, parts, maps, library, clips, shapes=()):
         g = GLTF('R&C PS4 asset browser export')
         doc = g.doc
         material_ids = {}
@@ -1107,7 +1139,7 @@ class ModelExporter:
         if 'extensionsUsed' in doc:
             doc['extensionsUsed'] = sorted(set(doc['extensionsUsed']))
 
-        def primitive(part, skinned, morph=False):
+        def primitive(part, skinned, targets=()):
             a = part['arrays']
             attributes = dict(POSITION=g.accessor(a['positions'], 'VEC3', 34962, minmax=True))
             if a['normals'] is not None:
@@ -1126,24 +1158,38 @@ class ModelExporter:
             prim = dict(attributes=attributes, indices=g.accessor(index, 'SCALAR', 34963), mode=4)
             if part['material'] in material_ids:
                 prim['material'] = material_ids[part['material']]
-            if morph:   # every primitive of the mesh carries the target; unmoved ones a zero offset
-                stored = a.get('stored')
-                target = dict(POSITION=g.accessor(stored['positions'] - a['positions'] if stored else np.zeros_like(a['positions']),
-                                                  'VEC3', 34962, minmax=True))
-                if a['normals'] is not None:
-                    target['NORMAL'] = g.accessor(stored['normals'] - a['normals'] if stored else np.zeros_like(a['normals']),
-                                                  'VEC3', 34962)
-                prim['targets'] = [target]
+            if targets:   # every primitive of the mesh carries every target; unmoved ones a zero offset
+                prim['targets'] = []
+                for number in targets:
+                    if number is None:   # the stored vertices of a mesh a vertex program moved
+                        stored = a.get('stored')
+                        target = dict(POSITION=g.accessor(stored['positions'] - a['positions'] if stored else np.zeros_like(a['positions']),
+                                                          'VEC3', 34962, minmax=True))
+                        if a['normals'] is not None:
+                            target['NORMAL'] = g.accessor(stored['normals'] - a['normals'] if stored else np.zeros_like(a['normals']),
+                                                          'VEC3', 34962)
+                    else:                # a blend shape: sparse deltas at the vertices it moves
+                        index, deltas, normal_deltas = a['morphs'].get(number, (np.zeros(0, np.int64), np.zeros((0, 3)), np.zeros((0, 3))))
+                        count = len(a['positions'])
+                        target = dict(POSITION=g.sparse(count, index, deltas, 'VEC3', minmax=True))
+                        if a['normals'] is not None:
+                            target['NORMAL'] = g.sparse(count, index, normal_deltas, 'VEC3')
+                    prim['targets'].append(target)
             return prim
 
         def mesh(name, members, skinned):
-            morph = any(p['arrays'].get('stored') is not None for p in members)
-            entry = dict(name=name, primitives=[primitive(p, skinned, morph) for p in members])
-            if morph:
-                entry.update(weights=[0.0], extras=dict(targetNames=[STORED_SHAPE]))
+            """Append the glTF mesh of ``members``; returns its targets (None: stored vertices, n: blend shape n)."""
+            targets = [None] if any(p['arrays'].get('stored') is not None for p in members) else []
+            targets += sorted({n for p in members for n in p['arrays'].get('morphs') or {}})
+            entry = dict(name=name, primitives=[primitive(p, skinned, targets) for p in members])
+            if targets:
+                entry.update(weights=[0.0] * len(targets),
+                             extras=dict(targetNames=[STORED_SHAPE if n is None else shapes[n] for n in targets]))
             doc['meshes'].append(entry)
+            return targets
 
         root_children = []
+        shaped = {}   # mesh node -> its morph targets (mesh())
         skinned_parts = [p for p in parts if p['arrays']['skin'] is not None] if library is not None else []
         rigid_parts = [p for p in parts if p not in skinned_parts]
         joint_nodes = []
@@ -1170,11 +1216,13 @@ class ModelExporter:
             for p in skinned_parts:   # the body first, then one node per attached part, so each can be hidden on its own
                 groups.setdefault(p.get('group'), []).append(p)
             for group, members in groups.items():
-                mesh(f'{group}_skinned' if group else f'{stem}_skinned', members, True)
+                targets = mesh(f'{group}_skinned' if group else f'{stem}_skinned', members, True)
                 root_children.append(g.node(name=group or stem, mesh=len(doc['meshes']) - 1, skin=0))
+                shaped[root_children[-1]] = targets
         if rigid_parts:
-            mesh(f'{stem}_static' if skinned_parts else stem, rigid_parts, False)
+            targets = mesh(f'{stem}_static' if skinned_parts else stem, rigid_parts, False)
             root_children.append(g.node(name=f'{stem}_static' if skinned_parts else stem, mesh=len(doc['meshes']) - 1))
+            shaped[root_children[-1]] = targets
         top = g.node(name=stem, children=root_children)
         doc['scenes'][0]['nodes'] = [top]
         if clips:
@@ -1199,6 +1247,14 @@ class ModelExporter:
                         output = g.accessor(values.astype(np.float32), kind)
                         samplers.append(dict(input=single if const else times, output=output, interpolation='LINEAR'))
                         channels.append(dict(sampler=len(samplers) - 1, target=dict(node=node, path=path)))
+                weights = clip.get('morph_weights')
+                for node, targets in shaped.items():   # blend-shape weights; the stored vertices stay at 0
+                    if weights is None or not any(n is not None for n in targets):
+                        continue
+                    columns = np.stack([np.zeros(frames, np.float32) if n is None else weights[:frames, n] for n in targets], 1)
+                    samplers.append(dict(input=times, output=g.accessor(columns.astype(np.float32).reshape(-1), 'SCALAR'),
+                                         interpolation='LINEAR'))
+                    channels.append(dict(sampler=len(samplers) - 1, target=dict(node=node, path='weights')))
                 doc['animations'].append(dict(name=clip['name'], samplers=samplers, channels=channels))
         return g
 
