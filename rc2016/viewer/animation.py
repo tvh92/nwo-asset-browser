@@ -145,6 +145,27 @@ def on_rest(rows, frames):
              for row in frame if row['hash'] in rest] for frame in frames]
 
 
+def layer_over(rows, layer, base):
+    """Additive-style ``layer`` frames on the absolute ``base`` frames, as ``on_rest`` puts them on the rest pose:
+    base T + delta T, base Q * delta Q, base S * delta S. Both loop to the longer one's length (an aim or lean
+    layer is a short sweep, its base a cycle). A joint the base frame does not sample starts from its rest values;
+    joints the model does not have are dropped."""
+    rest = {r['hash']: r for r in rows}
+    out = []
+    for number in range(max(len(layer), len(base))):
+        frame = {row['hash']: row for row in base[number % len(base)]}
+        for delta in layer[number % len(layer)]:
+            under = frame.get(delta['hash']) or rest.get(delta['hash'])
+            if under is None:
+                continue
+            q = under['rotation_xyzw'] or rest[delta['hash']]['rotation_xyzw']
+            frame[delta['hash']] = dict(under, translation=[a + b for a, b in zip(under['translation'], delta['translation'])],
+                                        rotation_xyzw=_quat_mul(q, delta['rotation_xyzw']) if delta['rotation_xyzw'] else q,
+                                        scale=[a * b for a, b in zip(under['scale'], delta['scale'])])
+        out.append(list(frame.values()))
+    return out
+
+
 def apply_root_motion(rows, frames, rotation, translation):
     """``frames`` with every joint without a parent moved by the root displacement of its frame.
 
@@ -318,21 +339,34 @@ class AnimationLibrary:
         frame, or None for a clip without root motion. R&C 2016 clips carry none that is decoded."""
         return None
 
-    def clip_frames(self, index, root_motion=False):
+    def layer_partners(self, index):
+        """Clip indices the game plays additive clip ``index`` over, best first; [] when none is known. R&C 2016
+        decodes no animation graph, so none is; Rift Apart reads them from its animsets' driver classes."""
+        return []
+
+    def clip_frames(self, index, root_motion=False, base=None):
         """(decoded clip, kind, frames) for clip ``index``: the source samples as this model plays them.
 
-        Additive-style clips become standalone poses on the rest pose; absolute clips of an animset built for a
+        Additive-style clips become poses on the rest pose, or with ``base`` (a clip index) on that clip's frames
+        (``layer_over``; the base plays with ``root_motion`` as asked); absolute clips of an animset built for a
         model of other proportions get their translations moved onto this rig (``retarget``) when they sit on that
         model's rig (``clip_fits_source``). With ``root_motion`` an absolute clip's skeleton also moves by the
-        clip's root displacement (``root_displacement``, applied to the joints without a parent). Raises NotPlayable
-        for a clip that does not drive the skeleton."""
+        clip's root displacement (``root_displacement``, applied to the joints without a parent). ``base`` is ignored
+        for a clip that is not a layer. Raises NotPlayable for a clip that does not drive the skeleton, or for a
+        base that is itself a layer."""
         entry = self.clips[index]
         clip = self._decode_clip(entry)
         frames = sample_transforms(clip)
         kind, _evidence = classify(self.rows, frames, entry.get('source') == 'cinematic2')
         if kind not in PLAYABLE:
             raise NotPlayable(f"'{entry['name']}' is {kind}; it does not drive this model's skeleton")
-        if kind == 'relative/additive-style layer':
+        if kind == 'relative/additive-style layer' and base is not None:
+            _base_clip, base_kind, base_frames = self.clip_frames(base, root_motion)
+            if base_kind == 'relative/additive-style layer' or not base_frames:
+                raise NotPlayable(f"'{self.clips[base]['name']}' is itself a layer; a layer plays over an absolute clip")
+            frames = layer_over(self.rows, frames, base_frames)
+            clip = dict(clip, base=self.clips[base]['name'])
+        elif kind == 'relative/additive-style layer':
             frames = on_rest(self.rows, frames)
         elif entry['animset'] in getattr(self, 'retarget', {}):
             joints = self.retarget[entry['animset']]['joints']
@@ -344,11 +378,12 @@ class AnimationLibrary:
                 frames = apply_root_motion(self.rows, frames, *displacement)
         return clip, kind, frames
 
-    def pose(self, index, root_motion=False):
-        """Per-frame skin matrices (joints x 4 x 4, preview basis) for clip ``index``; ``root_motion`` as in
-        ``clip_frames``."""
+    def pose(self, index, root_motion=False, base=None):
+        """Per-frame skin matrices (joints x 4 x 4, preview basis) for clip ``index``; ``root_motion`` and ``base`` as
+        in ``clip_frames``. ``base`` in the result names the clip a layer plays over (None: the rest pose)."""
         entry = self.clips[index]
-        clip, kind, frames = self.clip_frames(index, root_motion)
+        clip, kind, frames = self.clip_frames(index, root_motion, base) if base is not None else \
+            self.clip_frames(index, root_motion)
         inverse = np.stack(self.inverse)
         poses = []
         for frame in frames:
@@ -358,4 +393,4 @@ class AnimationLibrary:
             skin = np.stack(worlds(self.rows, frame, self.inheritance)) @ inverse
             poses.append((BASIS @ skin @ BASIS.T).astype(np.float32))
         return dict(name=entry['name'], kind=kind, fps=float(clip['metadata']['sample_rate_fps'] or 30.0),
-                    frames=poses, joint_count=len(self.rows))
+                    frames=poses, joint_count=len(self.rows), base=clip.get('base'))

@@ -449,11 +449,31 @@ animates the mesh's `weights`, so Blender imports shape keys driven by an action
 `RCRA_GAME` it checks Ratchet's brow shapes against their mirror partners, the silent frame of `ratchet_phonemes`,
 and that `RATC_BOARDS_SLICE1_017` drives 53 of Ratchet's shapes.
 
+### Additive layers
+
+1,033 clips carry the additive flag (built-header bit `0x40`): aims, head looks, leans, twitches, face pose clips. The
+game adds them to whatever its animation graph plays. An animset's graph is its driver classes: 80-byte records in
+`0x66CA6C6F`, a 16-byte lookup per class in `0xA40B51D2` whose first u32 is the byte offset of the class's node data
+in `0x73CEE17F`. The node data layout is not decoded. `rcra.animation.driver_classes` returns each class's bytes as
+u32 words, and `RcraAnimationLibrary.layer_partners` keeps the words that are name hashes of the animset's own clips.
+A class that holds an additive clip and absolute clips adds the layer over them: the thug shooter's aim-idle class
+holds `shooter_aim_idle_fwd`, `_l090` and `_r090` with `Shooter_Aim_Idle_Fwd_Pitch`, `_L090_Pitch` and `_R090_Pitch`;
+its strafe class holds the eight strafe runs with the three strafe aims.
+
+Partners are ranked by the name words they share with the layer, then by class order, so a layer starts over its
+best-named partner. Over the install, 541 of the 951 skeletal additive clips sit in a class, and 290 share one with an
+absolute clip; the others' base comes from a parent node, which is not read. On `enm_thug_brawler` 55 of its 160
+additive clips get partners.
+
+`tests/test_layers.py` checks `layer_over`, the class split at lookup offsets and the ranking, and with `RCRA_GAME`
+that `Shooter_Aim_Idle_Fwd_Pitch` plays over `shooter_aim_idle_fwd` and moves it.
+
 ### Not decoded
 
 - The path section `0x3976E44C` and the unread record values of the root motion section (the kind-3 byte, the
   format-1 u32).
-- Clip blending and additive partners. Additive clips are previewed on the rest pose, as in 2016.
+- The driver class node layout, and so which partner the animation graph plays a layer over at a moment, its
+  blend weights, and the base of a layer whose node holds no absolute clip ([Additive layers](#additive-layers)).
 - The per-channel u32 after the clip morph channel hashes, and the last u32 of the model morph info header.
 - The face pose clips' group names (`0x495BA079`), and the gesture clips some performance sets also play.
 - Vertex-animation textures over time: the viewer and exports draw the pose at shader time 0 ([Vertex programs](#vertex-programs)).

@@ -94,7 +94,7 @@ def shadow_only(material_path):
 GAME = Game(
     # Every capability except root motion and face performances, which are decoded for Rift Apart only.
     id='rc2016', title='R&C 2016', detect=detect, open_source=open_source,
-    capabilities=CAPABILITIES - {'root_motion', 'face_performances'},
+    capabilities=CAPABILITIES - {'root_motion', 'face_performances', 'layer_partners'},
     hooks=dict(decode_model=decode_model, material_textures=material_textures, model_texture_list=model_texture_list,
                texture_header=texture_header, material_rules=material_rules, effect_preview=effect_preview,
                texture_paths=texture_paths, load_texture=load_texture, export_textures=export_textures,

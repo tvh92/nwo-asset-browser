@@ -42,6 +42,13 @@ in some clips, a closing one), each the root's rotation and translation relative
 
 The 0x3976E44C path section (two 4x4 float matrices) is not read; neither are triggers, morph and face
 sections.
+
+``driver_classes`` lists the clips of each driver class (animation graph node) of an ``.animset``: the 80-byte
+class records of 0x66CA6C6F (counted, not read), the 16-byte 0xA40B51D2 lookup rows (+0 u32 byte offset of
+the class's node data in 0x73CEE17F) and that node data. The node layout is not decoded: a class's bytes are
+scanned for u32 values at 4-byte steps, and the caller keeps those that are clip name hashes it knows. A class
+that holds an additive clip and absolute clips is a node that adds the layer over them (the thug shooter's aim
+idle class holds ``shooter_aim_idle_fwd``, ``_l090`` and ``_r090`` with their ``_Pitch`` layers).
 """
 from __future__ import annotations
 
@@ -307,6 +314,32 @@ def pose_table(data):
     offset, size = table[PHONEME_TABLE]
     require(size and size % 2 == 0, 'malformed phoneme table')
     return list(struct.unpack_from(f'<{size // 2}H', dat1, offset))
+
+
+DRIVER_BUILT, DRIVER_LOOKUP, DRIVER_DATA = 0x66CA6C6F, 0xA40B51D2, 0x73CEE17F
+
+
+def driver_classes(data):
+    """Per driver class of an animset asset (toc header + DAT1), in record order: the u32 words of its node data.
+    [] for an animset without driver classes. The words are candidates for clip name hashes; the node layout
+    is not decoded (module docstring)."""
+    dat1 = data[HEADER:]
+    table = dat1_sections(dat1)
+    if not all(tag in table for tag in (DRIVER_BUILT, DRIVER_LOOKUP, DRIVER_DATA)):
+        return []
+    _built_at, built_size = table[DRIVER_BUILT]
+    lookup_at, lookup_size = table[DRIVER_LOOKUP]
+    data_at, data_size = table[DRIVER_DATA]
+    count = built_size // 80
+    require(lookup_size // 16 == count, 'driver class lookup does not match its records')
+    starts = [struct.unpack_from('<I', dat1, lookup_at + 16 * i)[0] for i in range(count)]
+    require(all(s <= data_size for s in starts), 'driver class data offset outside its section')
+    ends = sorted(set(starts) | {data_size})
+    classes = []
+    for start in starts:
+        end = ends[ends.index(start) + 1] if start < data_size else start
+        classes.append(struct.unpack_from(f'<{(end - start) // 4}I', dat1, data_at + start))
+    return classes
 
 
 def performance_clip(data):

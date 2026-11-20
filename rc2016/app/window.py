@@ -76,11 +76,16 @@ HELP = {
     "root_motion": ("Moves each clip's skeleton along the clip's own root motion, from where the clip starts: a walk "
                     "travels forward, a turn on the spot turns the whole body, a cutscene shot follows its path through "
                     "the scene. Off, clips play in place, as their joint tracks store them.\n\nRift Apart only. Additive "
-                    "layers always play in place. Only applies with Include animations and Skeleton on."),
+                    "layers on the rest pose play in place. Only applies with Include animations and Skeleton on."),
     "face_performances": ("Adds the model's face performances: the lip sync of every voice line of the character it "
                           "speaks for, one clip per line (Ratchet has 1,535). Each moves the jaw, teeth and tongue on "
-                          "the rest pose; the lip shapes the game adds with blend shapes are not decoded.\n\nRift Apart "
+                          "the rest pose, and the lips through the model's blend shapes (morph targets).\n\nRift Apart "
                           "only. Only applies with Include animations and Skeleton on."),
+    "layer_bases": ("Additive layers (aims, head looks, leans, twitches) add to another clip in the game. On, each layer "
+                    "that shares an animation graph node with ordinary clips is exported over the best-named of them, "
+                    "and its animation is named '<layer> (over <clip>)'. Which of them the game uses at a moment is "
+                    "decided at run time and is not decoded. Off, and for layers without such a clip, layers play on "
+                    "the rest pose.\n\nRift Apart only. Only applies with Include animations and Skeleton on."),
     "attachments": ("Some characters keep detachable armour plates and panels as separate models (the folder next to the "
                     "model named bangle_set). On, they are exported together with the body, skinned to its skeleton, so "
                     "they move with it in one file, each as its own object that can be hidden. Off exports the body only.\n\n"
@@ -260,6 +265,7 @@ class AssetBrowserApp:
         self.export_cutscenes_var = remember_var(tk.BooleanVar(value=True), "export.cutscenes")
         self.export_root_motion_var = remember_var(tk.BooleanVar(value=False), "export.root_motion")
         self.export_faces_var = remember_var(tk.BooleanVar(value=False), "export.face_performances")
+        self.export_layers_var = remember_var(tk.BooleanVar(value=False), "export.layer_bases")
         self.export_skeleton_var = remember_var(tk.BooleanVar(value=True), "export.skeleton")
         self.export_attachments_var = remember_var(tk.BooleanVar(value=True), "export.attachments")
         self.export_lod_var = remember_var(tk.StringVar(value="Highest"), "export.lod", ("Highest", "Lowest", "All"))
@@ -556,8 +562,12 @@ class AssetBrowserApp:
                                            variable=self.export_faces_var)
         self.faces_check.grid(row=6, column=0, columnspan=3, sticky="w", padx=(22, 0))
         self._gate("face_performances", HELP["face_performances"], self.faces_check, None)
+        self.layers_check = ttk.Checkbutton(include, text="Additive layers over their base clip (aims and looks on the pose they adjust)",
+                                            variable=self.export_layers_var)
+        self.layers_check.grid(row=7, column=0, columnspan=3, sticky="w", padx=(22, 0))
+        self._gate("layer_partners", HELP["layer_bases"], self.layers_check, None)
         picker = ttk.Frame(include)
-        picker.grid(row=7, column=0, columnspan=3, sticky="w", padx=(22, 0))
+        picker.grid(row=8, column=0, columnspan=3, sticky="w", padx=(22, 0))
         self.picker_check = ttk.Checkbutton(picker, text="Animation picker: ask which clips to export when a model has more than",
                                             variable=self.picker_var)
         self.picker_check.pack(side="left")
@@ -568,13 +578,13 @@ class AssetBrowserApp:
         for widget in (self.picker_check, self.picker_spin, self.picker_unit):
             self._gate("animation", HELP["picker"], widget, None)
         self.lod_label = ttk.Label(include, text="Detail level (LOD)")
-        self.lod_label.grid(row=8, column=0, sticky="w", pady=(6, 2))
+        self.lod_label.grid(row=9, column=0, sticky="w", pady=(6, 2))
         self.lod_box = ttk.Combobox(include, textvariable=self.export_lod_var, values=("Highest", "Lowest", "All"),
                                     state="readonly", width=10)
-        self.lod_box.grid(row=8, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 2))
+        self.lod_box.grid(row=9, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 2))
         self.attachments_check = ttk.Checkbutton(include, text="Attached parts (armour plates and panels, skinned to the body)",
                                                  variable=self.export_attachments_var)
-        self.attachments_check.grid(row=9, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        self.attachments_check.grid(row=10, column=0, columnspan=3, sticky="w", pady=(6, 2))
         self._tip(HELP["attachments"], self.attachments_check)
 
         programs = ttk.LabelFrame(window, text="Programs", padding=8)
@@ -620,7 +630,7 @@ class AssetBrowserApp:
 
         for variable in (*self.export_format_vars.values(), self.export_textures_var, self.export_dds_var,
                          self.export_animations_var, self.export_cutscenes_var, self.export_root_motion_var, self.export_faces_var,
-                         self.export_skeleton_var, self.export_attachments_var,
+                         self.export_layers_var, self.export_skeleton_var, self.export_attachments_var,
                          self.export_lod_var, self.blend_scene_var, self.backend_var, self.group_blend_var, self.picker_var):
             variable.trace_add("write", lambda *_args: self._options_changed())
         self._options_changed()
@@ -685,6 +695,7 @@ class AssetBrowserApp:
         animated = animation and self.export_skeleton_var.get() and self.export_animations_var.get()
         self.root_motion_check.configure(state="normal" if animated and self._game_has("root_motion") else "disabled")
         self.faces_check.configure(state="normal" if animated and self._game_has("face_performances") else "disabled")
+        self.layers_check.configure(state="normal" if animated and self._game_has("layer_partners") else "disabled")
         self.picker_check.configure(state="normal" if animated else "disabled")
         self.picker_spin.configure(state="normal" if animated and self.picker_var.get() else "disabled")
         self.picker_unit.configure(style="TLabel" if animated and self.picker_var.get() else "Disabled.TLabel")
@@ -724,7 +735,8 @@ class AssetBrowserApp:
                              skip_existing=True, cinematic=animations and self.export_cutscenes_var.get(),
                              borrowed=animations and self.browser.borrowed_var.get(),
                              root_motion=animations and self._game_has("root_motion") and self.export_root_motion_var.get(),
-                             performances=animations and self._game_has("face_performances") and self.export_faces_var.get())
+                             performances=animations and self._game_has("face_performances") and self.export_faces_var.get(),
+                             layer_bases=animations and self._game_has("layer_partners") and self.export_layers_var.get())
 
     def _path_row(self, parent, row: int, label: str, variable, command, tooltip: str) -> None:
         ttk = self.ttk

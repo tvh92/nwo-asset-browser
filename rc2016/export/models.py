@@ -69,12 +69,14 @@ class ExportOptions:
     attachments: bool = True         # also the model's bangle_set/*_attach parts, skinned to its rig (one armature)
     root_motion: bool = False        # move the skeleton by each clip's root motion (games that decode it: Rift Apart)
     performances: bool = False       # also the face performances (voice-line lip sync; Rift Apart)
+    layer_bases: bool = False        # additive layers over their first partner clip (layer_partners; Rift Apart)
 
     def key(self):
         d = asdict(self)
         d.pop('blender'); d.pop('skip_existing')
         d['formats'] = sorted(d['formats']); d['clips'] = list(d['clips'])
-        for name in ('cinematic', 'cinematic_only', 'borrowed', 'file_suffix', 'root_motion', 'performances'):   # absent from keys of exports that predate them
+        for name in ('cinematic', 'cinematic_only', 'borrowed', 'file_suffix', 'root_motion', 'performances',
+                     'layer_bases'):   # absent from keys of exports that predate them
             if not d[name]:
                 d.pop(name)
         if d['skeleton']:   # the default is left out, so keys of exports that predate the option still match
@@ -592,19 +594,22 @@ class Tracks:
 _TRACK_MEMO = weakref.WeakKeyDictionary()   # AnimationLibrary -> {(clip index, root motion): (kind, fps, Tracks)}
 
 
-def clip_tracks(library, index, root_motion=False):
-    """(kind, fps, Tracks) for one clip, or raises ValueError when unplayable. Memoised per library, clip and
-    ``root_motion`` (``AnimationLibrary.clip_frames``)."""
+def clip_tracks(library, index, root_motion=False, base=None):
+    """(kind, fps, Tracks) for one clip, or raises ValueError when unplayable. Memoised per library, clip,
+    ``root_motion`` and ``base`` (the clip an additive layer plays over; ``AnimationLibrary.clip_frames``)."""
     memo = _TRACK_MEMO.setdefault(library, {})
-    key = (index, bool(root_motion))
+    key = (index, bool(root_motion), base)
     if key not in memo:
-        memo[key] = _clip_tracks(library, index, root_motion)
+        memo[key] = _clip_tracks(library, index, root_motion, base)
     return memo[key]
 
 
-def _clip_tracks(library, index, root_motion=False):
+def _clip_tracks(library, index, root_motion=False, base=None):
     from rc2016.formats.clips import worlds_batch
-    clip, kind, frames = library.clip_frames(index, root_motion) if root_motion else library.clip_frames(index)
+    if base is not None:
+        clip, kind, frames = library.clip_frames(index, root_motion, base)
+    else:
+        clip, kind, frames = library.clip_frames(index, root_motion) if root_motion else library.clip_frames(index)
     fps = float(clip['metadata'].get('sample_rate_fps') or 30.0)
     tracks = Tracks(*local_trs_batch(library.rows, worlds_batch(library.rows, frames, library.inheritance)))
     return kind, fps, tracks
@@ -949,12 +954,18 @@ class ModelExporter:
                 missing = [c for c in options.clips if c not in labels]
                 if missing:
                     notes.append('Requested clips not found: ' + ', '.join(missing))
+            layered = 0
             for i in wanted:
                 self._check()
                 try:
-                    kind, fps, tracks = clip_tracks(library, i, options.root_motion)
+                    partners = library.layer_partners(i) if options.layer_bases and hasattr(library, 'layer_partners') else []
+                    base = partners[0] if partners else None
+                    kind, fps, tracks = clip_tracks(library, i, options.root_motion, base)
+                    name = labels[i]
+                    if base is not None and kind == 'relative/additive-style layer':
+                        name, layered = f'{labels[i]} (over {library.clips[base]["name"]})', layered + 1
                     morph_weights = library.morph_weights(i, len(tracks)) if shapes and hasattr(library, 'morph_weights') else None
-                    clips_out.append(dict(name=labels[i], kind=kind, fps=fps, tracks=tracks, morph_weights=morph_weights,
+                    clips_out.append(dict(name=name, kind=kind, fps=fps, tracks=tracks, morph_weights=morph_weights,
                                           source=library.clips[i].get('source', 'animset'),
                                           asset=library.clips[i]['animset'], offset=library.clips[i]['offset']))
                 except Exception as error:   # one bad clip must not stop the export
@@ -962,6 +973,10 @@ class ModelExporter:
                                         source=library.clips[i].get('source', 'animset'),
                                         asset=library.clips[i]['animset'], offset=library.clips[i]['offset']))
             self.log(f'  {len(clips_out)} clip(s) decoded' + (f', {len(skipped)} skipped' if skipped else ''))
+            if layered:
+                notes.append(f'{layered} additive layer(s) play over the first clip they share an animation graph node '
+                             'with (named "over ..."); the game picks among such clips at run time. The others play on '
+                             'the rest pose.')
             if options.root_motion and clips_out:
                 notes.append('Clips move by their root motion since their first frame, on the joints without a parent; '
                              'additive layers and clips without root motion play in place.')

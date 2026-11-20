@@ -20,6 +20,9 @@ by joint coverage alone:
 * **Face performances** (``with_performances``): the voice-line lip sync of the speaker whose face pose clip
   the model plays (``performance_sources``), blended from that pose clip (``rcra.animation.performance_frames``).
 
+``layer_partners`` names the absolute clips an additive clip plays over: those that share a driver class (an
+animation graph node, ``rcra.animation.driver_classes``) with it in one of the offered animsets.
+
 Each found clip is still classified on its first frame; one that does not drive the skeleton is listed as
 unplayable. ``root_displacement`` gives a clip's root motion since its first frame, which ``clip_frames``
 applies on request.
@@ -36,8 +39,8 @@ import numpy as np
 
 from rc2016.common import sha
 from rc2016.formats.animation_transforms import sample_transforms
-from rc2016.games.rcra.animation import (clip_dat1, decode_clip, header, motion, performance_clip, performance_frames,
-                                         pose_table)
+from rc2016.games.rcra.animation import (clip_dat1, decode_clip, driver_classes, header, motion, performance_clip,
+                                         performance_frames, pose_table)
 from rc2016.games.rcra.morph import clip_weights, shape_hashes
 from rc2016.games.rcra.toc import sections as dat1_sections
 from rc2016.viewer.animation import AnimationLibrary, _quat_mul, _quat_rotate, on_rest
@@ -236,6 +239,7 @@ class RcraAnimationLibrary(AnimationLibrary):
         self.rows, self.inverse, self.clips, self.animset_data = [], [], [], {}
         self._kinds, self.retarget, self._cutscenes, self._last = {}, {}, None, (None, None)
         self._performances = None
+        self._partners = None   # {clip name hash: [absolute clip name hashes]} from driver classes (layer_partners)
         self.inheritance = self.rest_inheritance = 'full'
         self.names = {}
         with tempfile.TemporaryDirectory(prefix='rcra-anim-') as tmp:
@@ -275,7 +279,9 @@ class RcraAnimationLibrary(AnimationLibrary):
             facts = header(self._bytes(entry))
         except ValueError:
             facts = {}
-        entry.update(name=facts.get('name') or entry['name'], seconds=facts.get('duration_seconds'))
+        entry.update(name=facts.get('name') or entry['name'], seconds=facts.get('duration_seconds'),
+                     hash=int(facts['name_hash'], 16) if facts.get('name_hash') else None,
+                     additive=bool(facts.get('additive_flag')))
         self.animset_data.setdefault(owner, None)
         self.clips.append(entry)
 
@@ -360,19 +366,66 @@ class RcraAnimationLibrary(AnimationLibrary):
         weights[:, [s for _c, s in columns]] = found['weights'][:, [c for c, _s in columns]]
         return weights
 
-    def pose(self, index, root_motion=False):
+    def pose(self, index, root_motion=False, base=None):
         """``AnimationLibrary.pose`` plus ``morph_weights``: (frames, shapes) or None (``morph_weights``)."""
-        result = super().pose(index, root_motion)
+        result = super().pose(index, root_motion, base)
         result['morph_weights'] = self.morph_weights(index, len(result['frames']))
         return result
 
-    def clip_frames(self, index, root_motion=False):
+    def layer_partners(self, index):
+        """Indices of the absolute clips additive clip ``index`` plays over in the game, best first; [] for a clip
+        that is not additive or shares no driver class with an absolute clip.
+
+        Every offered animset's driver classes (``rcra.animation.driver_classes``) are scanned for the name hashes
+        of its own clips; an additive clip's partners are the non-additive clips of the classes that hold it. They
+        are ranked by the name words they share with the layer (``shooter_aim_idle_fwd`` before ``_l090`` for
+        ``Shooter_Aim_Idle_Fwd_Pitch``), then by class order. Which partner the game picks at a moment is the
+        animation graph's runtime state, which is not decoded."""
+        entry = self.clips[index]
+        if not entry.get('additive') or entry.get('hash') is None:
+            return []
+        if self._partners is None:
+            self._partners = self._driver_partners()
+        found = self._partners.get(entry['hash'], ())
+        at = {}
+        for number, clip in enumerate(self.clips):
+            if clip.get('source') != PERFORMANCE and not clip.get('additive') and clip.get('hash') is not None:
+                at.setdefault(clip['hash'], number)
+        words = set(_words(entry['name']))
+        ranked = sorted(range(len(found)), key=lambda k: (-len(words & set(_words(self.clips[at[found[k]]]['name'])))
+                                                         if found[k] in at else 0, k))
+        return [at[found[k]] for k in ranked if found[k] in at]
+
+    def _driver_partners(self):
+        """{additive clip name hash: [absolute clip name hashes in class order]} over the offered animsets."""
+        known = {}
+        for clip in self.clips:
+            if clip.get('source') == 'animset' and clip.get('hash') is not None:
+                known.setdefault(clip['animset'], {})[clip['hash']] = clip.get('additive', False)
+        partners = {}
+        for animset, hashes in known.items():
+            key = _key(self.source, animset)
+            if key is None:
+                continue
+            try:
+                classes = driver_classes(self.source.bytes(key)[0])
+            except (ValueError, struct.error):
+                continue
+            for words in classes:
+                inside = list(dict.fromkeys(w for w in words if w in hashes))
+                bases = [h for h in inside if not hashes[h]]
+                for layer in (h for h in inside if hashes[h]):
+                    listed = partners.setdefault(layer, [])
+                    listed.extend(h for h in bases if h not in listed)
+        return partners
+
+    def clip_frames(self, index, root_motion=False, base=None):
         """``AnimationLibrary.clip_frames``; a face performance blends its pose clip's frames by the performance's
-        weights (``performance_frames``) and shows them on the rest pose, as additive layers are. Root motion does
-        not apply to it."""
+        weights (``performance_frames``) and shows them on the rest pose, as additive layers are. Root motion and
+        ``base`` do not apply to it."""
         entry = self.clips[index]
         if entry.get('source') != PERFORMANCE:
-            return super().clip_frames(index, root_motion)
+            return super().clip_frames(index, root_motion, base)
         performance = performance_clip(self._bytes(entry))
         key = _key(self.source, entry['pose'])
         if key is None:
@@ -414,6 +467,11 @@ class RcraAnimationLibrary(AnimationLibrary):
         for owner, clip in self._cutscenes or ():
             other._add(owner, clip, CUTSCENE_SOURCE)
         return other
+
+
+def _words(name):
+    """Lower-case name words of a clip name, for ranking layer partners."""
+    return [w for w in re.split(r'[^a-z0-9]+', (name or '').lower()) if w]
 
 
 def animation_library(source, model_bytes, model_path, clips=True):

@@ -19,6 +19,7 @@ from rc2016.app.workers import LatestWork, ReviewProcess, open_local, review_com
 
 ROOT = Path(__file__).resolve().parents[2]
 REST_POSE = 'Rest pose (no animation)'
+LAYER_REST = 'Rest pose'   # the Over box: an additive layer on its own
 FOLDER_MIN, TABLE_MIN = 160, 300   # narrowest folder tree and model list when the divider between them is dragged
 
 
@@ -469,8 +470,19 @@ class AssetBrowser:
         self.root_motion_check.grid(row=6,column=0,columnspan=5,sticky='w',pady=(2,0))
         tip('Move the model along the clip\'s own root motion, from where the clip starts: a walk travels forward, a turn '
             'on the spot turns the whole body, a cutscene shot follows its path through the scene (it may leave the view). '
-            'Off, clips play in place, as their joint tracks store them. Rift Apart only; additive layers stay in place.',
+            'Off, clips play in place, as their joint tracks store them. Rift Apart only; an additive layer moves only with its base clip.',
             self.root_motion_check)
+        over=ttk.Frame(anim);over.grid(row=7,column=0,columnspan=5,sticky='ew',pady=(2,0));over.columnconfigure(1,weight=1)
+        ttk.Label(over,text='Over').grid(row=0,column=0,sticky='w',padx=(0,6))
+        self.layer_base_var=tk.StringVar(value=LAYER_REST)
+        self.layer_base_box=ttk.Combobox(over,textvariable=self.layer_base_var,state='disabled',values=(LAYER_REST,))
+        self.layer_base_box.grid(row=0,column=1,sticky='ew')
+        self.layer_base_box.bind('<<ComboboxSelected>>',self._layer_base_chosen)
+        self.layer_bases={};self.layer_base_items=[]   # clip -> chosen base (-1 rest pose); the box's clip indices
+        tip('What an additive layer (an aim, look, lean or twitch) plays over. The clips listed first share an '
+            'animation graph node with the layer in the game\'s animset, best name match first, and the first of them '
+            'is the default; the game picks among them at run time. Rest pose shows the layer on its own. Only for '
+            'layers; other clips play as they are.',self.layer_base_box)
         self._fill_clip_menu([])
         self.anim_box.grid_remove()   # shown only for a model with clips (_show_animation)
         self.frame_text=tk.StringVar(value='')
@@ -795,7 +807,7 @@ class AssetBrowser:
         self.playback.offer_all(*self._sequence_lists())
 
     def _request_clip(self,index):
-        self.anim_work.submit(self._decode_clip,index,self._root_motion())
+        self.anim_work.submit(self._decode_clip,index,self._root_motion(),self.layer_bases.get(index))
 
     def _root_motion(self):
         """Whether clips play with their root motion: the box is ticked and the game decodes it."""
@@ -809,12 +821,37 @@ class AssetBrowser:
         elif 0<=self.clip_index<len(self.clip_labels):
             self._choose_clip(self.clip_index,self.clip_choice.get())
 
-    def _decode_clip(self,index,root_motion=False):
-        """Worker side: the clip's pose, or the reason it does not decode, tagged with the clip."""
+    def _decode_clip(self,index,root_motion=False,chosen=None):
+        """Worker side: the clip's pose, or the reason it does not decode, tagged with the clip. An additive layer
+        plays over ``chosen`` (a clip index; -1 the rest pose), by default over its first partner clip."""
         try:
-            return dict(clip=index,pose=self.source_loader.pose(index,root_motion))
+            partners=self.source_loader.layer_partners(index)
+            base=(partners[0] if partners else None) if chosen is None else (None if chosen<0 else chosen)
+            return dict(clip=index,pose=self.source_loader.pose(index,root_motion,base),partners=partners,base=base)
         except Exception as error:
             return dict(clip=index,error=str(error))
+
+    def _show_layer_base(self,payload):
+        """The Over box for the clip shown: its base choices when it is an additive layer, else disabled."""
+        layer=payload.get('pose',{}).get('kind')=='relative/additive-style layer'
+        if not layer or self.playback.sequence is not None or payload.get('clip')!=self.clip_index:
+            self.layer_base_box.configure(state='disabled',values=(LAYER_REST,));self.layer_base_var.set(LAYER_REST)
+            self.layer_base_items=[];return
+        partners=[i for i in payload.get('partners') or () if 0<=i<len(self.clip_labels)]
+        others=[i for i in range(len(self.clip_labels))
+                if i not in partners and i!=self.clip_index and not (i<len(self.clip_notes) and self.clip_notes[i])]
+        self.layer_base_items=[-1]+partners+others
+        labels=[LAYER_REST]+[f'\u2605 {self.clip_labels[i]}' for i in partners]+[self.clip_labels[i] for i in others]
+        self.layer_base_box.configure(state='readonly',values=labels)
+        base=payload.get('base')
+        self.layer_base_var.set(labels[self.layer_base_items.index(base)] if base in self.layer_base_items else LAYER_REST)
+
+    def _layer_base_chosen(self,_event=None):
+        """A base was picked in the Over box: the layer plays again over it (remembered for this model's clip)."""
+        place=self.layer_base_box.current()
+        if place<0 or place>=len(self.layer_base_items) or not 0<=self.clip_index<len(self.clip_labels):return
+        self.layer_bases[self.clip_index]=self.layer_base_items[place]
+        self._choose_clip(self.clip_index,self.clip_choice.get())
 
     def _show_sequence_clip(self,index):
         """Play all moved to clip ``index``: the Animation button and the list's play mark follow it."""
@@ -822,6 +859,7 @@ class AssetBrowser:
         self.clip_choice.set(self.clip_labels[index] if 0<=index<len(self.clip_labels) else REST_POSE)
 
     def _clip_decoded(self,payload):
+        self._show_layer_base(payload)
         if 'error' in payload:
             if not self.playback.fail(payload['clip'],payload['error']):
                 self.frame_text.set('Cannot play');self.model_info.set(payload['error'])
@@ -1085,6 +1123,7 @@ class AssetBrowser:
         self.playback.pause()
         self.anim_work.submit(lambda:None)   # drop a pending decode for the old model
         if reset:
+            self.layer_bases={};self._show_layer_base({})
             self._fill_clip_menu([]);self._enable_clip_controls(False);self.clip_choice.set(REST_POSE)
             self._show_animation(False)
             self.clip_index=-1

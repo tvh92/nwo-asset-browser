@@ -275,10 +275,18 @@ class SourcePreviewLoader:
         # Texture reads from the list, the grid's thumbnails and the preview share the archive's file handle.
         self.texture_lock=threading.Lock()
 
-    def pose(self, clip_index, root_motion=False):
+    def pose(self, clip_index, root_motion=False, base=None):
+        """The clip's pose (``AnimationLibrary.pose``); ``base`` a clip index an additive layer plays over."""
         with self.lock:
             if self.animation is None:raise ValueError('No animation library is loaded for this model')
-            return self.animation.pose(clip_index,root_motion)
+            if base is None:return self.animation.pose(clip_index,root_motion)
+            return self.animation.pose(clip_index,root_motion,base)
+
+    def layer_partners(self, clip_index):
+        """Clips the additive clip plays over in the game, best first (``AnimationLibrary.layer_partners``)."""
+        with self.lock:
+            if self.animation is None:return []
+            return self.animation.layer_partners(clip_index)
 
     def _ensure_archive(self, source_root):
         source_root=Path(source_root).expanduser().resolve()
