@@ -28,13 +28,13 @@ Each `Game` record declares its capabilities and supplies hooks: model decode, m
 
 ### What Rift Apart supports
 
-Rift Apart's capabilities are `models`, `textures`, `export`, `animation` and `root_motion`:
+Rift Apart's capabilities are `models`, `textures`, `export`, `animation`, `root_motion` and `face_performances`:
 
 - **Supported:**
   - Browsing.
-  - The 3D model view, with skeletal [animation](#animation) playback, optionally with the clip's [root motion](#root-motion). The Shaded mode draws each material's own translated program where it translates ([In the viewer](#in-the-viewer)), and the labelled preview elsewhere.
+  - The 3D model view, with skeletal [animation](#animation) playback, optionally with the clip's [root motion](#root-motion), and the voice lines' [face performances](#face-performances). The Shaded mode draws each material's own translated program where it translates ([In the viewer](#in-the-viewer)), and the labelled preview elsewhere.
   - The Textures tab.
-  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion). Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
+  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances). Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
 - **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart".
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
@@ -362,6 +362,8 @@ Clips are found through the dag, never by joint coverage alone:
 3. **Cutscene shots** (3D view, or export with Include cutscenes). These are clips under `cinematics/` whose name
    ends in `_shot<N>_<performer>`. The performer must be the model's file stem or one of its folder names holding an
    underscore, as written or without a `_master<N>` or copy-number suffix. The clip's `.cinematic2` is its source.
+4. **Face performances** (3D view, or export with Face performances): the voice lines of the speaker whose face pose
+   clip the model plays ([Face performances](#face-performances)).
 
 Each clip is still classified on its first frame, as in 2016. The clip list hides one that does not drive the
 skeleton. For example, `hero_ratchet.model` gets:
@@ -372,12 +374,59 @@ skeleton. For example, `hero_ratchet.model` gets:
 
 The clip notes take about 8 s to compute, off the Tk thread.
 
+### Face performances
+
+Voice lines carry their lip sync as `.performanceclip` assets, one per line, under
+`localization/<speaker>/` (20,885 paths, 14,408 in the install). Each speaker's
+`localization/<speaker>/<speaker>.performanceset` depends on the speaker's face pose clip. The speaker's lines
+belong to its `<speaker>_<group>.animset` files. 67 of the 200 sets name one of 21 pose clips; the others (credits, menus,
+generic voices) do not, and their 2,080 lines have nothing to drive.
+
+**Performance clip** (`rcra.animation.performance_clip`). A built header with no joints (fps, seconds and frame
+count as in a clip) and the samples section. That section holds one 16-byte row per frame, zero-padded to a
+multiple of 8 rows: eight u8 performance indices, then eight u8 weights out of 255. A frame's weights sum to 255
+(within one, rounding) in 98.7% of frames; an index with weight 0 is unused. 31 parade and crowd lines keep
+weighted rows past the header's frame count; they are not played. 28 lines have no built section and do not read.
+
+**Pose clip** (`pose_table`). An additive skeletal clip of 25 frames (39 for Kit and Clank) on the jaw, teeth and
+tongue joints (7 for Ratchet; up to 46 for Skidd). Its section `0x1D4BD9FA` is a table of 40 u16 pose frames, one
+per performance index; in all 21 tables every value is an even frame. Section `0x495BA079` holds 13 (u32 hash, u32 frame) pairs, the
+named mouth shapes; it is not read. Every one of the 12,269 lines whose speaker has a pose clip stays inside its
+table. Index 0 maps Ratchet to frame 20, whose jaw is closed.
+
+**Blend** (`performance_frames`). Per frame, the weighted blend of the indexed pose frames: translation and scale are
+weighted sums, and the rotation is the normalised weighted sum of the quaternions in the identity's hemisphere. A
+weight the frame leaves unused counts as the identity delta. This blend is a reading of the data, not traced in the
+runtime. The result plays on the rest pose like an additive layer, without root motion.
+
+**Finding them** (`clip_library.performance_sources`). A set is the model's when its pose clip lies in the model's
+folder (or its animation subfolder) or, only when none does, is one of the model's offered clips, and the model has
+at least half of the pose clip's joints. Rivet's actor also offers Ratchet's clips, so the folder comes first.
+
+| Model | Lines | Pose clip |
+| --- | --- | --- |
+| `hero_ratchet` | 1,535 | `ratchet_phonemes` |
+| `hero_rivet` | 1,659 | `rivet_phonemes` |
+| `hero_clank_ps4` | 1,077 | `clank_phonemes_2` |
+| `hero_kit` | 724 | `visemes_hero_kit` |
+| `npc_civ_average` | 207 | `phonemes_npc_civ_average` (19 of its 24 joints) |
+
+The Blizar miner's model has 2 of its pose clip's 30 joints, and the civilian robot's pose clip has float tracks
+only, so neither gets lines. In the browser the lines form their own section of the clip list, Face performances.
+`tests/test_rcra_animation.py` checks Ratchet's `RATC_BOARDS_SLICE1_017`: 497 frames, the jaw closed at silence and
+open up to 9.4°.
+
+**Lips are not moved.** The pose clips also hold morph sections for blend shapes (see Not decoded), so a line shows
+the jaw, teeth and tongue but not the lip shapes.
+
 ### Not decoded
 
 - The path section `0x3976E44C` and the unread record values of the root motion section (the kind-3 byte, the
   format-1 u32).
 - Clip blending and additive partners. Additive clips are previewed on the rest pose, as in 2016.
-- Face performance clips (`.performanceclip`) and the phoneme and viseme pose clips their performance sets use.
+- Facial blend shapes: the morph sections of pose clips and cutscene shots (`0x277563F5` morph info, `0x69F64588`
+  morph frame data) and whatever model section holds the shapes. Face performances move only joints.
+- The face pose clips' group names (`0x495BA079`), and the gesture clips some performance sets also play.
 - Vertex-animation textures over time: the viewer and exports draw the pose at shader time 0 ([Vertex programs](#vertex-programs)).
 
 ## Textures

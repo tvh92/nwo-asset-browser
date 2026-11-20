@@ -134,6 +134,17 @@ def _quat_rotate(q, v):
     return v + 2.0 * np.cross(u, np.cross(u, v) + w * v)
 
 
+def on_rest(rows, frames):
+    """Additive-style ``frames`` as standalone poses on the model's rest pose: rest T + delta T, rest Q * delta Q,
+    rest S * delta S; joints the model does not have are dropped."""
+    rest = {r['hash']: r for r in rows}
+    return [[dict(row, translation=[a + b for a, b in zip(rest[row['hash']]['translation'], row['translation'])],
+                  rotation_xyzw=_quat_mul(rest[row['hash']]['rotation_xyzw'], row['rotation_xyzw'])
+                  if row['rotation_xyzw'] else None,
+                  scale=[a * b for a, b in zip(rest[row['hash']]['scale'], row['scale'])])
+             for row in frame if row['hash'] in rest] for frame in frames]
+
+
 def apply_root_motion(rows, frames, rotation, translation):
     """``frames`` with every joint without a parent moved by the root displacement of its frame.
 
@@ -297,6 +308,11 @@ class AnimationLibrary:
         """The ``animation_samples.decode_clip`` dict of one clip entry."""
         return decode_clip(self.animset_data[clip['animset']], clip['offset'], self.names, first_frames=first_frames)
 
+    def with_performances(self):
+        """Copy that also offers the model's face performances (voice-line lip sync). R&C 2016 has none that is
+        decoded, so this is the library itself; Rift Apart's library overrides it."""
+        return self
+
     def root_displacement(self, index, count):
         """Per frame of clip ``index``, the root's rotation xyzw (count, 4) and translation (count, 3) since its first
         frame, or None for a clip without root motion. R&C 2016 clips carry none that is decoded."""
@@ -317,12 +333,7 @@ class AnimationLibrary:
         if kind not in PLAYABLE:
             raise NotPlayable(f"'{entry['name']}' is {kind}; it does not drive this model's skeleton")
         if kind == 'relative/additive-style layer':
-            rest = {r['hash']: r for r in self.rows}
-            frames = [[dict(row, translation=[a + b for a, b in zip(rest[row['hash']]['translation'], row['translation'])],
-                            rotation_xyzw=_quat_mul(rest[row['hash']]['rotation_xyzw'], row['rotation_xyzw'])
-                            if row['rotation_xyzw'] else None,
-                            scale=[a * b for a, b in zip(rest[row['hash']]['scale'], row['scale'])])
-                       for row in frame if row['hash'] in rest] for frame in frames]
+            frames = on_rest(self.rows, frames)
         elif entry['animset'] in getattr(self, 'retarget', {}):
             joints = self.retarget[entry['animset']]['joints']
             if frames and clip_fits_source(frames[0], joints):

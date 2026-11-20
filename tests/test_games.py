@@ -84,14 +84,14 @@ class DetectionTests(unittest.TestCase):
 
 
 class GameRecordTests(unittest.TestCase):
-    def test_rc2016_declares_everything_but_root_motion_and_keeps_its_caches_in_place(self):
-        self.assertEqual(RC2016.capabilities, games.CAPABILITIES - {'root_motion'})
+    def test_rc2016_declares_everything_but_root_motion_and_faces_and_keeps_its_caches_in_place(self):
+        self.assertEqual(RC2016.capabilities, games.CAPABILITIES - {'root_motion', 'face_performances'})
         # The exact folder the loader and level viewer used before the seam, so nothing is rescanned.
         self.assertEqual(RC2016.cache_dir(), Path(__file__).resolve().parents[1] / '.cache')
         self.assertEqual(RCRA.cache_dir(), CACHE_ROOT / 'rcra')
 
     def test_rift_apart_capabilities(self):
-        self.assertEqual(RCRA.capabilities, {'models', 'textures', 'export', 'animation', 'root_motion'})
+        self.assertEqual(RCRA.capabilities, {'models', 'textures', 'export', 'animation', 'root_motion', 'face_performances'})
         self.assertTrue(RCRA.has_animation_library())
         self.assertFalse(RC2016.has_animation_library())   # 2016 finds its animsets through the scan's index
         for capability in ('levels', 'flash', 'pipeline', 'decoded_shading'):
@@ -160,6 +160,7 @@ class LoaderDispatchTests(unittest.TestCase):
         from rc2016.viewer.loader import SourcePreviewLoader
         library = SimpleNamespace(clips=['clip'], animset_data={'a.animset': None})
         library.with_cinematic = lambda archive, path: library
+        library.with_performances = lambda: library   # the view also lists face performances
         loader = SourcePreviewLoader()
         loader.game, loader.archive = RCRA, 'archive'
         cached = dict(decoded=dict(joint_count=3, _archive_path='a.model'), data=b'model', purpose='view',

@@ -17,6 +17,8 @@ by joint coverage alone:
   ``_shot<N>_<performer>`` where the performer is the model's file stem or one of its folder names holding
   an underscore (optionally followed by ``_master<N>`` or a copy number), as for R&C 2016. The clip's
   ``.cinematic2`` (the asset that depends on it) is its source.
+* **Face performances** (``with_performances``): the voice-line lip sync of the speaker whose face pose clip
+  the model plays (``performance_sources``), blended from that pose clip (``rcra.animation.performance_frames``).
 
 Each found clip is still classified on its first frame; one that does not drive the skeleton is listed as
 unplayable. ``root_displacement`` gives a clip's root motion since its first frame, which ``clip_frames``
@@ -32,10 +34,14 @@ from pathlib import Path
 import numpy as np
 
 from rc2016.common import sha
-from rc2016.games.rcra.animation import decode_clip, header, motion
-from rc2016.viewer.animation import AnimationLibrary, _quat_mul, _quat_rotate
+from rc2016.formats.animation_transforms import sample_transforms
+from rc2016.games.rcra.animation import (decode_clip, header, motion, performance_clip, performance_frames,
+                                         pose_table)
+from rc2016.viewer.animation import AnimationLibrary, _quat_mul, _quat_rotate, on_rest
 
 CUTSCENE_SOURCE = 'cinematic2'
+PERFORMANCE = 'performance'   # a face performance clip's source
+FACE_KIND = 'face performance'
 PERFORMER = re.compile(r'_shot\d+[a-z]?_(.+)$')
 COPY_SUFFIX = re.compile(r'(_master\d*|\d+)$')
 # A same-folder animset is kept when its first clip names at least this share of the model's joints.
@@ -76,6 +82,11 @@ class _DagIndex:
                     for name in {found.group(1), COPY_SUFFIX.sub('', found.group(1))}:
                         self.performers.setdefault(name, []).append(index)
         self.animsets = [i for i, p in enumerate(self.paths) if p.endswith('.animset')]
+        self.performance_sets = [i for i, p in enumerate(self.paths) if p.endswith('.performanceset')]
+        self.performances = {}   # folder -> performance clip indices
+        for i, p in enumerate(self.paths):
+            if p.endswith('.performanceclip'):
+                self.performances.setdefault(_folder(p), []).append(i)
 
     def deps(self, index):
         return self.dag.dependencies(index)
@@ -173,6 +184,46 @@ def cutscene_clips(source, model_path):
     return sorted(set(found))
 
 
+def performance_sources(source, model_path, offered, joint_hashes):
+    """[(pose clip path, [(owner animset, performance clip path)])] of the model's face performances.
+
+    A performance set (``localization/<speaker>/<speaker>.performanceset``) depends on its speaker's face pose
+    clip (the dependency with a phoneme table) and plays the speaker's ``.performanceclip`` assets, which sit in
+    the set's folder and belong to its ``<speaker>_<group>.animset`` files. A set is the model's when that pose
+    clip lies in the model's folder (or its animation subfolder) or, only when no such pose clip exists, is one
+    of the model's offered clips (``offered``); either way the model must have at least FOLDER_FIT of the
+    joints it drives (crowd rigs lack a few accessory joints, which are then not posed). Heroes share animsets
+    (Rivet's actor offers Ratchet's clips), so the folder comes first."""
+    index = dag_index(source)
+    folder = _folder(model_path.replace('\\', '/').lower())
+    homes = {folder + sub for sub in CLIP_FOLDERS}
+    poses, found = {}, {}
+    for node in index.performance_sets:
+        for dep in index.deps(node):
+            pose = index.paths[dep]
+            if not pose.endswith('.animclip') or not (pose in offered or _folder(pose) in homes):
+                continue
+            if pose not in poses:
+                key = _key(source, pose)
+                poses[pose] = False
+                if key is not None:
+                    try:
+                        data = source.bytes(key)[0]
+                        drives = {int(j['hash'], 16) for j in decode_clip(data, first_frames=1)['joints']}
+                        poses[pose] = (pose_table(data) is not None and bool(drives)
+                                       and len(drives & joint_hashes) >= FOLDER_FIT * len(drives))
+                    except ValueError:
+                        pass
+            if poses[pose]:
+                clips = found.setdefault(pose, [])
+                for clip in index.performances.get(_folder(index.paths[node]), []):
+                    owners = [index.paths[u] for u in index.users.get(clip, []) if index.paths[u].endswith('.animset')]
+                    clips.append((owners[0] if owners else index.paths[node], index.paths[clip]))
+                break
+    own = {pose for pose in found if _folder(pose) in homes}
+    return [(pose, sorted(set(clips))) for pose, clips in found.items() if pose in own or not own]
+
+
 class RcraAnimationLibrary(AnimationLibrary):
     """``AnimationLibrary`` over a Rift Apart model and its ``.animclip`` assets."""
 
@@ -181,6 +232,7 @@ class RcraAnimationLibrary(AnimationLibrary):
         self.source, self.model_path = source, model_path
         self.rows, self.inverse, self.clips, self.animset_data = [], [], [], {}
         self._kinds, self.retarget, self._cutscenes, self._last = {}, {}, None, (None, None)
+        self._performances = None
         self.inheritance = self.rest_inheritance = 'full'
         self.names = {}
         with tempfile.TemporaryDirectory(prefix='rcra-anim-') as tmp:
@@ -205,12 +257,12 @@ class RcraAnimationLibrary(AnimationLibrary):
             for clip in animset_clips(source, animset):
                 self._add(animset, clip, 'animset')
 
-    def _add(self, owner, clip_path, kind):
+    def _add(self, owner, clip_path, kind, **extra):
         key = _key(self.source, clip_path)
         if key is None:
             return
         entry = dict(animset=owner, offset=0, size=None, key=key, path=clip_path, name=Path(clip_path).stem,
-                     seconds=None, source=kind)
+                     seconds=None, source=kind, **extra)
         try:
             facts = header(self._bytes(entry))
         except ValueError:
@@ -231,6 +283,47 @@ class RcraAnimationLibrary(AnimationLibrary):
 
     def _decode_clip(self, clip, first_frames=None):
         return decode_clip(self._bytes(clip), self.names, first_frames=first_frames, label=clip['name'])
+
+    def with_performances(self):
+        """Copy that also offers the model's face performances (``performance_sources``): one clip per voice line,
+        listed under the speaker's ``<speaker>_<group>`` animsets. They play on the rest pose (``clip_frames``)."""
+        other = copy.copy(self)
+        other.clips, other.animset_data = list(self.clips), dict(self.animset_data)
+        if self._performances is None and self.rows:
+            offered = {c['path'] for c in self.clips if c.get('source') == 'animset'}
+            self._performances = performance_sources(self.source, self.model_path, offered, set(self.names))
+        for pose, clips in self._performances or ():
+            for owner, clip in clips:
+                other._add(owner, clip, PERFORMANCE, pose=pose)
+        return other
+
+    def clip_notes(self):
+        """``AnimationLibrary.clip_notes``; a face performance plays on its own (None) and is not decoded here."""
+        clips = self.clips
+        try:
+            self.clips = [c for c in clips if c.get('source') != PERFORMANCE]
+            notes = iter(super().clip_notes())
+        finally:
+            self.clips = clips
+        return [None if c.get('source') == PERFORMANCE else next(notes) for c in clips]
+
+    def clip_frames(self, index, root_motion=False):
+        """``AnimationLibrary.clip_frames``; a face performance blends its pose clip's frames by the performance's
+        weights (``performance_frames``) and shows them on the rest pose, as additive layers are. Root motion does
+        not apply to it."""
+        entry = self.clips[index]
+        if entry.get('source') != PERFORMANCE:
+            return super().clip_frames(index, root_motion)
+        performance = performance_clip(self._bytes(entry))
+        key = _key(self.source, entry['pose'])
+        if key is None:
+            raise ValueError(f"Face pose clip {entry['pose']} is not in the install")
+        pose = self.source.bytes(key)[0]
+        frames = performance_frames(sample_transforms(decode_clip(pose, self.names)), pose_table(pose), performance)
+        clip = dict(name=performance['name'] or entry['name'], pose=entry['pose'],
+                    metadata=dict(sample_rate_fps=performance['sample_rate_fps'],
+                                  duration_seconds=performance['duration_seconds'], original_frame_count=len(frames)))
+        return clip, FACE_KIND, on_rest(self.rows, frames)
 
     def root_displacement(self, index, count):
         """The clip's root motion (``rcra.animation.motion``) since its first frame: record f relative to record 0,

@@ -292,3 +292,76 @@ def motion_section(section):
             'non-finite root motion')
     return dict(start_rotation_xyzw=start_q, start_translation=start_t, rotation_xyzw=rotation,
                 translation=translation, bounds=bounds, layout=layout, kind=kind)
+
+
+PHONEME_TABLE = 0x1D4BD9FA
+PERFORMANCE_SLOTS = 8
+
+
+def pose_table(data):
+    """The phoneme table of a face pose clip (section 0x1D4BD9FA): the pose frame of each performance index, or
+    None for a clip without one. Every table in the game has 40 entries."""
+    dat1, table = clip_dat1(data)
+    if PHONEME_TABLE not in table:
+        return None
+    offset, size = table[PHONEME_TABLE]
+    require(size and size % 2 == 0, 'malformed phoneme table')
+    return list(struct.unpack_from(f'<{size // 2}H', dat1, offset))
+
+
+def performance_clip(data):
+    """A ``.performanceclip`` (face performance of one voice line): dict(name, name_hash, sample_rate_fps,
+    duration_seconds, frames, index (F, 8) and weight (F, 8)).
+
+    The built header is a clip's (no joints); the samples section holds one 16-byte row per frame, the rows
+    zero-padded to a multiple of 8: u8 performance index x 8, then u8 weight x 8 (out of 255; a frame's weights
+    sum to 255 within rounding). An index becomes a pose frame through its pose clip's ``pose_table``. A few
+    clips (31 parade and crowd lines) keep weighted rows past the header's frame count; they are not played."""
+    dat1, table = clip_dat1(data)
+    meta = header(data)
+    require(SAMPLES in table, 'performance clip without samples')
+    frames, fps = meta['original_frame_count'], meta['sample_rate_fps']
+    require(frames > 0 and math.isfinite(fps) and fps > 0, 'invalid performance clip timing')
+    offset, size = table[SAMPLES]
+    require(size % (16 * 8) == 0 and size // 16 >= frames, 'performance rows do not cover the frames')
+    rows = np.frombuffer(dat1, np.uint8, 16 * frames, offset).reshape(frames, 16)
+    return dict(name=meta['name'], name_hash=meta['name_hash'], sample_rate_fps=fps,
+                duration_seconds=meta['duration_seconds'], frames=frames,
+                index=rows[:, :PERFORMANCE_SLOTS].astype(np.intp), weight=rows[:, PERFORMANCE_SLOTS:] / 255.0)
+
+
+def performance_frames(pose_frames, table, performance):
+    """Additive frames of a performance: per frame, the weighted blend of its pose frames.
+
+    ``pose_frames`` are the pose clip's ``sample_transforms`` frames (additive deltas), ``table`` its
+    ``pose_table``. Per joint, translation and scale are the weighted sums of the poses' (a weight the frame
+    leaves unused, or a skipped joint, counts as the identity delta), and the rotation is the normalised
+    weighted sum of the poses' quaternions in the identity's hemisphere. Weights above 1 in total (rounding:
+    256/255) are scaled to 1. This blend is a reading of the data, not traced in the game's runtime."""
+    index, weight = performance['index'], performance['weight']
+    require(int(index[weight > 0].max(initial=0)) < len(table), 'performance index past the phoneme table')
+    poses = sorted({table[i] for i in np.unique(index[weight > 0])})
+    require(not poses or poses[-1] < len(pose_frames), 'phoneme table points past the pose clip')
+    hashes = [row['hash'] for row in pose_frames[0]] if pose_frames else []
+    names = [row.get('name') for row in pose_frames[0]] if pose_frames else []
+    count = len(hashes)
+    T = np.zeros((len(pose_frames), count, 3))
+    Q = np.tile([0.0, 0.0, 0.0, 1.0], (len(pose_frames), count, 1))
+    S = np.ones((len(pose_frames), count, 3))
+    for f, frame in enumerate(pose_frames):
+        for j, row in enumerate(frame):
+            T[f, j], S[f, j] = row['translation'], row['scale']
+            if row['rotation_xyzw']:
+                q = np.asarray(row['rotation_xyzw'], float)
+                Q[f, j] = -q if q[3] < 0 else q
+    frame_of = np.asarray(table, np.intp)[np.minimum(index, len(table) - 1)]
+    w = weight * (weight > 0)
+    w = w / np.maximum(1.0, w.sum(1, keepdims=True))
+    rest = 1.0 - w.sum(1)                                             # the identity delta's share
+    t = np.einsum('fs,fsjc->fjc', w, T[frame_of])
+    s = np.einsum('fs,fsjc->fjc', w, S[frame_of]) + rest[:, None, None]
+    q = np.einsum('fs,fsjc->fjc', w, Q[frame_of])
+    q[..., 3] += rest[:, None]
+    q /= np.linalg.norm(q, axis=2, keepdims=True)
+    return [[dict(name=names[j], hash=hashes[j], scale=s[f, j].tolist(), rotation_xyzw=q[f, j].tolist(),
+                  translation=t[f, j].tolist()) for j in range(count)] for f in range(len(w))]

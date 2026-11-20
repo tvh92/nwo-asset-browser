@@ -159,7 +159,16 @@ def cutscene_clips(labels, animsets):
     return found
 
 
-def group_clips(labels, cutscene=()):
+def face_clips(labels, animsets):
+    """Indices of the face performances (voice-line lip sync) among the clip ``labels``: clips of the speakers'
+    ``localization/<speaker>/<speaker>_<group>.animset`` files (``AnimationLibrary.with_performances``)."""
+    face = {Path(a).stem for a in animsets if a.replace('\\', '/').casefold().startswith('localization/')}
+    other = {Path(a).stem for a in animsets} - face
+    return [index for index, label in enumerate(labels)
+            if (stem := label.rpartition(': ')[0]) and stem in face and stem not in other]
+
+
+def group_clips(labels, cutscene=(), face=()):
     """Menu tree for clip labels: [(text, clip index | subtree)], sorted case-insensitively.
 
     Labels are ``"animset: Name"`` when a model has several animsets, else ``"Name"``.
@@ -167,8 +176,9 @@ def group_clips(labels, cutscene=()):
     (Jetpack > One Hand > Fire), so the word that separates a clip's family is found wherever it sits.
     Clips alone on their word go under Other. A folder whose only child is a folder is merged
     into it (Aim > Vertical becomes Aim Vertical).
-    ``cutscene``: indices of the cutscene clips. Given any, the menu has two sections, Animset animations
-    and Cutscene animations (an empty one is left out), each grouped as above.
+    ``cutscene``: indices of the cutscene clips, ``face``: of the face performances. Given any, the menu has
+    sections, Animset animations, Cutscene animations and Face performances (an empty one is left out), each
+    grouped as above.
     """
     def ordered(items):
         return sorted(items, key=lambda item: (item[0].lower(), item[1]))
@@ -205,11 +215,12 @@ def group_clips(labels, cutscene=()):
             return build(next(iter(sets.values()), []))
         return [(animset, build(items)) for animset, items in sorted(sets.items(), key=lambda s: s[0].lower())]
 
-    if not cutscene:
+    if not cutscene and not face:
         return tree(range(len(labels)))
-    cut = set(cutscene)
-    sections = (('Animset animations', [i for i in range(len(labels)) if i not in cut]),
-                ('Cutscene animations', [i for i in range(len(labels)) if i in cut]))
+    cut, faces = set(cutscene), set(face) - set(cutscene)
+    sections = (('Animset animations', [i for i in range(len(labels)) if i not in cut and i not in faces]),
+                ('Cutscene animations', [i for i in range(len(labels)) if i in cut]),
+                ('Face performances', [i for i in range(len(labels)) if i in faces]))
     return [(text, tree(indices)) for text, indices in sections if indices]
 
 
@@ -434,7 +445,7 @@ class AssetBrowser:
             widget.bind('<bracketleft>',lambda _e:self._step_clip(-1))
             widget.bind('<bracketright>',lambda _e:self._step_clip(1))
         self.viewport.bind('<ButtonPress-1>',lambda _e:self.viewport.focus_set(),add='+')   # so [ and ] reach it
-        self.clip_labels=[];self.clip_notes=[];self.clip_cutscene=[];self.clip_index=-1;self.clip_popup=None
+        self.clip_labels=[];self.clip_notes=[];self.clip_cutscene=[];self.clip_face=[];self.clip_index=-1;self.clip_popup=None
         self.clip_open_folders=set();self.clip_search=''   # what the Animation list shows again when reopened
         self.clip_seconds=[]
         self.play_button=ttk.Button(anim,text='Pause',width=8,state='disabled')
@@ -860,6 +871,7 @@ class AssetBrowser:
         self.clip_notes=list(notes)
         self.clip_seconds=list(seconds)
         self.clip_cutscene=cutscene_clips(self.clip_labels,list(animsets))
+        self.clip_face=face_clips(self.clip_labels,list(animsets))
         self.clip_open_folders=set();self.clip_search=''   # a new clip list starts with every folder closed
 
     def _enable_clip_controls(self,usable):
@@ -867,8 +879,9 @@ class AssetBrowser:
 
     def _clip_order(self):
         """Clip indices in the order the Animation list shows them (folders open, no search)."""
-        shown=self._shown_clips();cutscene=set(self.clip_cutscene)
-        nodes=group_clips([self.clip_labels[i] for i in shown],[n for n,i in enumerate(shown) if i in cutscene])
+        shown=self._shown_clips();cutscene=set(self.clip_cutscene);face=set(self.clip_face)
+        nodes=group_clips([self.clip_labels[i] for i in shown],[n for n,i in enumerate(shown) if i in cutscene],
+                          [n for n,i in enumerate(shown) if i in face])
         return [shown[n] for n in clip_leaves(nodes)]
 
     def _step_clip(self,offset):
@@ -931,8 +944,9 @@ class AssetBrowser:
                             tree.insert(parent,'end',iid=iid,text=f'{text}  ({count_clips(node)})',
                                         open=iid in self.clip_open_folders)
                             add(iid,node)
-                cutscene=set(self.clip_cutscene)
-                add('',group_clips([self.clip_labels[i] for i in shown],[n for n,i in enumerate(shown) if i in cutscene]))
+                cutscene=set(self.clip_cutscene);face=set(self.clip_face)
+                add('',group_clips([self.clip_labels[i] for i in shown],[n for n,i in enumerate(shown) if i in cutscene],
+                                   [n for n,i in enumerate(shown) if i in face]))
             current=f'clip:{self.clip_index}'
             if tree.exists(current):
                 tree.see(current);tree.selection_set(current);tree.focus(current)

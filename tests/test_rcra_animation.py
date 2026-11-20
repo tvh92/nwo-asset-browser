@@ -240,6 +240,76 @@ class RootMotionTests(unittest.TestCase):
             np.testing.assert_allclose(got, want, atol=1e-12)
 
 
+def build_performance(rows, frames, name='LINE_001', fps=30.0, padding=0):
+    """A performance clip: built header (no joints) and one 16-byte row per frame, padded to 8 rows (+ ``padding``)."""
+    count = -(-len(rows) // 8) * 8 + padding
+    samples = b''.join(bytes(index) + bytes(8 - len(index)) + bytes(weight) + bytes(8 - len(weight))
+                       for index, weight in rows) + bytes(16 * (count - len(rows)))
+    built = bytearray(96)
+    struct.pack_into('<IIIff', built, 0, 0, game_crc32(name), 8, fps, (frames - 1) / fps)
+    struct.pack_into('<4H', built, 32, 0, frames, 0, 0)
+    struct.pack_into('<IHHH', built, 40, 0, 0, 0, frames)
+    sections = {ra.SAMPLES: samples, ra.BUILT: bytes(built)}
+    strings = b'animclip built\0' + name.encode() + b'\0'
+    offset = 16 + 12 * len(sections) + len(strings)
+    table_bytes, body = b'', b''
+    for tag, data in sections.items():
+        table_bytes += struct.pack('<III', tag, offset + len(body), len(data))
+        body += data
+    dat1 = struct.pack('<4sIIHH', b'1TAD', ra.CLIP_MAGIC, offset + len(body), len(sections), 0) + table_bytes + strings + body
+    return struct.pack('<I', ra.CLIP_MAGIC) + bytes(32) + dat1
+
+
+class FacePerformanceTests(unittest.TestCase):
+    def test_rows_weights_and_padding(self):
+        data = build_performance([((3,), (255,)), ((1, 2), (128, 127)), ((0,), (255,))], 3, padding=8)
+        found = ra.performance_clip(data)
+        self.assertEqual((found['name'], found['frames'], found['sample_rate_fps']), ('LINE_001', 3, 30.0))
+        self.assertEqual(found['index'].shape, (3, 8))
+        self.assertEqual(found['index'][1, :2].tolist(), [1, 2])
+        np.testing.assert_allclose(found['weight'][1, :2], [128 / 255, 127 / 255])
+        with self.assertRaisesRegex(ValueError, 'cover'):
+            ra.performance_clip(build_performance([((0,), (255,))] * 8, 9))   # 9 frames, 8 rows
+
+    def test_pose_table(self):
+        table = struct.pack('<4H', 20, 8, 0, 2)
+        self.assertEqual(ra.pose_table(build_clip([(0, 0)] * 2, extra={ra.PHONEME_TABLE: table})), [20, 8, 0, 2])
+        self.assertIsNone(ra.pose_table(build_clip([(0, 0)] * 2)))
+
+    def test_blend_of_pose_frames(self):
+        def row(angle, tx, scale=1.0):
+            return dict(name='jaw', hash='0x9', scale=[scale] * 3, rotation_xyzw=list(yaw(angle)), translation=[tx, 0.0, 0.0])
+        poses = [[row(0, 0.0)], [row(40, 1.0, 2.0)], [row(-20, -1.0)]]
+        table = [0, 1, 2]
+        index = np.zeros((4, 8), np.intp)
+        weight = np.zeros((4, 8))
+        index[0, 0], weight[0, 0] = 1, 1.0                                 # one pose
+        index[1, :2], weight[1, :2] = (1, 2), (0.5, 0.5)                   # two poses
+        index[2, 0], weight[2, 0] = 1, 0.5                                 # half left to the identity
+        index[3, :2], weight[3, :2] = (1, 0), (128 / 255, 128 / 255)       # 256/255 in total, scaled to 1
+        frames = ra.performance_frames(poses, table, dict(index=index, weight=weight))
+        np.testing.assert_allclose(frames[0][0]['rotation_xyzw'], yaw(40), atol=1e-12)
+        np.testing.assert_allclose(frames[0][0]['scale'], [2.0] * 3)
+        np.testing.assert_allclose(frames[1][0]['rotation_xyzw'], yaw(10), atol=1e-12)   # symmetric pair: the mid angle
+        np.testing.assert_allclose(frames[1][0]['translation'], [0, 0, 0], atol=1e-12)
+        np.testing.assert_allclose(frames[2][0]['rotation_xyzw'], yaw(20), atol=1e-12)
+        np.testing.assert_allclose(frames[2][0]['translation'], [0.5, 0, 0])
+        np.testing.assert_allclose(frames[2][0]['scale'], [1.5] * 3)
+        np.testing.assert_allclose(frames[3][0]['translation'], [0.5, 0, 0])
+        with self.assertRaisesRegex(ValueError, 'past the phoneme table'):
+            ra.performance_frames(poses, [0, 1], dict(index=np.full((1, 8), 2), weight=np.full((1, 8), 0.1)))
+
+    def test_face_section_of_the_clip_list(self):
+        from rc2016.app.browser import face_clips, group_clips
+        labels = ['hero_ratchet: Walk', 'ratc_corv: RATC_CORV_001', 'ratc_corv: RATC_CORV_002', 'shot_1']
+        animsets = ['characters/hero/hero_ratchet/hero_ratchet.animset', 'localization/ratc/ratc_corv.animset',
+                    'cinematics/x/x.cinematic2']
+        face = face_clips(labels, animsets)
+        self.assertEqual(face, [1, 2])
+        self.assertEqual([text for text, _nodes in group_clips(labels, [3], face)],
+                         ['Animset animations', 'Cutscene animations', 'Face performances'])
+
+
 class SkinBatchTests(unittest.TestCase):
     def test_groups_of_one_and_several_influences(self):
         # 18 vertices: a full one-influence group (joint 2), then a two-vertex group of (joint, weight) pairs.
@@ -380,9 +450,32 @@ class RealAnimationTests(unittest.TestCase):
             in_place, moved = planted(index, False), planted(index, True)
             self.assertGreater(in_place, 0.3, name)    # measured 1.01 (walk) and 0.47 (turn)
             self.assertLess(moved, still, name)        # measured 0.10 and 0.005
-        # A clip without root motion records plays as before.
+        # A clip without root motion records plays as before (the face lines are checked separately).
         index = library.labels().index('hero_ratchet: relaxed_neutral_idle_hero_ratchet')
         self.assertEqual(library.clip_frames(index, True)[2][0], library.clip_frames(index)[2][0])
+
+    def test_face_performances_open_ratchets_jaw(self):
+        from rc2016.games.rcra.clip_library import PERFORMANCE
+        library = self.library(self.RATCHET).with_performances()
+        faces = [i for i, c in enumerate(library.clips) if c.get('source') == PERFORMANCE]
+        self.assertEqual(len(faces), 1535)   # every line of the 'ratc' speaker
+        self.assertEqual({library.clips[i]['pose'] for i in faces},
+                         {'characters/hero/hero_ratchet/animations/ratchet_phonemes.animclip'})
+        self.assertTrue(all(c['animset'].startswith('localization/ratc/') for c in (library.clips[i] for i in faces)))
+        index = library.labels().index('ratc_boards: RATC_BOARDS_SLICE1_017')
+        clip, kind, frames = library.clip_frames(index)
+        self.assertEqual((kind, len(frames), clip['metadata']['sample_rate_fps']), ('face performance', 497, 30.0))
+        jaw = next(r for r in library.rows if r['name'] == 'CTR_jaw')
+        angles = np.array([np.degrees(2 * np.arccos(min(1.0, abs(float(np.dot(row['rotation_xyzw'], jaw['rotation_xyzw']))))))
+                           for frame in frames for row in frame if row['hash'] == jaw['hash']])
+        self.assertAlmostEqual(float(angles[0]), 0.0, places=3)   # silence: the closed pose
+        self.assertGreater(float(angles.max()), 8.0)                # measured 9.4
+        self.assertGreater(int((angles > 3).sum()), 50)             # measured 96 of 497 frames
+        self.assertIsNone(library.clip_notes()[index])
+        # Rivet's actor also offers Ratchet's clips, but her own pose clip is in her folder: only her lines.
+        rivet = self.library('characters/hero/hero_rivet/hero_rivet.model').with_performances()
+        self.assertEqual({c['pose'] for c in rivet.clips if c.get('source') == PERFORMANCE},
+                         {'characters/hero/hero_rivet/animations/rivet_phonemes.animclip'})
 
 
 if __name__ == '__main__':

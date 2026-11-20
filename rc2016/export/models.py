@@ -68,12 +68,13 @@ class ExportOptions:
     skeleton: bool = True            # False: static meshes, no joints or skin weights, so no animations either
     attachments: bool = True         # also the model's bangle_set/*_attach parts, skinned to its rig (one armature)
     root_motion: bool = False        # move the skeleton by each clip's root motion (games that decode it: Rift Apart)
+    performances: bool = False       # also the face performances (voice-line lip sync; Rift Apart)
 
     def key(self):
         d = asdict(self)
         d.pop('blender'); d.pop('skip_existing')
         d['formats'] = sorted(d['formats']); d['clips'] = list(d['clips'])
-        for name in ('cinematic', 'cinematic_only', 'borrowed', 'file_suffix', 'root_motion'):   # absent from keys of exports that predate them
+        for name in ('cinematic', 'cinematic_only', 'borrowed', 'file_suffix', 'root_motion', 'performances'):   # absent from keys of exports that predate them
             if not d[name]:
                 d.pop(name)
         if d['skeleton']:   # the default is left out, so keys of exports that predate the option still match
@@ -791,6 +792,8 @@ class ModelExporter:
         library = self.loader.animation
         if library is not None and library.rows and options.cinematic:
             library = library.with_cinematic(self.loader.archive, self.loader.current['_archive_path'])   # as export() does
+        if library is not None and library.rows and options.performances:
+            library = library.with_performances()   # as export() does
         if library is None or not library.rows:
             return empty
         if notes and seconds:
@@ -849,6 +852,8 @@ class ModelExporter:
             library = library.with_cinematic(archive, decoded['_archive_path'], replace=options.cinematic_only,
                                              sources=cinematic_sources)
             self._check()
+        if options.performances and load_animation and library is not None and library.rows:
+            library = library.with_performances()
         meshes = selected_meshes(decoded, options.lod, options.look)
         game = self.loader.game   # the archive's game (rc2016.games): its material reads and texture export
         material_paths = {m.get('index', i): m.get('path') for i, m in enumerate(decoded['materials'])}

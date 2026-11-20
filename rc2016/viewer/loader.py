@@ -453,7 +453,8 @@ class SourcePreviewLoader:
         if self.game.has_animation_library():   # the game finds its own clips (Rift Apart: through its dag)
             try:
                 library=self.game.animation_library(self.archive,cached['data'],decoded['_archive_path'])
-                if cached['purpose']=='view':library=library.with_cinematic(self.archive,decoded['_archive_path'])
+                if cached['purpose']=='view':   # the browser also lists cutscene shots and face performances
+                    library=library.with_cinematic(self.archive,decoded['_archive_path']).with_performances()
                 cached['animation']=library
                 decoded['animsets']=list(library.animset_data)
                 decoded['animation_note']='' if library.clips else 'No animation set or cutscene clip found for this model.'
