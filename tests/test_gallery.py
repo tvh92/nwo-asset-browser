@@ -155,5 +155,13 @@ class QueueTests(unittest.TestCase):
         self.assertTrue(g.needs_restart(['0'], []))
 
 
+class WatchdogTests(unittest.TestCase):
+    def test_stalled_names_the_model_past_the_limit(self):
+        self.assertIsNone(g.stalled(None, 1000.0))
+        self.assertIsNone(g.stalled(('m', 100.0), 100.0 + g.STALL_SECONDS - 1))
+        self.assertEqual(g.stalled(('m', 100.0), 100.0 + g.STALL_SECONDS), 'm')
+        self.assertEqual(g.stalled(('m', 0.0), 5.0, limit=5), 'm')
+
+
 if __name__ == '__main__':
     unittest.main()

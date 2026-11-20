@@ -2,7 +2,8 @@
 
 The tab shows the models selected in the tree (selecting a folder selects every model in it) or, with
 nothing or one model selected, the current search results. Thumbnails come from the cache written by
-``rc2016.app.thumbnails``; missing ones are rendered by one owned renderer process, visible tiles first.
+``rc2016.app.thumbnails``; missing ones are rendered by one owned renderer process, visible tiles first. The renderer stays
+up while the grid scrolls (its queue is replaced through stdin) and stops after IDLE_STOP_SECONDS with nothing to do.
 The layout, queue and selection rules are plain functions so they run without Tk.
 """
 from __future__ import annotations
@@ -20,10 +21,12 @@ from rc2016.app.workers import LatestWork
 
 IMAGE_CACHE_SIZE = 300      # PhotoImages kept; the tiles on screen are a small subset
 FILTER_CAP = 2000           # largest search-result list shown when nothing is selected
-QUEUE_HEAD = 80             # visible tiles must be within this many pending models, else the renderer restarts
-QUEUE_LIMIT = 1500          # models handed to the renderer in one run
+QUEUE_HEAD = 80             # visible tiles must be within this many pending models, else the renderer is re-prioritised
+QUEUE_LIMIT = 1500          # models handed to the renderer in one queue
 RESTART_DELAY_MS = 450      # debounce for scroll and selection changes
 RESTART_MIN_SECONDS = 1.5   # never respawn faster than this
+STALL_SECONDS = 600         # one model this long without a result: the renderer is stopped and the model skipped this session
+IDLE_STOP_SECONDS = 60      # a renderer idle this long is stopped (it holds a GL context and its worker processes)
 SHIFT_MASK = 0x0001         # Tk event.state bits for a click or key
 CONTROL_MASK = 0x0004
 
@@ -192,6 +195,14 @@ def needs_restart(visible_missing, pending, head=QUEUE_HEAD):
     return not set(visible_missing) <= set(pending[:head])
 
 
+def stalled(begun, now, limit=STALL_SECONDS):
+    """The model id of a renderer ``begin`` event (id, monotonic time) that has had no result for ``limit`` seconds."""
+    if begun is None:
+        return None
+    model_id, since = begun
+    return model_id if now - since >= limit else None
+
+
 def decode_thumbnail(path):
     """Decode one thumbnail PNG to an RGBA Pillow image (worker thread; no Tk objects). None without Pillow."""
     try:
@@ -239,6 +250,9 @@ class Gallery:
         self.decode_job = None
         self.token = 0
         self.live = {}                 # id -> (status, reason) learned from renderer events this session
+        self.stalls = {}               # id -> reason: models the watchdog skipped this session (never in the index)
+        self.begun = None              # (id, monotonic time) of the model the renderer is working on
+        self.idle_since = None         # monotonic time the running renderer reported an empty queue
         self.item_by_id = {}
         self.current_id = None
         self.anchor = None             # tile index a Shift-click or Shift+arrow extends from
@@ -350,6 +364,7 @@ class Gallery:
             self.cache_root = root
             self._clear_images()
             self.live.clear()
+            self.stalls.clear()
             self.index = ThumbnailIndex(cache_dir(root))
             self.stop_renderer()
             self.blocked = ''
@@ -494,6 +509,8 @@ class Gallery:
         live = self.live.get(model_id)
         if live:
             return live
+        if model_id in self.stalls:
+            return 'error', self.stalls[model_id]
         if self.index_loading and not self.index.models:
             return 'loading', ''
         if self.index.is_current(model_id, self.THUMB):
@@ -776,7 +793,7 @@ class Gallery:
         return self.app.source_var.get().strip()
 
     def _is_ready(self, model_id):
-        return self.status_of(model_id)[0] != 'queued'
+        return model_id in self.stalls or self.status_of(model_id)[0] != 'queued'
 
     def schedule_render(self):
         if self.queue_job is None and not self.closed:
@@ -801,7 +818,11 @@ class Gallery:
             if self.mode == 'all':
                 return
             visible_missing = [r.model_id for r in self.records[first:last] if not self._is_ready(r.model_id)]
-            if not needs_restart(visible_missing, self.proc_pending):
+            if self.idle_since is None and not needs_restart(visible_missing, self.proc_pending):
+                return   # busy, and the visible tiles are near the head of its queue
+            if self.proc.send(wanted):   # the running renderer takes the new order: no new process
+                self.proc_pending = list(wanted)
+                self.idle_since = None
                 return
             if time.monotonic() - self.last_start < RESTART_MIN_SECONDS:
                 self.schedule_render()
@@ -814,13 +835,15 @@ class Gallery:
         from rc2016.app.settings import PROJECT_ROOT, _default_interpreter
         try:
             self.proc = RendererProcess(self._source(), self.cache_root, ids=ids, all_models=all_models, size=self.THUMB,
-                                        cwd=PROJECT_ROOT, python=_default_interpreter()).start()
+                                        cwd=PROJECT_ROOT, python=_default_interpreter(), persistent=not all_models,
+                                        skip=sorted(self.stalls)).start()
         except OSError as error:
             self.proc = None
             self.blocked = f'thumbnail renderer could not start ({error})'
             self._describe()
             return
         self.proc_pending = list(ids)
+        self.begun, self.idle_since = None, None
         self.last_start = time.monotonic()
         self.mode = 'all' if all_models else 'view'
         self.cancel_button.configure(state='normal' if all_models else 'disabled')
@@ -835,6 +858,7 @@ class Gallery:
 
     def stop_renderer(self):
         proc, self.proc, self.proc_pending = self.proc, None, []
+        self.begun = self.idle_since = None
         if proc is not None:
             proc.stop()
         self.mode = 'view'
@@ -858,13 +882,40 @@ class Gallery:
                 pass
             if changed:
                 self._schedule_redraw()
+            self._watch()
         if self.proc is not None:
             self.poll_job = self.app.root.after(120, self._poll)
 
+    def _watch(self):
+        """Stop a renderer stuck on one model (that model is skipped this session; the rest render again) or idle too long."""
+        import time
+        now = time.monotonic()
+        model_id = stalled(self.begun, now)
+        if model_id is not None:
+            minutes = STALL_SECONDS // 60
+            self.stalls[model_id] = f'Thumbnail skipped this session: no result after {minutes} minutes.'
+            self.app._append_log(f'Thumbnails: {model_id} took over {minutes} minutes; skipped for this session.', 'error')
+            self._discard_image(model_id)
+            self.stop_renderer()
+            self._schedule_redraw()
+            self.schedule_render()
+        elif self.idle_since is not None and now - self.idle_since >= IDLE_STOP_SECONDS:
+            self.stop_renderer()
+
     def _handle(self, event, proc):
+        import time
         kind = event.get('event')
+        if kind == 'begin':
+            self.begun, self.idle_since = (event.get('id'), time.monotonic()), None
+            return False
+        if kind == 'idle':
+            self.begun, self.idle_since, self.proc_pending = None, time.monotonic(), []
+            self.schedule_render()   # models that went missing meanwhile (the grid changed) are sent now
+            return False
         if kind == 'model':
             model_id = event.get('id')
+            if self.begun and self.begun[0] == model_id:
+                self.begun = None
             if model_id in self.proc_pending:
                 self.proc_pending.remove(model_id)
             if event.get('skipped'):

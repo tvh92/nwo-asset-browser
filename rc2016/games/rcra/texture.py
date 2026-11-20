@@ -19,6 +19,7 @@ TEXTURE_MAGIC = 0x8F53A199
 HEADER_SECTION = 0x4EDE3593
 ASSET_HEADER = 36
 MIN_PREVIEW_SIZE = 512     # like viewer.textures: below this the SD top mip is too blurry, use the HD stream
+MAX_PREVIEW_SIZE = 0       # 0: the top mip; else the largest mip no wider or taller than this (thumbnails)
 HEADER_FACTS = ('format', 'hd_width', 'hd_height', 'sd_width', 'sd_height', 'array_size')
 # Data formats seen only in vertex-animation, probe and lookup textures: sized, never previewed.
 DATA_BPP = {2: 16, 10: 8, 16: 8, 34: 4, 35: 4, 54: 2}   # RGBA32F, RGBA16F, RG32F, RG16F, RG16, R16F
@@ -70,13 +71,24 @@ def chain_sizes(fmt, width, height, count):
     return sizes
 
 
-def _slices(payload, fmt, width, height, mips, count, label):
-    """The top mip of each array slice from a linear chain of ``mips`` mips per slice."""
+def preview_mip(width, height, mips, cap=None):
+    """Index of the mip a preview reads: 0, or under a cap (default MAX_PREVIEW_SIZE) the first of the ``mips`` no wider
+    or taller than it (the last one when none is)."""
+    cap = MAX_PREVIEW_SIZE if cap is None else cap
+    level = 0
+    while cap and level + 1 < mips and max(width >> level, height >> level) > cap:
+        level += 1
+    return level
+
+
+def _slices(payload, fmt, width, height, mips, count, label, level=0):
+    """Mip ``level`` of each array slice from a linear chain of ``mips`` mips per slice."""
     sizes = chain_sizes(fmt, width, height, mips)
     stride = sum(sizes)
     if len(payload) < stride * count:
         raise ValueError(f'{label} holds {len(payload)} bytes, {count} slice(s) of {stride} needed')
-    return [payload[i * stride:i * stride + sizes[0]] for i in range(count)]
+    start = sum(sizes[:level])
+    return [payload[i * stride + start:i * stride + start + sizes[level]] for i in range(count)]
 
 
 # A texture unit no slot binds: it reads 0 in every channel, as an unbound D3D resource does. One RGBA32F texel.
@@ -132,7 +144,7 @@ def read_top_mip(source, texture_path, full):
     """The viewer's loaded-texture dict (viewer.textures._read_top_mip shape) of a Rift Apart texture.
 
     ``full`` takes the HD stream whenever there is one; otherwise the SD top mip is used once it is
-    at least MIN_PREVIEW_SIZE (smaller ones also take the stream)."""
+    at least MIN_PREVIEW_SIZE (smaller ones also take the stream). Under a MAX_PREVIEW_SIZE a smaller mip is read."""
     if texture_path in CONSTANT_TEXTURES:
         return _constant(texture_path)
     key = _entry(source, texture_path)
@@ -147,14 +159,17 @@ def read_top_mip(source, texture_path, full):
         if len(stream) != info['stream_size']:
             raise ValueError(f'Texture {texture_path} stream holds {len(stream)} bytes, header says {info["stream_size"]}')
         width, height = info['hd_width'], info['hd_height']
-        slices = _slices(stream, fmt, width, height, info['hd_mips'], count, 'HD stream')
+        level = preview_mip(width, height, info['hd_mips'])
+        slices = _slices(stream, fmt, width, height, info['hd_mips'], count, 'HD stream', level)
     elif info['sd_size'] and info['sd_width'] and info['sd_height']:
         width, height = info['sd_width'], info['sd_height']
-        slices = _slices(data[info['payload_offset']:], fmt, width, height, info['sd_mips'], count, 'SD chain')
+        level = preview_mip(width, height, info['sd_mips'])
+        slices = _slices(data[info['payload_offset']:], fmt, width, height, info['sd_mips'], count, 'SD chain', level)
     else:
         raise ValueError(f'Texture {texture_path} has no usable payload')
     from rc2016.viewer.textures import SRGB_FORMATS
     full_size = (info['hd_width'], info['hd_height']) if info['hd_width'] else (info['sd_width'], info['sd_height'])
+    width, height = max(1, width >> level), max(1, height >> level)
     return dict(path=texture_path, width=width, height=height, format=fmt, pixels=slices[0], slices=slices,
                 array_size=count, faces=info['faces'], full_size=full_size, srgb=fmt in SRGB_FORMATS)
 

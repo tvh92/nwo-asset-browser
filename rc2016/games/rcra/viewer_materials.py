@@ -84,7 +84,8 @@ def translate(source, material_key):
             raise NotTranslated(stored['error'])
         return stored['surface'], stored['forward'], stored['blend'], stored['limitations'], stored['textures']
     try:
-        out = _translate(graph, data, source, program)
+        with rsurface.shared_forward_split():   # the surface's forward albedo and the own specular term: one translation
+            out = _translate(graph, data, source, program)
     except NotTranslated as error:
         if key:
             disk.put(key, dict(error=str(error)))

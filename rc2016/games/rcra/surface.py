@@ -23,7 +23,10 @@ alpha. It reads the view through the inputs VIEW.xyz (camera-to-point offset) an
 program that samples the scene behind it (g_FrameBuffer) is kept when each colour channel is affine in that channel of the
 background: colour = A + B x background, split into the terms colour (A) and background (B).
 """
+import contextlib
+import hashlib
 import math
+import threading
 from collections import defaultdict
 
 from rc2016.games.rcra import material as rmaterial
@@ -1792,7 +1795,42 @@ class _ManyDiffuse(Unsupported):
         self.translation = translation
 
 
+_SPLITS = threading.local()
+
+
+@contextlib.contextmanager
+def shared_forward_split():
+    """Inside the block (on this thread), forward_albedo and forward_specular of the same graph and material share one
+    _forward_split, the translation that dominates both, instead of translating the program twice. The shared graph only
+    grows (hash-consed nodes), so each caller reads the same nodes it would have built. Nested blocks share the outer memo."""
+    outer = getattr(_SPLITS, 'memo', None)
+    if outer is None:
+        _SPLITS.memo = {}
+    try:
+        yield
+    finally:
+        if outer is None:
+            _SPLITS.memo = None
+
+
 def _forward_split(graph_data, material_data, texture_sizes):
+    """_split_forward, memoised inside shared_forward_split (its outcome, an exception included, by graph and material)."""
+    memo = getattr(_SPLITS, 'memo', None)
+    if memo is None:
+        return _split_forward(graph_data, material_data, texture_sizes)
+    key = (hashlib.sha256(bytes(graph_data)).digest(), hashlib.sha256(bytes(material_data)).digest())
+    if key not in memo:
+        try:
+            memo[key] = (True, _split_forward(graph_data, material_data, texture_sizes))
+        except (Unsupported, ValueError, KeyError) as error:   # _ManyDiffuse is an Unsupported
+            memo[key] = (False, error)
+    ok, outcome = memo[key]
+    if not ok:
+        raise outcome
+    return outcome
+
+
+def _split_forward(graph_data, material_data, texture_sizes):
     """The forward program of a forward technique split per colour channel into F0 + Y_d x L_d + sum Y_s x L_s, every
     light source symbolic (_ForwardLitFreeBindings: the key light L, LIGHT, the others ENGINE.*). A light factor is
     specular when it reads a specular input (SPECULAR_INPUTS), diffuse when it reads a light colour (LIGHT or another

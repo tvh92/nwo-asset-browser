@@ -770,5 +770,32 @@ class RealSurfaceTests(unittest.TestCase):
         self.assertEqual(report['alpha']['max'], 0.0)
 
 
+class SharedForwardSplitTests(unittest.TestCase):
+    def test_one_split_per_graph_and_material_inside_the_block(self):
+        from unittest import mock
+        outcome = ('g', 'tr', 'bindings', {}, [])
+        with mock.patch.object(rsurface, '_split_forward', return_value=outcome) as split:
+            rsurface._forward_split(b'graph', b'material', None)
+            rsurface._forward_split(b'graph', b'material', None)
+            self.assertEqual(split.call_count, 2)   # outside a block: no memo
+            with rsurface.shared_forward_split():
+                with rsurface.shared_forward_split():   # nested: the outer memo
+                    self.assertIs(rsurface._forward_split(b'graph', b'material', None), outcome)
+                self.assertIs(rsurface._forward_split(b'graph', b'material', None), outcome)
+                rsurface._forward_split(b'graph', b'other', None)
+            self.assertEqual(split.call_count, 4)
+            rsurface._forward_split(b'graph', b'material', None)
+            self.assertEqual(split.call_count, 5)   # the block ended: its memo is gone
+
+    def test_a_failed_split_fails_again_without_translating(self):
+        from unittest import mock
+        with mock.patch.object(rsurface, '_split_forward', side_effect=rsurface.Unsupported('no')) as split:
+            with rsurface.shared_forward_split():
+                for _ in range(2):
+                    with self.assertRaisesRegex(rsurface.Unsupported, 'no'):
+                        rsurface._forward_split(b'g', b'm', None)
+            self.assertEqual(split.call_count, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

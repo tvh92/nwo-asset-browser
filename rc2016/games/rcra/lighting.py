@@ -137,16 +137,55 @@ def find_programs(data):
     return {c: (best[c][1], best[c][2]) for c in CLASSES}
 
 
-def programs(root):
-    """find_programs of the install's executable (cached by path, size and time)."""
+def programs(root, disk=None):
+    """find_programs of the install's executable, kept in memory by path, size and time. With ``disk`` (a source's
+    translation disk cache) the programs' places are kept across sessions too, keyed by the same facts and the scanning
+    code, and their bytes read back from the executable; the scan parses every DXBC container of the executable."""
     path = os.path.join(str(root), EXECUTABLE)
     stat = os.stat(path)
     key = (path, stat.st_size, stat.st_mtime_ns)
     with _LOCK:
-        if key not in _PROGRAMS:
+        if key in _PROGRAMS:
+            return _PROGRAMS[key]
+        code = _scan_code_key() if disk is not None else None
+        disk_key = disk.key(repr(key).encode(), [], 'rcra-lighting-programs:%s' % code) if code else None
+        found = _read_places(path, disk.get(disk_key)) if disk_key else None
+        if found is None:
             with open(path, 'rb') as f:
-                _PROGRAMS[key] = find_programs(f.read())
-        return _PROGRAMS[key]
+                found = find_programs(f.read())
+            if disk_key:
+                disk.put(disk_key, {str(cls): [offset, len(blob)] for cls, (offset, blob) in found.items()})
+        _PROGRAMS[key] = found
+        return found
+
+
+def _scan_code_key():
+    """Hash of the scanning code (this module and the DXBC reader), or None without readable sources (no disk record)."""
+    here = Path(__file__).resolve()
+    try:
+        return hashlib.sha256(b''.join(f.read_bytes() for f in (here, here.parents[2] / 'shaders' / 'dxbc.py'))).hexdigest()
+    except OSError:
+        return None
+
+
+def _read_places(path, places):
+    """{class: (offset, DXBC bytes)} read from the executable at stored places {str(class): [offset, size]}, or None when
+    the record is missing or does not hold a DXBC container of every class."""
+    if not isinstance(places, dict) or sorted(places) != sorted(str(c) for c in CLASSES):
+        return None
+    found = {}
+    try:
+        with open(path, 'rb') as f:
+            for cls in CLASSES:
+                offset, size = places[str(cls)]
+                f.seek(offset)
+                blob = f.read(size)
+                if len(blob) != size or blob[:4] != b'DXBC':
+                    return None
+                found[cls] = (offset, blob)
+    except (OSError, TypeError, ValueError):
+        return None
+    return found
 
 
 # ------------------------------------------------------------------------------------------------ translation
@@ -407,7 +446,7 @@ def direct(root, cls, disk=None):
     Kept in memory and, with ``disk`` (a source's translation disk cache: key, get, put), across sessions, keyed by the
     program bytes and this code."""
     from rc2016.games.rcra import surface as rsurface
-    offset, blob = programs(root)[cls]
+    offset, blob = programs(root, disk)[cls]
     tag = 'rcra-lighting:%d:%s' % (cls, _code_key())
     memo = (tag, hashlib.sha256(blob).hexdigest())
     with _LOCK:
@@ -544,7 +583,7 @@ def ambient(root, cls, disk=None):
     """The ambient-light recipe of class ``cls`` (export_recipe shape, terms ambient.r/g/b, with sample nodes on
     AMBIENT_SAMPLED), cached as ``direct``."""
     from rc2016.games.rcra import surface as rsurface
-    offset, blob = programs(root)[cls]
+    offset, blob = programs(root, disk)[cls]
     tag = 'rcra-ambient:%d:%s' % (cls, _code_key())
     memo = (tag, hashlib.sha256(blob).hexdigest())
     with _LOCK:

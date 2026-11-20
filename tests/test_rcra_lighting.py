@@ -575,5 +575,50 @@ class RealLightingTests(unittest.TestCase):
         del struct
 
 
+class ProgramPlaceCacheTests(unittest.TestCase):
+    class Disk:
+        def __init__(self):
+            self.store = {}
+
+        def key(self, data, graphs, variant=''):
+            return repr((data, graphs, variant))
+
+        def get(self, key):
+            return self.store.get(key)
+
+        def put(self, key, value):
+            self.store[key] = value
+
+    def test_places_are_kept_and_read_back(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as folder:
+            exe = Path(folder) / lighting.EXECUTABLE
+            blobs = {c: b'DXBC' + bytes([c]) * (8 + c) for c in lighting.CLASSES}
+            body, found = bytearray(b'MZ' + bytes(30)), {}
+            for c, blob in blobs.items():
+                found[c] = (len(body), blob)
+                body += blob + bytes(5)
+            exe.write_bytes(bytes(body))
+            disk = self.Disk()
+            lighting._PROGRAMS.clear()
+            with mock.patch.object(lighting, 'find_programs', return_value=found) as scan:
+                self.assertEqual(lighting.programs(folder, disk), found)
+                lighting._PROGRAMS.clear()
+                self.assertEqual(lighting.programs(folder, disk), found)   # a new session: from the stored places
+                self.assertEqual(scan.call_count, 1)
+                stored = next(iter(disk.store.values()))
+                self.assertEqual(stored, {str(c): [o, len(b)] for c, (o, b) in found.items()})
+                disk.store[next(iter(disk.store))] = dict(stored, **{'0': [3, 8]})   # not a DXBC container: scan again
+                lighting._PROGRAMS.clear()
+                self.assertEqual(lighting.programs(folder, disk), found)
+                self.assertEqual(scan.call_count, 2)
+            lighting._PROGRAMS.clear()
+
+    def test_read_places_rejects_incomplete_records(self):
+        self.assertIsNone(lighting._read_places('missing', None))
+        self.assertIsNone(lighting._read_places('missing', {'0': [0, 4]}))
+
+
 if __name__ == '__main__':
     unittest.main()

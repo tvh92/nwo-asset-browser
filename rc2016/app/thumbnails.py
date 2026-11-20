@@ -3,15 +3,21 @@
 The renderer runs as its own process so the browser's Tk thread and 3D view never block and
 a batch can be cancelled::
 
-    python -m rc2016.app.thumbnails --source <game root> --cache <game cache folder> [--ids-file F | --all]
+    python -m rc2016.app.thumbnails --source <game root> --cache <game cache folder> [--ids-file F | --all] [--stdin]
 
 Thumbnails are written to ``<cache>/thumbnails/<model id>.png`` and described by
-``index.json`` in the same folder. One JSON line per finished model goes to stdout.
+``index.json`` in the same folder. JSON lines go to stdout: ``begin`` when a model starts, ``model``
+when it is finished. With ``--stdin`` the process stays up: each stdin line ``{"ids": [...]}``
+replaces the queue (the browser re-prioritises a running renderer instead of starting a new one),
+``idle`` says the queue is empty, and the process ends when stdin closes. Worker processes
+(``--workers``) load the next models of the queue ahead of the renderer, without GL, so their
+shader translations are in the disk caches when the renderer reaches them.
 The pure parts (index, PNG, downsampling, argument handling) import without Tk or OpenGL.
 """
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import ctypes
 import json
 import os
@@ -25,9 +31,14 @@ import threading
 import time
 import zlib
 
-THUMBNAIL_VERSION = 5     # bump when rendering changes: invalidates every cached thumbnail
+THUMBNAIL_VERSION = 6     # bump when rendering changes: invalidates every cached thumbnail
 DEFAULT_SIZE = 192
 SUPERSAMPLE = 2            # render at 2x and box-filter down: the legacy pipeline has no MSAA
+# Rift Apart texture reads for thumbnails: the SD chain once its top mip is at least this (else the HD stream), read at
+# its largest mip no wider or taller than TEXTURE_MAX. A 384-pixel render needs no more; smaller mips upload and build
+# their GL mip chain in a fraction of the time.
+TEXTURE_MIN, TEXTURE_MAX = 256, 512
+MAX_WORKERS = 4
 INDEX_NAME = 'index.json'
 STATUSES = ('ok', 'unsupported', 'error')
 
@@ -238,6 +249,11 @@ def build_parser():
     parser.add_argument('--limit', type=int, default=0, help='stop after this many models (0 = no limit)')
     parser.add_argument('--force', action='store_true', help='render again even when the cache is current')
     parser.add_argument('--no-fbo', action='store_true', help='read the window back buffer instead of an offscreen framebuffer')
+    parser.add_argument('--stdin', action='store_true',
+                        help='stay up and take new queues as {"ids": [...]} lines on stdin until it closes')
+    parser.add_argument('--workers', type=int, default=-1,
+                        help='processes that load upcoming models ahead of the renderer (-1 = automatic, 0 = none)')
+    parser.add_argument('--skip', action='append', default=[], metavar='ID', help='leave this model out (repeatable)')
     return parser
 
 
@@ -246,18 +262,63 @@ def parse_arguments(argv=None):
     args = parser.parse_args(argv)
     if not 32 <= args.size <= 512:
         parser.error('--size must be between 32 and 512')
-    if not args.ids_file and not args.all:
-        parser.error('give --ids-file and/or --all')
+    if not args.ids_file and not args.all and not args.stdin:
+        parser.error('give --ids-file, --all and/or --stdin')
     return args
 
 
 def select_ids(args, archive_models) -> list[str]:
-    """Priority list: ids file first (in file order), then every other archive model sorted by path."""
+    """Priority list: ids file first (in file order), then every other archive model sorted by path; --skip ids left out."""
     ordered = read_ids_file(args.ids_file) if args.ids_file else []
     if args.all:
         listed = set(ordered)
         ordered += [model_id for _path, model_id in sorted(archive_models) if model_id not in listed]
+    skip = set(getattr(args, 'skip', ()) or ())
+    ordered = [model_id for model_id in ordered if model_id not in skip]
     return ordered[:args.limit] if args.limit > 0 else ordered
+
+
+def worker_count(requested, cpus=None, frozen=None) -> int:
+    """Prefetch workers: the requested number (at most MAX_WORKERS), or automatically half the CPUs less one for the
+    renderer, at least one. None in a frozen build, where spawned workers would start the app again."""
+    frozen = getattr(sys, 'frozen', False) if frozen is None else frozen
+    if frozen or requested == 0:
+        return 0
+    if requested > 0:
+        return min(requested, MAX_WORKERS)
+    if cpus is None:
+        cpus = os.cpu_count() or 2
+    return max(1, min(MAX_WORKERS, cpus // 2 - 1))
+
+
+def parse_control(line):
+    """A stdin control line: the new queue (list of ids) from {"ids": [...]}, or None when the line is not one."""
+    try:
+        message = json.loads(line)
+    except (ValueError, TypeError):
+        return None
+    ids = message.get('ids') if isinstance(message, dict) else None
+    if not isinstance(ids, list):
+        return None
+    seen, ordered = set(), []
+    for model_id in ids:
+        text = str(model_id).strip()
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+    return ordered
+
+
+def configure_previews():
+    """Thumbnail texture reads, in this process and its workers only (the interactive viewer is unaffected): no streamed
+    HD mips for R&C 2016; for Rift Apart the SD chain from TEXTURE_MIN, read at a mip of at most TEXTURE_MAX."""
+    from rc2016.viewer import textures
+    textures.MIN_PREVIEW_SIZE = 0
+    try:
+        from rc2016.games.rcra import texture as rcra_texture
+    except ImportError:   # a build without the Rift Apart reader
+        return
+    rcra_texture.MIN_PREVIEW_SIZE, rcra_texture.MAX_PREVIEW_SIZE = TEXTURE_MIN, TEXTURE_MAX
 
 
 # Offscreen renderer ----------------------------------------------------------
@@ -393,6 +454,12 @@ def thumbnail_viewport_class():
             gl.glReadPixels(0, 0, edge, edge, 0x1908, 0x1401, pixels)
             self.frame = bytes(pixels)
 
+        def _draw(self):
+            """Only the captured frame is drawn: set_mesh, set_mode, the camera reset, clear and Tk's idle redraws would
+            each draw a frame nobody sees."""
+            if self.want_capture:
+                super()._draw()
+
         def read_frame(self):
             """Draw the current mesh once and return its RGBA bytes (bottom row first)."""
             self.want_capture, self.frame = True, None
@@ -425,27 +492,151 @@ def emit(**fields):
     print(json.dumps(fields, separators=(',', ':')), flush=True)
 
 
+# Prefetch workers -------------------------------------------------------------
+_WORKER = {}
+
+
+def _worker_init(source):
+    configure_previews()
+    from rc2016.viewer.loader import SourcePreviewLoader
+    loader = SourcePreviewLoader()
+    archive = loader._ensure_archive(source)
+    archive.verify_repeats = False
+    _WORKER.update(loader=loader, source=source)
+
+
+def prefetch_units(archive, model_id, path):
+    """The prefetch work for one model, as independent units: for Rift Apart each of its materials' translations (several
+    workers then share one model: the stadium crowd has 92 materials, a dozen of them about 10 s each), otherwise the whole
+    model load."""
+    if hasattr(archive, 'ids_of_type'):   # Rift Apart: the material translations dominate a cold load
+        try:
+            references = archive.asset_references(model_id)
+        except (KeyError, ValueError, OSError):
+            return []
+        keys = []
+        for reference in references:
+            if reference['path'].endswith('.material'):
+                keys += [k for k in archive.resolve(reference['path']) if archive.entries[k]['type'] == 'material']
+        return [('material', key) for key in dict.fromkeys(keys)]
+    return [('model', (model_id, path))]
+
+
+def _worker_run(kind, argument):
+    """One prefetch unit (prefetch_units) in a worker, without GL: its translations land in the shared disk caches,
+    written atomically, so the renderer and the other workers read whole results or none. Returns the seconds it took."""
+    loader, source = _WORKER['loader'], _WORKER['source']
+    started = time.perf_counter()
+    try:
+        if kind == 'material':
+            from rc2016.games.rcra.viewer_materials import translate
+            translate(loader._ensure_archive(source), argument)
+        else:
+            loader.load(source, argument[0], argument[1], 'Highest', 0, None, True)
+    except Exception:   # the renderer meets the same failure and records it
+        pass
+    finally:
+        loader.identity = None
+        if len(loader.texture_cache) > 400:
+            loader.texture_cache.clear()
+    return time.perf_counter() - started
+
+
+class Prefetcher:
+    """Worker processes that do the slow, cacheable part of the next models (prefetch_units) while the renderer draws."""
+
+    def __init__(self, source, workers, units=None):
+        self.pool = None
+        self.futures = {}    # unit -> future
+        self.units = {}      # model id -> its units
+        self.unit_of = units or (lambda model_id, path: [('model', (model_id, path))])
+        self.workers, self.lookahead = workers, 2 * workers
+        if workers > 0:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            self.pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context('spawn'),
+                                            initializer=_worker_init, initargs=(str(source),))
+
+    def _units(self, model_id, path):
+        if model_id not in self.units:
+            self.units[model_id] = self.unit_of(model_id, path)
+        return self.units[model_id]
+
+    def plan(self, current, upcoming):
+        """Submit the units of ``current`` (the model the renderer is about to load) and of ``upcoming`` ([(model id,
+        archive path)], most urgent first), in that order. Queued units no longer wanted are cancelled; running ones
+        finish (their results still land in the caches)."""
+        if self.pool is None:
+            return
+        models = ([current] if current else []) + upcoming[:self.lookahead]
+        ordered = [unit for model_id, path in models for unit in self._units(model_id, path)]
+        wanted = set(ordered)
+        for unit in [u for u in self.futures if u not in wanted]:
+            self.futures.pop(unit).cancel()
+        for unit in ordered:
+            if unit not in self.futures:
+                self.futures[unit] = self.pool.submit(_worker_run, *unit)
+        keep = {model_id for model_id, _path in models}
+        self.units = {m: u for m, u in self.units.items() if m in keep}
+
+    def wait(self, model_id):
+        """Before the renderer loads ``model_id``: wait for its units (queued ones run on the workers meanwhile, in parallel),
+        so the load reads their results from the caches. Returns the seconds waited."""
+        units = self.units.pop(model_id, ())
+        futures = [self.futures.pop(unit) for unit in units if unit in self.futures]
+        if not futures:
+            return 0.0
+        started = time.perf_counter()
+        for future in futures:
+            try:
+                future.result()
+            except Exception:   # cancelled, or a broken pool: the renderer does that part itself
+                pass
+        return time.perf_counter() - started
+
+    def close(self):
+        if self.pool is not None:
+            self.pool.shutdown(wait=False, cancel_futures=True)
+            self.pool = None
+
+
+def _read_controls(stream, control):
+    """Stdin reader thread: each valid control line's queue goes to ``control``; None at end of input."""
+    try:
+        for raw in stream:
+            ids = parse_control(raw.decode('utf8', 'replace') if isinstance(raw, bytes) else raw)
+            if ids is not None:
+                control.put(ids)
+    finally:
+        control.put(None)
+
+
 def run(args) -> int:
     """Render the requested models; returns the process exit code."""
     import tkinter as tk
-    from rc2016.viewer import textures
     from rc2016.viewer.loader import SourcePreviewLoader
 
-    # Thumbnails do not need the streamed HD mips (interactive viewing is unaffected: this is this process only).
-    textures.MIN_PREVIEW_SIZE = 0
+    configure_previews()
     size, supersample = args.size, SUPERSAMPLE
     folder = cache_dir(args.cache)
     folder.mkdir(parents=True, exist_ok=True)
     index = ThumbnailIndex.load(folder)
     loader = SourcePreviewLoader()
     archive = loader._ensure_archive(args.source)
+    prefetch = Prefetcher(args.source, worker_count(args.workers),
+                          lambda model_id, path: prefetch_units(archive, model_id, path))
     archive.verify_repeats = False   # hash the first copy only; repeats are identical in a consistent install
     if hasattr(archive, 'ids_of_type'):   # a typed index (Rift Apart): no entry dict for every asset of the install
         models = [(archive.entries[key]['path'], key) for key in archive.ids_of_type('model')]
     else:
         models = [(entry['path'], model_id) for model_id, entry in archive.entries.items() if entry['type'] == 'model']
-    ids = select_ids(args, models)
-    total = len(ids)
+    skip = set(args.skip)
+    pending = deque(select_ids(args, models))
+    total = len(pending)
+    control = queue.Queue()
+    if args.stdin:
+        threading.Thread(target=_read_controls, args=(sys.stdin.buffer, control), daemon=True,
+                         name='thumbnail-control').start()
     root = tk.Tk()
     root.overrideredirect(True)
     root.attributes('-alpha', 0.0)
@@ -456,16 +647,58 @@ def run(args) -> int:
     root.update()
     if view._context_error or view._hrc is None:
         emit(event='fatal', reason=view._context_error or 'no OpenGL context')
+        prefetch.close()
         root.destroy()
         return 2
     emit(event='start', total=total, fbo=view.fbo is not None, fbo_error=view.fbo_error, transparent=view.transparent,
-         version=THUMBNAIL_VERSION, size=size)
-    done = 0
+         version=THUMBNAIL_VERSION, size=size, workers=prefetch.workers)
+
+    def needs_render(model_id):
+        """Cheap: False when the index already holds a current outcome under the same archive identity."""
+        entry = archive.entries.get(model_id)
+        if not entry or entry['type'] != 'model':
+            return False
+        return args.force or not index.is_unchanged(model_id, size, entry_identity(archive, entry))
+
+    def upcoming():
+        found = []
+        for model_id in pending:
+            if len(found) >= prefetch.lookahead:
+                break
+            if needs_render(model_id):
+                found.append((model_id, archive.entries[model_id]['path']))
+        return found
+
+    done = number = 0
+    idle = False
     try:
-        for number, model_id in enumerate(ids, 1):
+        while True:
+            message = None
+            try:
+                message = control.get(timeout=0.25) if args.stdin and not pending else control.get_nowait()
+            except queue.Empty:
+                if not pending:
+                    if not args.stdin:
+                        break
+                    if not idle:
+                        index.save()
+                        emit(event='idle', rendered=done)
+                        idle = True
+                    root.update_idletasks()
+                    continue
+            else:
+                if message is None:   # stdin closed: the browser is done with this renderer
+                    break
+                pending = deque(model_id for model_id in message if model_id not in skip)
+                total, number, idle = len(pending), 0, False
+                continue
+            model_id = pending.popleft()
+            number += 1
+            if model_id in archive.entries and needs_render(model_id):
+                prefetch.plan((model_id, archive.entries[model_id]['path']), upcoming())
             started = time.perf_counter()
             entry = archive.entries.get(model_id)
-            status, reason, source_hash, notes, load_s, render_s, identity = 'ok', '', None, [], 0.0, 0.0, None
+            status, reason, source_hash, notes, load_s, render_s, wait_s, identity = 'ok', '', None, [], 0.0, 0.0, 0.0, None
             try:
                 if not entry or entry['type'] != 'model':
                     raise KeyError('not a model in this archive')
@@ -480,6 +713,8 @@ def run(args) -> int:
                         index.dirty = True
                     emit(event='model', id=model_id, status=index.get(model_id)['status'], skipped=True, n=number, total=total)
                     continue
+                emit(event='begin', id=model_id, n=number, total=total)
+                wait_s = prefetch.wait(model_id)
                 payload = loader.load(args.source, model_id, entry['path'], 'Highest', 0, None, True)
                 load_s = time.perf_counter() - started
                 png, notes = render_model(view, payload, size, supersample)
@@ -496,7 +731,7 @@ def run(args) -> int:
             index.record(model_id, status, source_hash, size, reason or '; '.join(notes), identity=identity)
             seconds = time.perf_counter() - started
             emit(event='model', id=model_id, status=status, reason=reason, seconds=round(seconds, 3),
-                 load_s=round(load_s, 3), render_s=round(render_s, 3), n=number, total=total)
+                 load_s=round(load_s, 3), render_s=round(render_s, 3), wait_s=round(wait_s, 3), n=number, total=total)
             done += 1
             # Bound memory: only the model being drawn stays decoded, texture cache is trimmed.
             loader.identity = None
@@ -506,6 +741,7 @@ def run(args) -> int:
             index.save_if_due()
             root.update_idletasks()
     finally:
+        prefetch.close()
         index.save()
         emit(event='done', rendered=done, total=total)
         try:
@@ -516,9 +752,13 @@ def run(args) -> int:
 
 
 class RendererProcess:
-    """One owned renderer child: JSON status lines arrive on ``events``; no shell command string."""
+    """One owned renderer child: JSON status lines arrive on ``events``; no shell command string.
 
-    def __init__(self, source, cache, ids=None, all_models=False, size=DEFAULT_SIZE, cwd=None, python=None, ids_dir=None):
+    A ``persistent`` renderer (--stdin) gets its queue through ``send`` and stays up, idle, until ``stop``."""
+
+    def __init__(self, source, cache, ids=None, all_models=False, size=DEFAULT_SIZE, cwd=None, python=None, ids_dir=None,
+                 persistent=False, skip=()):
+        self.persistent, self.skip = persistent, list(skip)
         self.events = queue.Queue()
         self.process = None
         self.finished = threading.Event()
@@ -534,7 +774,11 @@ class RendererProcess:
         folder.mkdir(parents=True, exist_ok=True)
         command = [str(self.python or sys.executable), '-m', 'rc2016.app.thumbnails', '--source', str(self.source),
                    '--cache', str(self.cache), '--size', str(self.size)]
-        if self.ids:
+        if self.persistent:
+            command.append('--stdin')
+        for model_id in self.skip:
+            command += ['--skip', str(model_id)]
+        if self.ids and not self.persistent:
             ids_file = self.ids_dir / f'queue-{os.getpid()}-{id(self)}.txt'
             ids_file.write_text('\n'.join(self.ids) + '\n', encoding='utf8')
             command += ['--ids-file', str(ids_file)]
@@ -544,9 +788,27 @@ class RendererProcess:
         self.command = command
         self.log = (folder / 'renderer.log').open('wb')
         self.process = subprocess.Popen(command, cwd=self.cwd, stdout=subprocess.PIPE, stderr=self.log,
+                                        stdin=subprocess.PIPE if self.persistent else subprocess.DEVNULL,
                                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         threading.Thread(target=self._read, daemon=True, name='thumbnail-reader').start()
+        if self.persistent and self.ids:
+            self.send(self.ids)
         return self
+
+    def send(self, ids) -> bool:
+        """Replace a persistent renderer's queue (most urgent first). False when it cannot take one (not persistent, or
+        it has exited): the caller starts a new renderer."""
+        if not self.persistent or not self.running():
+            return False
+        line = json.dumps(dict(ids=[str(model_id) for model_id in ids]), separators=(',', ':')) + '\n'
+        try:
+            with self.lock:
+                self.process.stdin.write(line.encode('utf8'))
+                self.process.stdin.flush()
+        except (OSError, ValueError):   # the pipe closed under us
+            return False
+        self.ids = list(ids)
+        return True
 
     def _read(self):
         try:
@@ -569,6 +831,11 @@ class RendererProcess:
         process = self.process
         if process is None:
             return
+        if self.persistent and process.stdin:
+            try:
+                process.stdin.close()   # ends the renderer's loop; the kill below makes sure
+            except OSError:
+                pass
         if process.poll() is None:
             if os.name == 'nt':
                 try:

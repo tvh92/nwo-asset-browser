@@ -191,5 +191,107 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(th.select_ids(args, models), ['id1', 'id2'])
 
 
+class RendererControlTests(unittest.TestCase):
+    def test_parse_control_reads_an_ids_list(self):
+        self.assertEqual(th.parse_control('{"ids": ["b", " a ", "b", ""]}\n'), ['b', 'a'])
+        self.assertEqual(th.parse_control('{"ids": []}'), [])
+        for line in ('', 'not json', '[1, 2]', '{"ids": "a"}', '{"other": []}'):
+            self.assertIsNone(th.parse_control(line))
+
+    def test_control_reader_ends_with_none(self):
+        import io
+        import queue
+        control = queue.Queue()
+        th._read_controls(io.BytesIO(b'{"ids": ["a"]}\njunk\n{"ids": ["c", "b"]}\n'), control)
+        self.assertEqual([control.get_nowait() for _ in range(3)], [['a'], ['c', 'b'], None])
+
+    def test_worker_count(self):
+        self.assertEqual(th.worker_count(0, cpus=16, frozen=False), 0)
+        self.assertEqual(th.worker_count(2, cpus=16, frozen=False), 2)
+        self.assertEqual(th.worker_count(99, cpus=16, frozen=False), th.MAX_WORKERS)
+        self.assertEqual(th.worker_count(-1, cpus=2, frozen=False), 1)
+        self.assertEqual(th.worker_count(-1, cpus=8, frozen=False), 3)
+        self.assertEqual(th.worker_count(-1, cpus=64, frozen=False), th.MAX_WORKERS)
+        self.assertEqual(th.worker_count(-1, cpus=64, frozen=True), 0)
+
+    def test_stdin_mode_needs_no_ids_and_skip_leaves_models_out(self):
+        args = th.parse_arguments(['--source', 's', '--cache', 'c', '--stdin', '--all', '--skip', 'b'])
+        self.assertTrue(args.stdin)
+        self.assertEqual(th.select_ids(args, [('p/a', 'a'), ('p/b', 'b'), ('p/c', 'c')]), ['a', 'c'])
+        self.assertTrue(th.parse_arguments(['--source', 's', '--cache', 'c', '--stdin']).stdin)
+
+    def test_prefetcher_without_workers_does_nothing(self):
+        prefetch = th.Prefetcher('unused', 0)
+        prefetch.plan(('a', 'p/a'), [('b', 'p/b')])
+        self.assertEqual((prefetch.futures, prefetch.wait('a')), ({}, 0.0))
+        prefetch.close()
+
+    def test_prefetcher_submits_units_in_order_cancels_dropped_ones_and_waits_for_the_current_model(self):
+        from concurrent.futures import Future
+        units = {'a': [('material', 'a1'), ('material', 'shared')], 'b': [('material', 'b1')],
+                 'c': [('material', 'c1'), ('material', 'shared')]}
+        prefetch = th.Prefetcher('unused', 0, lambda model_id, _path: units[model_id])
+        prefetch.pool, prefetch.lookahead = mock.Mock(), 4
+        made = {}
+
+        def submit(_fn, kind, argument):
+            made[argument] = Future()
+            return made[argument]
+
+        prefetch.pool.submit.side_effect = submit
+        prefetch.plan(('a', 'p/a'), [('b', 'p/b')])
+        self.assertEqual(list(made), ['a1', 'shared', 'b1'])   # the current model first
+        for name in ('a1', 'shared'):
+            made[name].set_running_or_notify_cancel()
+            made[name].set_result(1.0)
+        self.assertGreaterEqual(prefetch.wait('a'), 0.0)
+        prefetch.plan(('c', 'p/c'), [])   # 'b' fell out of the queue: its queued unit is cancelled
+        self.assertTrue(made['b1'].cancelled())
+        self.assertEqual(prefetch.pool.submit.call_count, 5)   # c1, and 'shared' again (a's run was collected)
+        made['c1'].set_running_or_notify_cancel()
+        made['c1'].set_result(1.0)
+        made['shared'].set_running_or_notify_cancel()
+        made['shared'].set_result(1.0)
+        prefetch.wait('c')
+        self.assertEqual((prefetch.futures, prefetch.units), ({}, {}))
+
+    def test_prefetch_units(self):
+        archive = mock.Mock(spec=['entries', 'asset_references', 'resolve', 'ids_of_type'])
+        archive.asset_references.return_value = [dict(path='x.material'), dict(path='t.texture'), dict(path='x.material')]
+        archive.resolve.return_value = ['k1', 'k2']
+        archive.entries = {'k1': dict(type='material'), 'k2': dict(type='materialgraph')}
+        self.assertEqual(th.prefetch_units(archive, 'm', 'p/m'), [('material', 'k1')])
+        archive.asset_references.side_effect = KeyError('m')
+        self.assertEqual(th.prefetch_units(archive, 'm', 'p/m'), [])
+        plain = mock.Mock(spec=['entries'])   # R&C 2016: the whole model load
+        self.assertEqual(th.prefetch_units(plain, 'm', 'p/m'), [('model', ('m', 'p/m'))])
+
+    def test_persistent_renderer_sends_its_queue_through_stdin(self):
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / 'echo.py'
+            script.write_text('import sys\nfor line in sys.stdin:\n    print(line.strip(), flush=True)\n', encoding='utf8')
+            proc = th.RendererProcess('src', Path(folder) / 'cache', ids=['a'], persistent=True, skip=['z'],
+                                      python=sys.executable)
+            real_popen = th.subprocess.Popen
+
+            def popen(_command, **kwargs):   # the renderer's options, an echo of stdin in its place
+                return real_popen([sys.executable, str(script)], **kwargs)
+
+            with mock.patch.object(th.subprocess, 'Popen', popen):
+                proc.start()
+            try:
+                self.assertIn('--stdin', proc.command)
+                self.assertEqual(proc.command[proc.command.index('--skip') + 1], 'z')
+                self.assertNotIn('--ids-file', proc.command)
+                self.assertEqual(proc.events.get(timeout=10), dict(ids=['a']))
+                self.assertTrue(proc.send(['c', 'b']))
+                self.assertEqual(proc.events.get(timeout=10), dict(ids=['c', 'b']))
+            finally:
+                proc.stop()
+            self.assertTrue(proc.finished.wait(10))   # the reader thread has closed the log
+            self.assertFalse(proc.send(['x']))
+            self.assertFalse(th.RendererProcess('s', 'c').send(['x']))
+
+
 if __name__ == '__main__':
     unittest.main()

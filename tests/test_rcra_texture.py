@@ -238,5 +238,31 @@ class RealTextureTests(unittest.TestCase):
         self.assertEqual(info['faces'], 6)
 
 
+class PreviewMipTests(unittest.TestCase):
+    def test_preview_mip_is_the_first_within_the_cap(self):
+        self.assertEqual(rt.preview_mip(2048, 1024, 12, cap=0), 0)
+        self.assertEqual(rt.preview_mip(2048, 1024, 12, cap=512), 2)
+        self.assertEqual(rt.preview_mip(512, 512, 10, cap=512), 0)
+        self.assertEqual(rt.preview_mip(2048, 2048, 2, cap=512), 1)   # the chain ends first: its last mip
+        self.assertEqual(rt.preview_mip(2048, 2048, 1, cap=512), 0)
+
+    def test_capped_read_takes_the_smaller_mip_of_each_slice(self):
+        data, _ = texture_asset(sd=(16, 16), sd_mips=3, hd_mips=0, array=2)
+        info = rt.parse_header(data)
+        payload = data[info['payload_offset']:]
+        sizes = rt.chain_sizes(71, 16, 16, 3)
+        source = FakeSource({'t.texture': data})
+        saved = rt.MAX_PREVIEW_SIZE
+        rt.MAX_PREVIEW_SIZE = 4
+        try:
+            texture = rt.read_top_mip(source, 't.texture', full=False)
+        finally:
+            rt.MAX_PREVIEW_SIZE = saved
+        stride = sum(sizes)
+        self.assertEqual((texture['width'], texture['height'], texture['full_size']), (4, 4, (16, 16)))
+        self.assertEqual(texture['slices'], [payload[i * stride + sizes[0] + sizes[1]:(i + 1) * stride] for i in range(2)])
+        self.assertEqual(rt.read_top_mip(source, 't.texture', full=False)['width'], 16)   # uncapped: the top mip
+
+
 if __name__ == '__main__':
     unittest.main()
