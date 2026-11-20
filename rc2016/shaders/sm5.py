@@ -620,6 +620,46 @@ class _Flow:
         self.active = active
 
 
+def never(graph, node, atoms_limit=12):
+    """True when the boolean ``node`` is false for every truth value of the non-boolean-operator nodes it combines (at most
+    ``atoms_limit`` of them): a tautology check over its b_and / b_or / b_not structure."""
+    atoms, seen, stack = [], set(), [node]
+    while stack:
+        i = stack.pop()
+        if i in seen:
+            continue
+        seen.add(i)
+        n = graph.nodes[i]
+        if n['op'] in ('b_and', 'b_or', 'b_not'):
+            stack.extend(n['args'])
+        elif n['op'] != 'const':
+            atoms.append(i)
+    if len(atoms) > atoms_limit:
+        return False
+
+    def value(i, truth, memo):
+        if i in truth:
+            return truth[i]
+        if i in memo:
+            return memo[i]
+        n = graph.nodes[i]
+        if n['op'] == 'const':
+            v = bool(n['value'])
+        elif n['op'] == 'b_not':
+            v = not value(n['args'][0], truth, memo)
+        elif n['op'] == 'b_and':
+            v = value(n['args'][0], truth, memo) and value(n['args'][1], truth, memo)
+        else:
+            v = value(n['args'][0], truth, memo) or value(n['args'][1], truth, memo)
+        memo[i] = v
+        return v
+    for bits in range(1 << len(atoms)):
+        truth = {a: bool(bits >> k & 1) for k, a in enumerate(atoms)}
+        if value(node, truth, {}):
+            return False
+    return True
+
+
 class Translator:
     FLOAT_OPS = {'add', 'mul', 'mad', 'div', 'min', 'max', 'sqrt', 'rsq', 'rcp', 'log', 'exp', 'frc', 'round_ne',
                  'round_ni', 'round_pi', 'round_z', 'dp2', 'dp3', 'dp4', 'sincos', 'eq', 'ne', 'lt', 'ge',
@@ -1267,6 +1307,25 @@ class Translator:
                     best = count if best is None else max(best, count)
         return best
 
+    def _final_iteration(self, start, close, flow, state):
+        """Run one more iteration of the loop; keep it and return True when afterwards no lane can continue (``_never``),
+        else restore the state from before it and return False. Exact either way: the iteration is predicated as any other."""
+        g = self.g
+        saved = (dict(self.regs), self.discard, self.alive, flow.active, dict(state), len(self.stores),
+                 dict(self.groupshared))
+        self._block(start + 1, close, flow, [state])
+        if self._never(g.op('b_and', g.op('b_not', state['broken']), self.alive)):
+            return True
+        regs, self.discard, self.alive, flow.active, old_state, stores, groupshared = saved
+        self.regs, self.groupshared = regs, groupshared
+        state.clear()
+        state.update(old_state)
+        del self.stores[stores:]
+        return False
+
+    def _never(self, node):
+        return never(self.g, node)
+
     def _loop(self, start, close, flow, loops):
         """Run the loop as a region entered by every lane, then merge it with select(entry, after, before).
 
@@ -1302,6 +1361,12 @@ class Translator:
                                                                       + predicated)
             if (iterations >= MAX_LOOP_ITERATIONS or predicated > limit
                     or len(g.nodes) - node_mark > 200000):
+                # Past the budget, one more predicated iteration is kept when no lane can continue after it (the loop's own
+                # exit test ends it, as a light list's loop over a constant word whose last bit was cleared).
+                if (predicated > limit and iterations < MAX_LOOP_ITERATIONS and len(g.nodes) - node_mark <= 200000
+                        and self._final_iteration(start, close, flow, state)):
+                    iterations += 1
+                    break
                 iterations = None
                 break
             self._block(start + 1, close, flow, [state])

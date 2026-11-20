@@ -157,6 +157,15 @@ def _translate(graph, data, source, program=None):
             bexp.replace_missing(source, graph, lit)
             recipes['forward']['lit'] = rsurface.fold_nan(rsurface.export_recipe(lit))
             results['forward_lit'] = lit
+            try:   # the program's own ambient light and probe reflections under the review probe (rcra_glsl)
+                ambient = rsurface.forward_ambient(graph, data, texture_sizes=lambda path: texture_size(source, path))
+            except (rsurface.Unsupported, ValueError, KeyError) as error:
+                limitations.append("Viewer: the forward program's own ambient light is not drawn (%s); the surface's "
+                                   "ambient light stands in." % error)
+            else:
+                bexp.replace_missing(source, graph, ambient)
+                recipes['forward']['ambient'] = rsurface.fold_nan(rsurface.export_recipe(ambient))
+                results['forward_ambient'] = ambient
     forward_technique = 'surface' in recipes and rsurface.forward_split_drawn(results['surface']['limitations'])
     if blend == 'opaque' and forward_technique and draw_flags(data):
         try:   # a forward technique's own specular term, drawn once per review light (rcra_glsl)
@@ -314,7 +323,8 @@ def _load_bindings(source, recipes, paths, hd, limitations):
 def material_receipt(source, material_key, hd=False):
     """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason."""
     surface, forward, blend, limitations, paths = translate(source, material_key)
-    recipes = [r for r in (surface, forward, (forward or {}).get('lit'), (surface or {}).get('own_specular')) if r]
+    recipes = [r for r in (surface, forward, (forward or {}).get('lit'), (forward or {}).get('ambient'),
+                           (surface or {}).get('own_specular')) if r]
     layouts, textures = _load_bindings(source, recipes, paths, hd, limitations)
     emission = surface['terms']['emission'] if surface else forward['terms']['colour.r']
     if surface:   # a forward technique's unlit colour glows as emission does (bloom.self_lit reads one output)
@@ -328,7 +338,7 @@ def material_receipt(source, material_key, hd=False):
     ambient = class_ambient(source, surface, limitations) if lit else None
     receipt = dict(kind='rcra', status='ready', blend=blend, surface=surface, forward=forward, layouts=layouts,
                    limitations=limitations, nodes=recipe['nodes'], outputs=dict(emission=emission), lighting=lit,
-                   ambient=ambient, engine_root=str(source.root) if ambient else None,
+                   ambient=ambient, engine_root=str(source.root) if ambient or (forward or {}).get('ambient') else None,
                    translation_sha256=rcra_glsl.receipt_sha256(surface, forward, blend, layouts, lit, ambient))
     return receipt, textures
 

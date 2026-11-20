@@ -2084,7 +2084,8 @@ class ModelViewport(_TkFrame):
         """Bind the review probe and the engine's BRDF lookup for a Rift Apart receipt with an ``ambient`` recipe
         (rc2016.viewer.rcra_glsl.ambient_source) and set uRcraProbeOn; off while they are not ready."""
         sh = self._shading
-        textures = self._rcra_ambient_textures(receipt) if receipt.get('ambient') else None
+        from rc2016.viewer.rcra_glsl import uses_probe
+        textures = self._rcra_ambient_textures(receipt) if uses_probe(receipt) else None
         if u.get('uRcraProbeOn', -1) != -1:
             sh.glUniform1i(u['uRcraProbeOn'], 1 if textures else 0)
         if not textures:

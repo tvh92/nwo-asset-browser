@@ -47,7 +47,7 @@ import hashlib
 import json
 import math
 
-EMITTER_VERSION = 5
+EMITTER_VERSION = 6
 PASS_UNIFORM = 'uRcraPass'   # forward programs: 0 the multiply pass (background factor), 1 the colour pass
 COLOUR_VARYING = 'vRcraColour'
 GEOMETRY = {'TEXCOORD.x': 'vUV.x', 'TEXCOORD.y': 'vUV.y', 'TEXCOORD1.x': 'vUV1.x', 'TEXCOORD1.y': 'vUV1.y',
@@ -70,7 +70,8 @@ SCENE_UNIFORMS = ('uSceneColour', 'uHasSceneColour', 'uSceneDepth', 'uHasSceneDe
 AMBIENT_UNIFORMS = ('uRcraProbe', 'uRcraBrdf', 'uRcraProbeOn')   # the game's ambient light: probe cube, BRDF lookup, ready
 PROBE_BINDING, BRDF_BINDING = 'g_EnvProbeDefault', 'g_BrdfLookup'
 BRDF_SIZE = 64   # rc2016.games.rcra.engine_tables.SIZE
-AMBIENT_LAYOUTS = {PROBE_BINDING: dict(kind='probe'), BRDF_BINDING: dict(kind='lut')}
+PROBE_ARRAY_BINDING = 'g_EnvProbeArray'   # the forward programs' local probes: the one review probe, cube 0
+AMBIENT_LAYOUTS = {PROBE_BINDING: dict(kind='probe'), PROBE_ARRAY_BINDING: dict(kind='probe'), BRDF_BINDING: dict(kind='lut')}
 LIMITATION = ('Viewer: the draw is unmirrored (render flag 0x10000 clear); vertex colour is the '
               'model\'s colour section squared, as the engine squares it, with its bytes read in R, G, B, A order (the '
               'game\'s view format is not read), 1 without one, and no per-object paint; the review rig and environment '
@@ -175,6 +176,8 @@ class _Emitter:
         name = '%ss%d' % (self.prefix, i)
         sampler = uniform(binding)
         if layout['kind'] == 'probe':   # the review probe at the program's own lod (sample_l: args 0 to 2, lod arg 4)
+            if binding == PROBE_ARRAY_BINDING and self.recipe['nodes'][n['args'][3]].get('value') != 0.0:
+                raise ValueError('The probe array is read at a cube other than 0')
             expr = 'rcraProbe(vec3(%s, %s, %s), %s)' % (u, v, self.value(n['args'][2]), self.value(n['args'][4]))
             self.lines.append('    vec4 %s = %s;' % (name, expr))
             self.samples[i] = name
@@ -324,6 +327,22 @@ def ambient_source(recipe):
         recipe.get('lighting_class', 0), recipe.get('offset', 0), AMBIENT_SIGNATURE, body)
 
 
+def uses_probe(receipt):
+    """True when a receipt's program reads the review probe: a class ambient recipe, or a forward ambient term."""
+    forward = receipt.get('forward') or {}
+    return bool(receipt.get('ambient') or (forward.get('ambient') and forward.get('lit')
+                                           and receipt.get('blend') in ('blended', 'additive')))
+
+
+def forward_ambient_lines(recipe, layouts):
+    """Statements computing rcraFwdAmbient, the forward program's ambient term (surface.forward_ambient), at the top
+    level of main: its material textures as the forward program's, its probe and BRDF reads as rcraProbe / rcraBrdf."""
+    emitter = _Emitter(recipe, dict(layouts, **AMBIENT_LAYOUTS), 'm')
+    t = emitter.term
+    value = 'vec3(%s, %s, %s)' % (t('ambient.r'), t('ambient.g'), t('ambient.b'))
+    return emitter.lines + ['    vec3 rcraFwdAmbient = %s;' % value]
+
+
 def light_source(recipe, ambient=None):
     """GLSL of rcraLight and rcraClassLit for a lighting recipe: the class's apply program, one statement per node,
     returning albedo x diffuse x rKd + specular; with an ``ambient`` recipe, rcraGameAmbient too, which rcraClassLit uses
@@ -336,7 +355,7 @@ def light_source(recipe, ambient=None):
     if any('rcraInf' in line or 'rcraNan' in line for line in lines):
         lines.insert(0, NON_FINITE_LINE)
     body = '\n'.join(lines + ['    return rA * %s * rKd + %s;' % (diffuse, specular)])
-    extra = AMBIENT_HELPERS + ambient_source(ambient) if ambient else ''
+    extra = ambient_source(ambient) if ambient else ''
     return extra + '\n// Lighting class %d: apply program at 0x%X, translated (rc2016.games.rcra.lighting)\n%s {\n%s\n}\n%s' % (
         recipe.get('lighting_class', 0), recipe.get('offset', 0), LIGHT_SIGNATURE, body,
         CLASS_LIT % dict(ambient=GAME_AMBIENT if ambient else RIG_AMBIENT))
@@ -501,6 +520,9 @@ def fragment_source(receipt):
         own = receipt['forward'].get('lit') if blend in ('blended', 'additive') else None
         if own:   # the program's own key-light term per review light (surface.forward_lighting)
             body += forward_light_lines(own, layouts)
+            fwd_ambient = receipt['forward'].get('ambient')
+            if fwd_ambient:   # the program's own ambient light and probe reflections (surface.forward_ambient)
+                body += forward_ambient_lines(fwd_ambient, layouts)
     if blend == SHELL_BLEND:   # the layer is culled past the strand (vFurShell.w), its coverage is its alpha
         body.insert(0, '    if (vFurShell.w > 0.5) discard;')
     lighting = receipt.get('lighting') if surface else None
@@ -517,6 +539,9 @@ def fragment_source(receipt):
         # the program lights itself: its own term per light, plus the surface's ambient light (the program's is 0)
         lit = ('rcraOwn + (uLightingEnabled ? rcraAmbient(rcraNormal, V, rcraAlbedo, rcraF0, rcraGloss, rcraOcclusion) '
                ': vec3(0.0))' if surface else 'rcraOwn')
+        if receipt['forward'].get('ambient'):   # the program's own ambient replaces the surface's once the probe is ready
+            rig = ('rcraAmbient(rcraNormal, V, rcraAlbedo, rcraF0, rcraGloss, rcraOcclusion)' if surface else 'vec3(0.0)')
+            lit = 'rcraOwn + (uLightingEnabled ? (uRcraProbeOn ? rcraFwdAmbient : %s) : vec3(0.0))' % rig
     if blend == 'opaque':
         if surface is None:
             raise ValueError('An opaque receipt needs a surface recipe')
@@ -545,6 +570,8 @@ def fragment_source(receipt):
     if scene:
         declarations += 'uniform sampler2D uSceneColour; uniform vec4 uSceneDepthInfo;   // frame copy, viewport size\n'
     light = light_source(lighting, receipt.get('ambient')) if lighting else ''
+    if uses_probe(receipt):
+        light = AMBIENT_HELPERS + light
     if any('rcraInf' in line or 'rcraNan' in line for line in body) or 'rcraInf' in light or 'rcraNan' in light:
         declarations += NON_FINITE_DECLARATION
     if any('rcraInf' in line or 'rcraNan' in line for line in body):

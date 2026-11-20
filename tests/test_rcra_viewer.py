@@ -376,6 +376,19 @@ class ViewportDrawTests(unittest.TestCase):
                 self.assertNotEqual(uniforms[name], -1, name)
         self._link(CLANK_BODY, check)
 
+    def test_forward_ambient_links_with_the_probe_uniforms(self):
+        """A lit glass carries its forward program's ambient term; the program computes rcraFwdAmbient and keeps the
+        probe and BRDF lookup uniforms live."""
+        def check(view, receipt, _textures):
+            self.assertTrue(receipt['forward'].get('ambient'))
+            self.assertTrue(receipt.get('engine_root'))
+            self.assertTrue(rcra_glsl.uses_probe(receipt))
+            self.assertIn('rcraFwdAmbient', rcra_glsl.fragment_source(receipt)['source'])
+            _program, uniforms = view._shading.native_program(receipt, {})
+            for name in rcra_glsl.AMBIENT_UNIFORMS:
+                self.assertNotEqual(uniforms[name], -1, name)
+        self._link(DOME, check)
+
     def test_cube_material_links_and_uploads_its_cube_map(self):
         def check(view, _receipt, textures):
             cube = next(t for t in textures.values() if t.get('cube'))

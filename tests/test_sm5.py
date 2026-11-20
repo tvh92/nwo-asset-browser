@@ -1,5 +1,6 @@
 """DXBC decoding and SM5 -> DAG translation, on programs compiled at test time by Windows' d3dcompiler_47 (skipped elsewhere)."""
 import ctypes
+import math
 import os
 import unittest
 
@@ -148,6 +149,57 @@ class TranslatorTests(unittest.TestCase):
         self.assertEqual(bound.status(), 'ready')
         value = sm5.evaluate(bound.graph, [bound.output(0, 0)], {'C.base': 4.0})[bound.output(0, 0)]
         self.assertEqual(value, 4.0)
+
+    def test_list_loop_with_a_break_ends_when_its_word_runs_out(self):
+        """A light list's loop: over the set bits of a constant word, a body too large for predicated unrolling, and a
+        data-dependent break. Its second iteration is predicated, but no lane can continue after it (the word's last bit
+        is cleared), so it is kept and the loop translates; the value matches the HLSL at both sides of the break."""
+        source = """cbuffer C : register(b0) { uint word; };
+            float4 main(float4 a : TEXCOORD0) : SV_TARGET {
+                float s = 0; uint w = word;
+                [loop] while (w != 0) {
+                    uint b = firstbitlow(w); w ^= 1u << b;
+                    float t = a.x * (b + 1);
+                    [unroll] for (int k = 0; k < 24; k++) { t = sin(t) * a.y + cos(t * a.z); }
+                    s += t;
+                    if (s > a.w) break;
+                }
+                return float4(s, 0, 0, 1); }"""
+        shader = dxbc.shader(compile_hlsl(source))
+
+        class Word(sm5.Bindings):
+            def constant(self, name):
+                return graph.const('i', 1) if name == 'C.word' else None
+        translator = sm5.Translator(shader, Word())
+        graph = translator.g
+        bound = translator.run()
+        self.assertEqual(bound.status(), 'ready')
+        self.assertTrue(any(n == 2 for _p, n in bound.loops))
+
+        def reference(x, y, z):
+            t = x
+            for _k in range(24):
+                t = math.sin(t) * y + math.cos(t * z)
+            return t
+        for w in (-10.0, 10.0):   # the break taken or not
+            inputs = {'TEXCOORD.x': 0.3, 'TEXCOORD.y': 0.7, 'TEXCOORD.z': 1.1, 'TEXCOORD.w': w}
+            value = sm5.evaluate(bound.graph, [bound.output(0, 0)], inputs)[bound.output(0, 0)]
+            self.assertAlmostEqual(value, reference(0.3, 0.7, 1.1), places=4)
+        original = sm5.Translator._final_iteration
+        try:   # without the final-iteration check the same loop stays unknown
+            sm5.Translator._final_iteration = lambda *a: False
+            translator = sm5.Translator(shader, Word())
+            graph = translator.g
+            self.assertEqual(translator.run().status(), 'partial')
+        finally:
+            sm5.Translator._final_iteration = original
+
+    def test_never_is_a_tautology_check(self):
+        g = sm5.Graph()
+        x, y = g.input('X', 'b'), g.input('Y', 'b')
+        self.assertTrue(sm5.never(g, g.op('b_and', x, g.op('b_not', x))))
+        self.assertTrue(sm5.never(g, g.op('b_not', g.op('b_or', x, g.op('b_not', x)))))
+        self.assertFalse(sm5.never(g, g.op('b_and', x, g.op('b_not', y))))
 
     def test_loops_with_an_early_break_end_at_their_count(self):
         # The counter of an active lane is exact, so the loop folds even though some lanes leave it early.

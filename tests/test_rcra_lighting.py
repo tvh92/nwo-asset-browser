@@ -448,6 +448,39 @@ class RealLightingTests(unittest.TestCase):
             np.testing.assert_allclose(out.reshape(-1, 3), np.broadcast_to([0.5, 1.0, 2.0], (out.shape[0] * out.shape[1], 3)),
                                        rtol=1e-4)
 
+    def test_forward_ambient_reads_one_review_probe(self):
+        """The dome's forward ambient term: the probe lists translate with one review probe (the list loop's final
+        iteration), its reads are the review probe, the probe array at cube 0 and the BRDF lookup, and the probe array
+        looks along the same direction as the default probe's reflection (no parallax correction)."""
+        from collections import defaultdict
+        from rc2016.games.rcra import surface
+        from rc2016.games.rcra.material import _graphs, _material_key
+        from rc2016.games.rcra.texture import texture_size
+        from rc2016.shaders import sm5
+        key = _material_key(self.source, DOME)
+        graph = self.source.asset_data(self.key(list(_graphs(self.source, key))[0], 'materialgraph'))
+        result = surface.forward_ambient(graph, self.source.asset_data(key), lambda p: texture_size(self.source, p))
+        recipe = surface.export_recipe(result)
+        nodes = recipe['nodes']
+        samples = [n for n in nodes if n['op'] == 'sample' and n['binding'] in surface.AMBIENT_ENGINE]
+        self.assertEqual({n['binding'] for n in samples}, set(surface.AMBIENT_ENGINE))
+        for n in samples:
+            if n['binding'] == 'g_EnvProbeArray':
+                self.assertEqual(nodes[n['args'][3]].get('value'), 0.0)
+        g = sm5.Graph()
+        g.nodes = [dict(n) for n in nodes]
+        sharp = [n for n in samples if n['binding'] != 'g_BrdfLookup' and nodes[n['args'][4]].get('value') != 5.0]
+        rng = random.Random(4)
+        for _trial in range(4):
+            values = defaultdict(float, {name: rng.uniform(0.1, 0.9) for name in recipe['inputs']})
+            values.update({'VIEW.x': rng.uniform(-1, 1), 'VIEW.y': rng.uniform(-1, 1), 'VIEW.z': rng.uniform(1, 3)})
+            roots = [a for n in sharp for a in n['args'][:3]]
+            out = sm5.evaluate(g, roots, values, lambda n, a: [0.5, 0.5, 0.5, 1.0])
+            directions = [_unit([out[a] for a in n['args'][:3]]) for n in sharp]
+            for d in directions[1:]:
+                for x, y in zip(d, directions[0]):
+                    self.assertAlmostEqual(x, y, delta=1e-3)
+
     def test_class_recipes_are_portable_and_read_their_fields(self):
         for cls in lighting.CLASSES:
             recipe = lighting.direct(GAME, cls)

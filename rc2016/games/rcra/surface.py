@@ -1032,8 +1032,9 @@ def _prune_nan(g, terms):
     return pruned
 
 
-def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, what):
-    """The result dict, after checking that every term is a portable float expression of geometry and material textures."""
+def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, what, engine=()):
+    """The result dict, after checking that every term is a portable float expression of geometry and material textures
+    (and of the engine textures in ``engine``, kept as sample nodes for the renderer and not listed as material textures)."""
     roots = list(terms.values())
     reach = g.reachable(roots)
     bad = sorted({g.nodes[i]['op'] for i in reach} - PORTABLE_OPS)
@@ -1077,6 +1078,8 @@ def _portable(g, terms, bindings, graph_data, material_data, tr, limitations, wh
     for i in reach:
         n = g.nodes[i]
         if n['op'] == 'sample':
+            if n['binding'] in engine:
+                continue
             if n['binding'] not in units:
                 raise Unsupported('%s samples engine texture %s' % (what, n['binding']))
             if n.get('dimension') in CUBE_DIMENSIONS:
@@ -1554,6 +1557,131 @@ def forward_lighting(graph_data, material_data, texture_sizes=None):
     result = _portable(g, terms, bindings, graph_data, material_data, tr, [FORWARD_LIGHT_NOTE], 'Forward light')
     _check_linear_in_light(result)
     return result
+
+
+# The forward programs' own ambient light and probe reflections (forward_ambient), for the viewer's review probe
+# (rc2016.games.rcra.probe): the program translated with the key light off and the environment as its only light. The
+# probe lists hold one review probe that covers everything (REVIEW_PROBE: identity transform, no extents or falloff, so
+# its weight is 1, proxy planes FAR away each way, so no parallax correction, cube 0); the z bins and lookup word select it.
+# The light grid hands every point to the probe (lighting.GRID_PROBE_WORD), and the probe cube, the probe array and the
+# BRDF lookup stay sample nodes. The term is the colour minus the colour with every probe read 0, and must be linear in
+# the probe.
+PROBE_FAR = 1.0e6
+REVIEW_PROBE = {'m_WorldToObjRot0': (1.0, 0.0, 0.0), 'm_FadeAtten': (1.0,), 'm_WorldToObjRot1': (0.0, 1.0, 0.0),
+                'm_WorldToObjRotZFlip': (1.0,), 'm_WorldToObjTrans': (0.0, 0.0, 0.0), 'm_Flags': (0,),
+                'm_RcpExtents': (0.0, 0.0, 0.0), 'm_CubeArrayIndex': (0.0,), 'm_RcpFalloffPos': (0.0, 0.0, 0.0),
+                'm_ProxyDistNegX': (-PROBE_FAR,), 'm_RcpFalloffNeg': (0.0, 0.0, 0.0), 'm_ProxyDistNegY': (-PROBE_FAR,),
+                'm_ProxyDistPos': (PROBE_FAR, PROBE_FAR, PROBE_FAR), 'm_ProxyDistNegZ': (-PROBE_FAR,),
+                'm_Offset': (0.0, 0.0, 0.0), 'm_ZBinMinMax': (0,)}
+PROBE_BUFFER, PROBE_LOOKUP, PROBE_ZBINS = 'g_EnvProbeEnvs', 'g_EnvProbeLookupView', 'g_EnvProbeZBinView'
+PROBE_SAMPLED = ('g_EnvProbeDefault', 'g_EnvProbeArray')
+AMBIENT_ENGINE = PROBE_SAMPLED + ('g_BrdfLookup',)
+FORWARD_AMBIENT_NOTE = ("Viewer, Shared HDRI lighting: the forward program's own ambient light and probe reflections, with "
+                        "the review environment as one probe that covers everything (no parallax correction) and as the "
+                        "default probe, the engine's BRDF lookup, no light grid (every cell hands its points to the probe), "
+                        "screen-space reflections or ambient fill, and m_LightGridIntensity 1 (review values).")
+
+
+def probe_words(reflection):
+    """{byte offset: u32 bits} of REVIEW_PROBE in the program's g_EnvProbeEnvs layout, or None without one."""
+    layout = reflection.constant_buffer(PROBE_BUFFER) if reflection is not None else None
+    if layout is None or not layout.variables or not layout.variables[0].members:
+        return None
+    words = {}
+    for name, at, _member in layout.variables[0].members:
+        for k, value in enumerate(REVIEW_PROBE.get(name, ())):
+            words[at + 4 * k] = value if isinstance(value, int) else sm5.float_bits(value)
+    return words
+
+
+class _ForwardAmbientBindings(_ForwardBindings):
+    """_ForwardBindings with one review probe in the lists and the ambient sources of forward_ambient."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.probe = probe_words(args[2] if len(args) > 2 else kwargs.get('reflection'))
+
+    def constant(self, name):
+        from rc2016.games.rcra import lighting
+        if name == 'GlobalWorldCBuffer.m_EnvProbeLookupWordCount':
+            return self.graph.const('i', 1)
+        if name in lighting.AMBIENT_REVIEW:
+            return self.graph.const('f', lighting.AMBIENT_REVIEW[name])
+        return super().constant(name)
+
+    def resource(self, graph, op, binding, args):
+        from rc2016.games.rcra import lighting
+        if binding in AMBIENT_ENGINE and op.startswith('sample'):
+            return None
+        if binding == PROBE_ZBINS:
+            return [graph.const('i', 0xFFFFFFFF)] * 4
+        if binding == PROBE_LOOKUP:
+            return [graph.const('i', 1)] * 4
+        if binding == lighting.GRID_LOOKUP:
+            return [graph.const('i', lighting.GRID_PROBE_WORD)] * 4
+        if binding == PROBE_BUFFER and op == 'ld_structured' and self.probe is not None:
+            offset = graph.value(args[4]) if len(args) > 4 else None
+            if offset is not None:
+                return [graph.const('i', self.probe.get(offset + 4 * c, 0)) for c in range(4)]
+        return super().resource(graph, op, binding, args)
+
+
+def forward_ambient(graph_data, material_data, texture_sizes=None):
+    """The forward program's ambient term: terms ambient.r/g/b (the colour minus the colour with every probe read 0), with
+    sample nodes on AMBIENT_ENGINE. Raises Unsupported for an unlit material, one whose colour reads no probe or reads the
+    scene behind, or one not linear in the probe."""
+    from rc2016.games.rcra.material import draw_flags
+    flags = draw_flags(material_data)
+    if not flags:
+        raise Unsupported('The material is unlit: its forward program reads no light')
+    shader = rshaders.pass_shader(graph_data, rshaders.SLOT_FORWARD)
+    bindings = _ForwardAmbientBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
+                                       rshaders.material_units(graph_data, material_data), texture_sizes)
+    if bindings.probe is None:
+        raise Unsupported('The forward program has no probe list')
+    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
+    translator = sm5.Translator(shader, bindings)
+    bindings.graph = translator.g
+    tr = _run(translator)
+    g = tr.graph
+    target = [tr.outputs.get(('o', 0, c)) for c in range(3)]
+    if None in target:
+        raise Unsupported('Forward program does not write a colour target')
+    colour = [g.cast(x, 'f') for x in target]
+    reach = g.reachable(colour)
+    if not any(g.nodes[i]['op'] == 'sample' and g.nodes[i].get('binding') in PROBE_SAMPLED for i in reach):
+        raise Unsupported('The forward colour reads no probe')
+    if {g.nodes[i]['name'] for i in reach if g.nodes[i]['op'] == 'input'} & set(BACKGROUND_INPUTS):
+        raise Unsupported('The forward colour reads the scene behind (%s)' % BACKGROUND_BUFFER)
+    dark = _substitute(g, dict(enumerate(colour)), {i: g.const('f', 0.0) for i in reach if g.nodes[i]['op'] == 'channel'
+                                                    and g.nodes[g.nodes[i]['args'][0]].get('binding') in PROBE_SAMPLED})
+    terms = {'ambient.' + c: g.op('add', colour[k], g.op('neg', dark[k])) for k, c in enumerate('rgb')}
+    result = _portable(g, terms, bindings, graph_data, material_data, tr, [FORWARD_AMBIENT_NOTE], 'Forward ambient',
+                       engine=AMBIENT_ENGINE)
+    _check_linear_in_probe(result)
+    return result
+
+
+def _check_linear_in_probe(result, trials=8):
+    """Raise Unsupported unless the ambient term doubles with the probe's radiance, at random inputs and texels."""
+    import random
+    rng = random.Random(9)
+    recipe = export_recipe(result)
+    texels = {}
+    for _trial in range(trials):
+        texels.clear()
+        values = {name: rng.uniform(-1.0, 1.0) for name in recipe['inputs']}
+        values['SV_IsFrontFace'] = True
+        out = []
+        for scale in (1.0, 2.0):
+            def sample(node, _args, scale=scale):
+                texel = texels.setdefault(node.get('binding'), [rng.uniform(0.05, 0.95) for _ in range(4)])
+                return [x * scale for x in texel] if node.get('binding') in PROBE_SAMPLED else texel
+            out.append(evaluate_recipe(recipe, values, sample))
+        for c in 'rgb':
+            a, b = out[0]['ambient.' + c], out[1]['ambient.' + c]
+            if math.isfinite(a) and math.isfinite(b) and abs(b - 2.0 * a) > 1e-3 * max(1.0, abs(b)):
+                raise Unsupported('The forward ambient term is not linear in the probe')
 
 
 def _check_linear_in_light(result, trials=8, through_zero=False):
