@@ -54,6 +54,9 @@ HELP = {
               "the window maximised and the Browser split in its default place. The game folder, output folder, Python and "
               "Blender paths are kept. No files are deleted."),
     "prefixes": "Transform-only mode: only extract clips whose names start with these words.",
+    "cache": ("The app's disk cache: shader translations, decoded textures, thumbnails, archive indexes and level data. "
+              "Clear cache deletes all of it; everything is rebuilt when needed, so models and thumbnails load slowly at "
+              "first. Settings are kept."),
     "blend_scene": ("Writes one validated Blender scene (.blend) per model: the RC PS4 game shader, the shared review "
                     "lighting, the HDRI, the camera and render region framing for quick rendering, and every animation "
                     "as an action. Slow, and needs Blender.\n\nWhile it is on, the other export formats are not written. "
@@ -627,6 +630,14 @@ class AssetBrowserApp:
         self.prefix_entry.grid(row=1, column=1, sticky="ew", padx=6, pady=4)
         ttk.Label(advanced, text="transform only; comma-separated", style="Muted.TLabel").grid(row=1, column=2, sticky="w")
         self._tip(HELP["prefixes"], self.prefix_label, self.prefix_entry)
+        cache_label = ttk.Label(advanced, text="Disk cache  ⓘ")
+        cache_label.grid(row=2, column=0, sticky="w", pady=4)
+        self.cache_size_var = tk.StringVar(value="")
+        cache_size = ttk.Label(advanced, textvariable=self.cache_size_var, style="Muted.TLabel")
+        cache_size.grid(row=2, column=1, sticky="w", padx=6, pady=4)
+        self.clear_cache_button = ttk.Button(advanced, text="Clear cache…", command=self._clear_cache)
+        self.clear_cache_button.grid(row=2, column=2, sticky="e", pady=4)
+        self._tip(HELP["cache"], cache_label, cache_size, self.clear_cache_button)
 
         display = ttk.Frame(window, padding=(12, 6))
         display.grid(row=4, column=0, sticky="ew")
@@ -662,6 +673,69 @@ class AssetBrowserApp:
         window.geometry(f"+{x}+{y}")
         window.lift()
         window.focus_set()
+        self._refresh_cache_size()
+
+    def _refresh_cache_size(self) -> None:
+        """Fill the Options window's cache size (counted on a worker: the folder can hold many thousand files)."""
+        from rc2016.app.cache import cache_usage, size_text
+        self.cache_size_var.set("counting…")
+        found = []
+
+        def count() -> None:
+            found.append(cache_usage())
+
+        def show() -> None:
+            if worker.is_alive():
+                self.root.after(100, show)
+            elif found:
+                size, files = found[0]
+                self.cache_size_var.set(f"{size_text(size)} in {files:,} files" if files else "empty")
+        worker = threading.Thread(target=count, daemon=True)
+        worker.start()
+        self.root.after(100, show)
+
+    def _clear_cache(self) -> None:
+        """Options… > Clear cache: after a confirmation, stop what writes to the cache (the thumbnail renderer, the
+        translation workers), delete all of it on a worker and drop the in-memory copies that point at it."""
+        from rc2016.app.cache import clear_cache, size_text
+        size = self.cache_size_var.get()
+        if not self.messagebox.askyesno(
+                "Clear cache",
+                "Delete the app's whole disk cache" + (f" ({size})" if size and size[0].isdigit() else "") + "?\n\n"
+                "This removes the shader translations, decoded textures, thumbnails, archive indexes and level data. "
+                "Everything is rebuilt when needed, so models and thumbnails load slowly at first. Settings are kept.",
+                parent=self.options_window, icon="warning"):
+            return
+        browser = getattr(self, "browser", None)
+        if browser is not None:
+            browser.gallery.stop_renderer()
+            browser.source_loader.close_translation_pool()
+            loader = browser.source_loader
+            with loader.lock:
+                loader.identity = None   # recent models re-decode, reading the (now empty) caches
+                loader.texture_cache.clear()
+                loader.preview_cache.clear()
+        self.clear_cache_button.configure(state="disabled")
+        self.cache_size_var.set("clearing…")
+        done = []
+        worker = threading.Thread(target=lambda: done.append(clear_cache()), daemon=True)
+        worker.start()
+
+        def finish() -> None:
+            if worker.is_alive():
+                self.root.after(100, finish)
+                return
+            self.clear_cache_button.configure(state="normal")
+            result = done[0] if done else dict(bytes=0, files=0, left=["(failed)"])
+            message = f"Cache cleared: {size_text(result['bytes'])} in {result['files']:,} files deleted."
+            if result["left"]:
+                message += " Still in use (deleted next time): " + ", ".join(result["left"]) + "."
+            self._append_log(message, "muted")
+            if browser is not None:
+                browser.gallery.cache_root = None   # a fresh thumbnail index on the next refresh
+                browser.gallery.invalidate()
+            self._refresh_cache_size()
+        self.root.after(100, finish)
 
     def _reset_to_defaults(self) -> None:
         """Every option, toggle and window setting back to its first-start value. The folder and program paths stay."""
