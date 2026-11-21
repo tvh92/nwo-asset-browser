@@ -580,8 +580,11 @@ class ProgramPlaceCacheTests(unittest.TestCase):
         def __init__(self):
             self.store = {}
 
-        def key(self, data, graphs, variant=''):
-            return repr((data, graphs, variant))
+        def key(self, data, graphs, variant='', own_code=False):
+            return repr((data, graphs, variant, own_code))
+
+        def has(self, key):
+            return key in self.store
 
         def get(self, key):
             return self.store.get(key)

@@ -539,7 +539,7 @@ def cached_recipes(source, graph_data, material_data, layout):
     from rc2016.games.rcra.viewer_materials import _floats
     disk = getattr(source, 'translation_disk_cache', None)
     variant = 'rcra-vertex:%s:%s' % (CODE_SHA256, json.dumps(layout, sort_keys=True))
-    key = disk.key(bytes(material_data), [bytes(graph_data)], variant) if disk is not None and CODE_SHA256 else None
+    key = disk.key(bytes(material_data), [bytes(graph_data)], variant, own_code=True) if disk is not None and CODE_SHA256 else None
     stored = _floats(disk.get(key), decode=True) if key else None
     if stored is not None:
         return stored

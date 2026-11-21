@@ -549,6 +549,21 @@ class ModelViewport(_TkFrame):
             self._draw()
             return False
 
+    MATERIAL_KEYS = ('textures', 'texture_list', 'effect_preview', 'materials')
+
+    def set_materials(self, materials):
+        """The materials of the mesh shown (loader.load_materials, after a load with ``materials_pending``): its textures,
+        texture list, effect preview and material rows replace the neutral preview, keeping the camera, pose and clip."""
+        if self._payload is None:
+            return
+        self._release_textures()
+        self._payload = dict(self._payload, materials_pending=False,
+                             **{key: materials[key] for key in self.MATERIAL_KEYS if key in materials})
+        if hasattr(self, '_draw_list'): self._draw_list = None
+        if hasattr(self, '_material_ops'): self._material_ops.clear()
+        self.__dict__.pop('_program_memo', None)
+        self._draw()
+
     @property
     def can_animate(self):
         """Skinned playback needs the GLSL path."""

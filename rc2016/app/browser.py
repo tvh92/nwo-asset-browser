@@ -301,7 +301,10 @@ class AssetBrowser:
         self.source_work=LatestWork()
         # Clip libraries load after the mesh is shown (SourcePreviewLoader.load_animation).
         self.clip_list_work=LatestWork();self.source_output_root=None
+        # Materials load after the geometry is shown (SourcePreviewLoader.load_materials), translating in parallel.
+        self.material_work=LatestWork()
         self.source_loader=SourcePreviewLoader()
+        self.source_loader.parallel_translation=True
         self.source_selection=None
         self.source_payload=None
         self.refs, self.metadata, self.details = [], {}, None
@@ -753,8 +756,9 @@ class AssetBrowser:
             return
         self._stop_animation(reset=True)
         self.clip_list_work.submit(lambda:None)   # drop the previous model's pending clip list
+        self.material_work.submit(lambda:None)    # and its materials
         self.source_output_root=self._output_root()
-        self.source_work.submit(self.source_loader.load,source_root,model_id,source_path,'Highest',0,self.source_output_root,True)
+        self.source_work.submit(self._load_geometry,source_root,model_id,source_path,'Highest',0,self.source_output_root)
 
     def _output_root(self):
         # The pipeline's reference index there links models to their animsets.
@@ -767,8 +771,30 @@ class AssetBrowser:
         self._stop_animation(reset=True)
         self.viewport.clear('Loading source look/LOD…')
         self.clip_list_work.submit(lambda:None)
+        self.material_work.submit(lambda:None)
         self.source_output_root=self._output_root()
-        self.source_work.submit(self.source_loader.load,root,ident,path,self.native_lod.get(),int(self.native_look.get()),self.source_output_root,True)
+        self.source_work.submit(self._load_geometry,root,ident,path,self.native_lod.get(),int(self.native_look.get()),self.source_output_root)
+
+    def _load_geometry(self,root,ident,path,lod,look,output_root):
+        """The source worker's load: geometry first; animations and materials follow on their own workers."""
+        return self.source_loader.load(root,ident,path,lod,look,output_root,True,defer_materials=True)
+
+    def _model_info_text(self,pending=False):
+        notes=[self.viewport.shading_error,getattr(self.viewport,'shading_warning','')]
+        if pending:notes.append('Loading materials… (neutral preview until they are ready)')
+        return '\n'.join(t for t in notes if t)
+
+    def _apply_materials(self,payload):
+        """A model's materials (load_materials) for the model still shown: textures, rules and the texture list."""
+        current=self.source_payload
+        if current is None or (current['model_id'],current['source_path'])!=(payload['model_id'],payload['source_path']):return
+        current.update({key:payload[key] for key in self.viewport.MATERIAL_KEYS},materials_pending=False)
+        self.viewport.set_materials(payload)
+        self._update_source_controls(current)
+        self.model_textures._set_texture_list(current)
+        self.source_text=source_details(current,getattr(self.selected_record,'used_by','') or '',self.viewport.native_translation)
+        self._render_details()
+        self.model_info.set(self._model_info_text())
 
     # Animation playback -------------------------------------------------
     def _set_clips(self,payload):
@@ -1347,7 +1373,7 @@ class AssetBrowser:
         self.app.root.after(100,self._drain)
 
     def _drain_once(self):
-        for worker,kind in [(self.meta_work,'metadata'),(self.detail_work,'details'),(self.artifact_work,'artifact'),(self.source_work,'source'),(self.anim_work,'animation'),(self.clip_list_work,'clip_list'),(self.motion_work,'motion')]:
+        for worker,kind in [(self.meta_work,'metadata'),(self.detail_work,'details'),(self.artifact_work,'artifact'),(self.source_work,'source'),(self.material_work,'materials'),(self.anim_work,'animation'),(self.clip_list_work,'clip_list'),(self.motion_work,'motion')]:
             try:
                 while True:
                     generation,payload,error=worker.events.get_nowait()
@@ -1357,6 +1383,8 @@ class AssetBrowser:
                             self.frame_text.set('Cannot play');self.model_info.set(error);continue
                         if kind=='clip_list':
                             self.frame_text.set('Animations unavailable');self.status_var.set(error);continue
+                        if kind=='materials':
+                            self.model_info.set('Materials unavailable: '+error);self.status_var.set(error);continue
                         self.status_var.set(error)
                         if kind=='source':
                             self.viewport.clear(error);self.model_info.set(error)
@@ -1386,13 +1414,19 @@ class AssetBrowser:
                             self.clip_list_work.submit(self.source_loader.load_animation,self.source_selection[0],
                                                        payload['model_id'],payload['source_path'],self.source_output_root,
                                                        self.borrowed_var.get())
-                        self.model_textures._set_texture_list(payload)
+                        pending=bool(payload.get('materials_pending'))
+                        if pending and self.source_selection:
+                            self.material_work.submit(self.source_loader.load_materials,self.source_selection[0],
+                                                      payload['model_id'],payload['source_path'],self.source_output_root)
+                        else:
+                            self.model_textures._set_texture_list(payload)
                         self.source_text=source_details(payload,getattr(self.selected_record,'used_by','') or '',self.viewport.native_translation)
                         self._request_placements(payload['source_path'])
                         self._render_details()
-                        self.model_info.set('\n'.join(t for t in (self.viewport.shading_error,getattr(self.viewport,'shading_warning','')) if t))
+                        self.model_info.set(self._model_info_text(pending))
                     elif kind=='animation':self._clip_decoded(payload)
                     elif kind=='clip_list':self._apply_clip_list(payload)
+                    elif kind=='materials':self._apply_materials(payload)
                     elif kind=='motion':self._motion_done(payload)
                     elif kind=='artifact':self._open(payload)
             except queue.Empty:pass
@@ -1421,8 +1455,9 @@ class AssetBrowser:
         self._close_clip_picker()   # release the grabbed Animation list before anything below can wait
         self.closed=True
         self.playback.close()
-        self.meta_work.close();self.detail_work.close();self.artifact_work.close();self.source_work.close();self.anim_work.close();self.clip_list_work.close();self.motion_work.close()
+        self.meta_work.close();self.detail_work.close();self.artifact_work.close();self.source_work.close();self.material_work.close();self.anim_work.close();self.clip_list_work.close();self.motion_work.close()
         self.model_textures.close();self.archive_textures.close();self.flash_tab.close();self.level_panel.close()
         self.gallery.close()
         self.links.close()
         self.cancel_review()
+        self.source_loader.close_translation_pool()

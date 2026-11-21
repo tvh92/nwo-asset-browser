@@ -148,7 +148,7 @@ def programs(root, disk=None):
         if key in _PROGRAMS:
             return _PROGRAMS[key]
         code = _scan_code_key() if disk is not None else None
-        disk_key = disk.key(repr(key).encode(), [], 'rcra-lighting-programs:%s' % code) if code else None
+        disk_key = disk.key(repr(key).encode(), [], 'rcra-lighting-programs:%s' % code, own_code=True) if code else None
         found = _read_places(path, disk.get(disk_key)) if disk_key else None
         if found is None:
             with open(path, 'rb') as f:
@@ -452,7 +452,7 @@ def direct(root, cls, disk=None):
     with _LOCK:
         if memo in _RECIPES:
             return _RECIPES[memo]
-    key = disk.key(blob, [], tag) if disk is not None else None
+    key = disk.key(blob, [], tag, own_code=True) if disk is not None else None
     recipe = _decode(disk.get(key)) if key else None
     if recipe is None:
         result = translate(dxbc.shader(blob), cls)
@@ -579,6 +579,30 @@ def translate_ambient(shader, cls):
     return dict(graph=g, terms=terms, zeroed=sorted(bindings.zeroed))
 
 
+RECIPE_TAGS = {'direct': 'rcra-lighting', 'ambient': 'rcra-ambient'}
+
+
+def cold_classes(root, disk):
+    """[(kind, class)] of the direct and ambient recipes not yet in ``disk`` (in memory counts as kept): the shared work a
+    model's materials wait for after this code changes, which viewer.loader.TranslationPool runs in parallel."""
+    if disk is None:
+        return []
+    found, code = programs(root, disk), _code_key()
+    cold = []
+    for kind, prefix in RECIPE_TAGS.items():
+        for cls in CLASSES:
+            if cls not in found:
+                continue
+            blob = found[cls][1]
+            tag = '%s:%d:%s' % (prefix, cls, code)
+            with _LOCK:
+                if (tag, hashlib.sha256(blob).hexdigest()) in _RECIPES:
+                    continue
+            if not disk.has(disk.key(blob, [], tag, own_code=True)):
+                cold.append((kind, cls))
+    return cold
+
+
 def ambient(root, cls, disk=None):
     """The ambient-light recipe of class ``cls`` (export_recipe shape, terms ambient.r/g/b, with sample nodes on
     AMBIENT_SAMPLED), cached as ``direct``."""
@@ -589,7 +613,7 @@ def ambient(root, cls, disk=None):
     with _LOCK:
         if memo in _RECIPES:
             return _RECIPES[memo]
-    key = disk.key(blob, [], tag) if disk is not None else None
+    key = disk.key(blob, [], tag, own_code=True) if disk is not None else None
     recipe = _decode(disk.get(key)) if key else None
     if recipe is None:
         result = translate_ambient(dxbc.shader(blob), cls)

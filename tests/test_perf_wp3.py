@@ -1,9 +1,11 @@
 """Archive IO, model decode and model-viewer load path: cached/vectorized code against the former algorithms."""
+from collections import OrderedDict
 from pathlib import Path
 import os
 import struct
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -303,6 +305,84 @@ class LoaderTests(unittest.TestCase):
         listed = nm.decode_model('m', 'All', data=data)
         self.assertEqual([m['weights'] for m in loader.current['meshes']], [m['weights'] for m in listed['meshes']])
         with self.assertRaises(ValueError): loader.load(Path.cwd(), 'id', 'a/b.model', purpose='other')
+
+    def test_materials_after_geometry(self):
+        loader = self.fake_loader(skinned_fixture(5))
+        calls = []
+        real = ld.SourcePreviewLoader._decode_materials
+        with patch.object(ld.SourcePreviewLoader, '_decode_materials', autospec=True,
+                          side_effect=lambda *a: (calls.append(a[2]), real(*a))):
+            first = loader.load(Path.cwd(), 'id', 'a/b.model', 'All', 0, None, True, defer_materials=True)
+            self.assertTrue(first['materials_pending']); self.assertEqual(first['textures'], {})
+            self.assertEqual(calls, [])                       # geometry only
+            materials = loader.load_materials(Path.cwd(), 'id', 'a/b.model')
+            self.assertEqual(set(materials), {'model_id', 'source_path', 'textures', 'texture_list', 'effect_preview',
+                                              'materials'})
+            self.assertFalse(loader.current['materials_pending'])
+            again = loader.load(Path.cwd(), 'id', 'a/b.model', 'All', 0, None, True, defer_materials=True)
+            self.assertFalse(again['materials_pending'])      # kept with the decoded model
+            loader.load_materials(Path.cwd(), 'id', 'a/b.model')
+            self.assertEqual(len(calls), 2)                   # the second returns at once (materials_pending False)
+            eager = self.fake_loader(skinned_fixture(5)).load(Path.cwd(), 'id', 'a/b.model', 'All', 0, None, True)
+            self.assertFalse(eager['materials_pending'])
+        with self.assertRaises(ValueError):
+            self.fake_loader(skinned_fixture(5)).load_materials(Path.cwd(), 'id', 'a/b.model')   # never loaded
+
+    def test_translation_pool_puts_background_work_behind_a_model(self):
+        from concurrent.futures import Future
+        pool = ld.TranslationPool.__new__(ld.TranslationPool)
+        submitted = []
+
+        def submit(_fn, _kind, key):
+            future = Future(); submitted.append((key, future)); return future
+        unit = lambda *keys: [('material', k) for k in keys]
+        pool.pool = SimpleNamespace(submit=submit, shutdown=lambda **_k: None)
+        pool.lock, pool.background, pool.workers = threading.Lock(), OrderedDict(), 2
+        self.assertEqual(pool.warm(unit('a', 'b', 'c')), 3)
+        self.assertEqual(pool.warm(unit('a', 'd')), 1)
+        submitted[0][1].set_running_or_notify_cancel()     # 'a' runs; the others are still queued
+        self.assertTrue(pool.busy())
+        done = threading.Thread(target=pool.run, args=(unit('a', 'e'),)); done.start()
+        while len(submitted) < 5: time.sleep(0.01)
+        self.assertEqual([k for k, _f in submitted], ['a', 'b', 'c', 'd', 'e'])   # 'a' is reused, not submitted again
+        self.assertTrue(all(f.cancelled() for k, f in submitted if k in 'bcd'))
+        submitted[0][1].set_result(0.0); submitted[4][1].set_running_or_notify_cancel(); submitted[4][1].set_result(0.0)
+        done.join(2); self.assertFalse(done.is_alive())
+        self.assertEqual(list(pool.background), [])
+
+    def test_recent_models_and_prewarm(self):
+        with tempfile.TemporaryDirectory() as folder:
+            loader = ld.SourcePreviewLoader()
+            loader.game = SimpleNamespace(cache_dir=lambda: Path(folder))
+            loader.archive = archive = object()
+            self.assertEqual(loader.recent_models(), [])
+            for model in ('a', 'b', 'a', 'c'):
+                loader._remember_viewed(model, model + '.model')
+            self.assertEqual(loader.recent_models(), [('c', 'c.model'), ('a', 'a.model'), ('b', 'b.model')])
+            (Path(folder) / loader.RECENT_FILE).write_text('not json')
+            self.assertEqual(loader.recent_models(), [])
+            for model in ('b', 'a'):
+                loader._remember_viewed(model, model + '.model')
+            warmed = []
+            pool = SimpleNamespace(warm=warmed.append)
+            cold = {'a': [('material', 'ka')], 'b': []}
+            with patch.object(loader, 'cold_units', side_effect=lambda src, m, p: list(cold[m])), \
+                    patch.object(loader, '_translation_pool', return_value=pool):
+                loader.request_prewarm()               # off unless parallel_translation
+                self.assertIsNone(loader._prewarm_thread)
+                loader.parallel_translation = True
+                loader.request_prewarm()
+                thread = loader._prewarm_thread   # None once it has finished
+                if thread is not None:
+                    thread.join(5)
+                self.assertEqual(warmed, [[('material', 'ka')]])   # newest first; nothing for a warm model
+                self.assertIs(loader.archive, archive)
+
+    def test_translation_workers(self):
+        self.assertEqual(ld.translation_workers(12, frozen=False), 8)
+        self.assertEqual(ld.translation_workers(4, frozen=False), 2)
+        self.assertEqual(ld.translation_workers(1, frozen=False), 1)
+        self.assertEqual(ld.translation_workers(12, frozen=True), 0)
 
     def test_lock_is_free_while_decoding(self):
         data = skinned_fixture(6)

@@ -336,6 +336,45 @@ class ViewportDrawTests(unittest.TestCase):
             finally:
                 root.destroy()
 
+    def test_materials_arrive_after_the_geometry(self):
+        """A geometry-first load draws the neutral preview; set_materials then draws the translated programs, keeping the
+        camera."""
+        with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
+            import tkinter as tk
+            from rc2016.viewer.loader import SourcePreviewLoader
+            from rc2016.viewer.viewport import ModelViewport
+            loader = SourcePreviewLoader()
+            archive = loader._ensure_archive(GAME)
+            key = next(k for k in archive.resolve(SWARMER) if archive.entries[k]['type'] == 'model')
+            payload = loader.load(GAME, key, SWARMER, defer_materials=True)
+            self.assertTrue(payload['materials_pending'])
+            root = tk.Tk()
+            try:
+                root.geometry('320x320')
+                view = ModelViewport(root)
+                view.pack(fill='both', expand=True)
+                root.update()
+                if view._context_error or view._shading is None:
+                    self.skipTest(view._context_error or 'no shading context')
+                programs = []
+                real = view._shading.native_program
+                view._shading.native_program = lambda t, *a, **k: programs.append(t.get('kind')) or real(t, *a, **k)
+                view.set_mode('Shaded')
+                view.set_mesh(payload)
+                view._draw()
+                self.assertIsNone(view.shading_error)
+                self.assertNotIn('rcra', programs)
+                view._yaw += 30.0
+                camera = (view._yaw, view._pitch, view._zoom)
+                view.set_materials(loader.load_materials(GAME, key, SWARMER))
+                view._draw()
+                self.assertIsNone(view.shading_error)
+                self.assertIn('rcra', programs)
+                self.assertFalse(view._payload['materials_pending'])
+                self.assertEqual((view._yaw, view._pitch, view._zoom), camera)
+            finally:
+                root.destroy()
+
     def _link(self, path, check):
         """Link the translated program of material ``path`` in a viewport, then ``check(view, receipt, textures)``."""
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):

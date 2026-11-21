@@ -496,8 +496,11 @@ def emit(**fields):
 _WORKER = {}
 
 
-def _worker_init(source):
-    configure_previews()
+def _worker_init(source, previews=True):
+    """A prefetch worker's loader; ``previews`` switches it to the thumbnail texture reads (configure_previews). The
+    viewer's translation workers (viewer.loader.TranslationPool) only translate and leave it off."""
+    if previews:
+        configure_previews()
     from rc2016.viewer.loader import SourcePreviewLoader
     loader = SourcePreviewLoader()
     archive = loader._ensure_archive(source)
@@ -531,6 +534,10 @@ def _worker_run(kind, argument):
         if kind == 'material':
             from rc2016.games.rcra.viewer_materials import translate
             translate(loader._ensure_archive(source), argument)
+        elif kind == 'lighting':   # (direct or ambient, class): an engine lighting recipe every lit material shares
+            from rc2016.games.rcra import lighting
+            archive = loader._ensure_archive(source)
+            getattr(lighting, argument[0])(archive.root, argument[1], disk=archive.translation_disk_cache)
         else:
             loader.load(source, argument[0], argument[1], 'Highest', 0, None, True)
     except Exception:   # the renderer meets the same failure and records it

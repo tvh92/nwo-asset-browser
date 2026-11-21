@@ -280,6 +280,68 @@ def material_rules(archive, materials, translations=None):
     return rules
 
 
+def translation_workers(cpus=None, frozen=None):
+    """Worker processes for TranslationPool: the CPUs less two (the Tk thread and the loader), at most 8; 0 in a frozen
+    build, where spawned workers would start the app again."""
+    import os
+    import sys
+    if getattr(sys, 'frozen', False) if frozen is None else frozen:
+        return 0
+    cpus = cpus or os.cpu_count() or 2
+    return max(1, min(8, cpus - 2))
+
+
+class TranslationPool:
+    """Spawned worker processes that translate Rift Apart materials into the shared translation disk cache
+    (viewer_materials.translate, in the thumbnail renderer's prefetch workers), so a model's cold materials translate in
+    parallel and the loader then reads each result from the cache. ``run`` waits for a model's materials; ``warm`` queues
+    background work (the pre-warm), which a ``run`` puts behind its own by cancelling what has not started."""
+
+    def __init__(self, source_root, workers):
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+        from rc2016.app.thumbnails import _worker_init
+        self.workers = workers
+        self.pool = ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context('spawn'),
+                                        initializer=_worker_init, initargs=(str(source_root), False))
+        self.lock = threading.Lock()
+        self.background = OrderedDict()   # material key -> future, the pre-warm's
+
+    def _submit(self, unit):
+        from rc2016.app.thumbnails import _worker_run
+        return self.pool.submit(_worker_run, *unit)
+
+    def run(self, keys):
+        """Run the units ``keys`` (('material', key) or ('lighting', (kind, class)), loader.cold_units) on the workers and
+        wait for them (failures are left to the caller's own translation)."""
+        with self.lock:
+            for key in [k for k, f in self.background.items() if f.cancel()]:
+                del self.background[key]   # queued pre-warm work waits until this model's is done
+            futures = [self.background.pop(key, None) or self._submit(key) for key in keys]
+        for future in futures:
+            try:
+                future.result()
+            except Exception:   # a broken pool or a cancelled unit: the loader translates it itself
+                pass
+
+    def warm(self, keys):
+        """Queue ``keys`` behind anything already queued; returns how many were queued."""
+        with self.lock:
+            for key in [k for k, f in self.background.items() if f.done()]:
+                del self.background[key]
+            fresh = [key for key in keys if key not in self.background]
+            for key in fresh:
+                self.background[key] = self._submit(key)
+            return len(fresh)
+
+    def busy(self):
+        with self.lock:
+            return any(not f.done() for f in self.background.values())
+
+    def close(self):
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
+
 class SourcePreviewLoader:
     """One archive metadata instance and one selected decoded model; no corpus model decode."""
     game=RC2016   # the open archive's game (rc2016.games); set by _ensure_archive
@@ -302,6 +364,13 @@ class SourcePreviewLoader:
         self.lock=threading.Lock()
         # Texture reads from the list, the grid's thumbnails and the preview share the archive's file handle.
         self.texture_lock=threading.Lock()
+        self.translation_pool=None   # TranslationPool of the open source, started on the first model with cold materials
+        # Opt-in (the browser): the thumbnail renderer and its workers have their own prefetch processes. It also keeps the
+        # recently viewed models (RECENT_FILE) and pre-warms their translations in the background (request_prewarm).
+        self.parallel_translation=False
+        self._prewarm_thread=None
+        self._prewarm_again=False
+        self.pool_lock=threading.Lock()
 
     def pose(self, clip_index, root_motion=False, base=None):
         """The clip's pose (``AnimationLibrary.pose``); ``base`` a clip index an additive layer plays over."""
@@ -333,6 +402,7 @@ class SourcePreviewLoader:
             self.archive.translation_disk_cache=TranslationDiskCache(cache/'native_translation')
             self.archive.cinematic_disk_cache=cache/'cinematic_directory'
             self.source_root=source_root
+            self.close_translation_pool()
             self.identity=None;self.current=None;self.texture_cache={};self.preview_cache={}
             self._recent.clear();self._recent_identity=None
         return self.archive
@@ -452,10 +522,12 @@ class SourcePreviewLoader:
     PURPOSES = ('view', 'export')
 
     def load(self, source_root, model_id, source_path, lod='Highest', look=0, output_root=None, defer_animation=False, purpose='view',
-             borrowed=False):
+             borrowed=False, defer_materials=False):
         """Payload for the viewport. With ``defer_animation`` a skinned model returns at once
         with ``animation_pending=True`` and no clips; call ``load_animation`` (another worker)
-        to build its clip library.
+        to build its clip library. With ``defer_materials`` a model whose materials are not loaded yet returns its geometry
+        with ``materials_pending=True`` and no textures (the viewport draws its neutral preview); call ``load_materials``
+        (another worker) for them.
 
         ``purpose='export'`` decodes geometry, skeleton and material paths only (list-valued
         meshes, as export.models.mesh_arrays reads them): no viewer textures, texture list,
@@ -463,7 +535,8 @@ class SourcePreviewLoader:
         payload carries no geometry. Read ``current``/``animation`` afterwards as before.
         """
         if purpose not in self.PURPOSES:raise ValueError('Unknown load purpose: '+str(purpose))
-        return self._load(source_root, model_id, source_path, lod, look, output_root, defer_animation, purpose, borrowed)
+        return self._load(source_root, model_id, source_path, lod, look, output_root, defer_animation, purpose, borrowed,
+                          defer_materials)
 
     def load_animation(self, source_root, model_id, source_path, output_root=None, borrowed=False):
         """Build (or reuse) the selected model's clip library: {model_id, source_path, clips, clip_notes, animsets,
@@ -543,12 +616,139 @@ class SourcePreviewLoader:
                 sum(c['vertices'] for c in self._recent.values())>self.RECENT_VERTEX_BUDGET):
             self._recent.popitem(last=False)
 
-    def _decode(self, archive, model_id, source_path, purpose, texture_cache, game=None):
+    # Translation pool ------------------------------------------------------
+    def _translation_pool(self):
+        """The open source's TranslationPool, started on first use; None unless ``parallel_translation``, for R&C 2016
+        (its graphs compile in rc2016.shaders.bindings' own pool) or in a frozen build."""
+        with self.pool_lock:
+            if (self.translation_pool is None and self.parallel_translation and hasattr(self.archive,'ids_of_type')
+                    and self.source_root is not None):
+                workers=translation_workers()
+                if workers:
+                    self.translation_pool=TranslationPool(self.source_root,workers)
+            return self.translation_pool
+
+    def close_translation_pool(self):
+        with self.pool_lock:
+            pool,self.translation_pool=self.translation_pool,None
+        if pool is not None:
+            pool.close()
+
+    def cold_materials(self, archive, model_id, source_path):
+        """The material keys of a Rift Apart model whose translation is not in the disk cache ([] for R&C 2016)."""
+        if not hasattr(archive,'ids_of_type'):
+            return []
+        from rc2016.app.thumbnails import prefetch_units
+        from rc2016.games.rcra.viewer_materials import is_cached
+        return [key for kind,key in prefetch_units(archive,model_id,source_path) if kind=='material' and not is_cached(archive,key)]
+
+    def cold_units(self, archive, model_id, source_path):
+        """The pool units a model's materials wait for: [('lighting', (direct or ambient, class))] for the engine lighting
+        recipes not in the disk cache (shared, slow, first), then [('material', key)] for its cold materials."""
+        units=[('material',key) for key in self.cold_materials(archive,model_id,source_path)]
+        if units or hasattr(archive,'ids_of_type'):
+            from rc2016.games.rcra import lighting
+            try:
+                units=[('lighting',pair) for pair in lighting.cold_classes(archive.root,archive.translation_disk_cache)]+units
+            except (OSError,ValueError,AttributeError):
+                pass
+        return units
+
+    # Recently viewed models and the pre-warm -------------------------------------
+    RECENT_FILE = 'recent_models.json'   # in the game's cache folder: [[model id, archive path], ...], newest first
+    RECENT_KEEP = 24
+
+    def _recent_path(self):
+        return self.game.cache_dir()/self.RECENT_FILE
+
+    def recent_models(self):
+        """[(model id, archive path)] of the models last viewed with this game, newest first ([] when unreadable)."""
+        try:
+            rows=json.loads(self._recent_path().read_text(encoding='utf-8'))
+            return [(str(m),str(p)) for m,p in rows][:self.RECENT_KEEP]
+        except (OSError,ValueError,TypeError):
+            return []
+
+    def _remember_viewed(self, model_id, source_path):
+        rows=[(model_id,source_path)]+[r for r in self.recent_models() if r!=(model_id,source_path)]
+        path=self._recent_path()
+        temp=path.with_name(path.name+'.%d.tmp'%threading.get_ident())
+        try:
+            path.parent.mkdir(parents=True,exist_ok=True)
+            temp.write_text(json.dumps([list(r) for r in rows[:self.RECENT_KEEP]]),encoding='utf-8')
+            temp.replace(path)
+        except OSError:
+            try:temp.unlink()
+            except OSError:pass
+
+    def request_prewarm(self):
+        """Translate the recently viewed models' cold materials (and the engine lighting recipes) on the pool in the
+        background, newest model first, so they open warm after a code change. Work for a model being opened goes ahead of
+        it (TranslationPool.run). A request while one runs runs it again afterwards."""
+        if not self.parallel_translation:
+            return
+        with self.pool_lock:
+            if self._prewarm_thread is not None and self._prewarm_thread.is_alive():
+                self._prewarm_again=True
+                return
+            self._prewarm_again=False
+            self._prewarm_thread=threading.Thread(target=self._prewarm,args=(self.archive,),name='translation-prewarm',daemon=True)
+            self._prewarm_thread.start()
+
+    def _prewarm(self, archive):
+        while True:
+            for model_id,source_path in self.recent_models():
+                if self.archive is not archive:
+                    return   # another source opened
+                try:
+                    units=self.cold_units(archive,model_id,source_path)
+                except (ValueError,KeyError,OSError):
+                    continue
+                pool=self._translation_pool() if units else None
+                if pool is not None:
+                    pool.warm(units)
+            with self.pool_lock:
+                if not self._prewarm_again:
+                    self._prewarm_thread=None
+                    return
+                self._prewarm_again=False
+
+    def _translate_ahead(self, archive, model_id, source_path):
+        """Translate a model's cold materials in parallel on the pool, so material_textures reads them from the cache."""
+        try:
+            cold=self.cold_units(archive,model_id,source_path)
+        except (ValueError,KeyError,OSError):
+            return
+        if len(cold)<2:
+            return   # one translates as fast here
+        pool=self._translation_pool()
+        if pool is not None:
+            pool.run(cold)
+
+    def _decode(self, archive, model_id, source_path, purpose, texture_cache, game=None, defer_materials=False):
         """Decode one model into a _recent entry. Runs without self.lock. ``game`` (rc2016.games) is the
-        archive's game; the decode and texture reads dispatch through it once per model."""
+        archive's game; the decode and texture reads dispatch through it once per model. With ``defer_materials`` a view
+        decode leaves textures, material rules and the effect preview to _decode_materials (``materials_pending``)."""
         game=game or self.game
         decoded,data=game.decode_model(archive,model_id,source_path,purpose=='view')
+        decoded.update(textures={},texture_list=[],material_rules={},effect_preview=None,materials_pending=False)
+        decoded['_archive_path']=source_path;decoded['animation_note']='';decoded['animsets']=[]
+        cached=dict(decoded=decoded,data=data,purpose=purpose,animation=None,animation_built=None,build_lock=threading.Lock(),
+                    materials_lock=threading.Lock(),vertices=sum(len(m['positions']) for m in decoded['meshes']))
         if purpose=='view':
+            decoded['materials_pending']=True
+            if not defer_materials:
+                self._decode_materials(archive,model_id,cached,texture_cache,game)
+        return cached
+
+    def _decode_materials(self, archive, model_id, cached, texture_cache, game):
+        """Textures, texture list, material rules and effect preview of a view entry (once; later calls return at once)."""
+        with cached['materials_lock']:
+            decoded,data=cached['decoded'],cached['data']
+            if not decoded['materials_pending']:
+                return
+            source_path=decoded['_archive_path']
+            self._translate_ahead(archive,model_id,source_path)
             from rc2016.viewer.textures import FORMAT_NAMES
             translations={}
             decoded['textures']=game.material_textures(archive,decoded['materials'],texture_cache,translations,hd=True)
@@ -565,14 +765,31 @@ class SourcePreviewLoader:
                 rule=decoded['material_rules'].get(path)
                 if rule is not None:rule['native_limitations']=list(rule.get('native_limitations') or [])+list(notes)
             decoded['effect_preview']=game.effect_preview(archive,data,source_path)
-        else:
-            decoded.update(textures={},texture_list=[],material_rules={},effect_preview=None)
-        decoded['_archive_path']=source_path;decoded['animation_note']='';decoded['animsets']=[]
-        return dict(decoded=decoded,data=data,purpose=purpose,animation=None,animation_built=None,build_lock=threading.Lock(),
-                    vertices=sum(len(m['positions']) for m in decoded['meshes']))
+            decoded['materials_pending']=False
+
+    @staticmethod
+    def _material_rows(current):
+        return [dict(index=m.get('index',i),name=m.get('name'),path=m.get('path'),**current['material_rules'].get(m.get('path'),{}))
+                for i,m in enumerate(current['materials'])]
+
+    def load_materials(self, source_root, model_id, source_path, output_root=None):
+        """After ``load(..., defer_materials=True)``: the model's materials, {model_id, source_path, textures, texture_list,
+        effect_preview, materials} (the payload keys a deferred load left empty). Kept with the decoded model, so
+        switching back to it, or changing look or LOD, does not load them again."""
+        with self.lock:
+            archive=self._ensure_archive(source_root)
+            cached=self._recent.get((model_id,source_path,str(output_root) if output_root else None))
+            texture_cache,game=self.texture_cache,self.game
+        if cached is None:
+            raise ValueError('The model is no longer loaded; select it again')
+        self._decode_materials(archive,model_id,cached,texture_cache,game)
+        self.request_prewarm()   # the queued pre-warm waited behind this model's translations
+        current=cached['decoded']
+        return dict(model_id=model_id,source_path=source_path,textures=current['textures'],texture_list=current['texture_list'],
+                    effect_preview=current.get('effect_preview'),materials=self._material_rows(current))
 
     def _load(self, source_root, model_id, source_path, lod, look, output_root, defer_animation=False, purpose='view',
-              borrowed=False):
+              borrowed=False, defer_materials=False):
         # self.lock covers loader state only; the decode, texture reads and viewport arrays run
         # outside it so clip, pose and texture-list calls are not queued behind a model decode.
         with self.lock:
@@ -589,12 +806,16 @@ class SourcePreviewLoader:
                 self._remember(identity,cached)
             texture_cache,game=self.texture_cache,self.game
         if cached is None:
-            cached=self._decode(archive,model_id,source_path,purpose,texture_cache,game)
+            cached=self._decode(archive,model_id,source_path,purpose,texture_cache,game,defer_materials)
             with self.lock:
                 if self.archive is not archive:
                     raise ValueError('The source archive changed while the model loaded; select it again')
                 cached=self._recent.get(identity) or cached
                 self._remember(identity,cached)
+        if purpose=='view' and self.parallel_translation:
+            self._remember_viewed(model_id,source_path)
+        if purpose=='view' and not defer_materials:
+            self._decode_materials(archive,model_id,cached,texture_cache,game)
         pending=bool(defer_animation and cached['decoded']['joint_count'] and cached['animation_built'] is None)
         if not pending:
             self._build_animation(cached,output_root,borrowed,model_id)
@@ -616,9 +837,8 @@ class SourcePreviewLoader:
             return info
         result=mesh_payload(current,lod,look)
         result.update(info,textures=current['textures'],texture_list=current['texture_list'],
-            effect_preview=current.get('effect_preview'),
-            materials=[dict(index=m.get('index',i),name=m.get('name'),path=m.get('path'),**current['material_rules'].get(m.get('path'),{}))
-                       for i,m in enumerate(current['materials'])],
+            effect_preview=current.get('effect_preview'),materials=self._material_rows(current),
+            materials_pending=current['materials_pending'],
             limitation='Native bind/rest geometry only. Neutral viewer shading; no runtime material, animation, attachment or game-equivalence claim.')
         from rc2016.viewer.viewport import prepare_viewport
         result["_prepared_viewport"]=prepare_viewport(result)

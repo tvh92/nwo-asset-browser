@@ -89,8 +89,7 @@ def translate(source, material_key):
         except (ValueError, OSError) as error:
             raise NotTranslated(str(error)) from error
     disk = getattr(source, 'translation_disk_cache', None)
-    program_bytes = bytes(graph) if program is None else program['key']
-    key = disk.key(bytes(data), [program_bytes], 'rcra-viewer:%s' % CODE_SHA256) if disk is not None and CODE_SHA256 else None
+    key = _disk_key(disk, data, graph, program)
     stored = _floats(disk.get(key), decode=True) if key else None
     if stored is not None:
         if 'error' in stored:
@@ -106,6 +105,31 @@ def translate(source, material_key):
     if key:
         disk.put(key, _floats(dict(zip(('surface', 'forward', 'blend', 'limitations', 'textures'), out))))
     return out
+
+
+def _disk_key(disk, data, graph, program):
+    """translate's key in the translation disk cache, or None without a cache (or without the package sources)."""
+    if disk is None or not CODE_SHA256:
+        return None
+    return disk.key(bytes(data), [bytes(graph) if program is None else program['key']], 'rcra-viewer:%s' % CODE_SHA256,
+                    own_code=True)
+
+
+def is_cached(source, material_key):
+    """True when translate would read the material's result from the disk cache (or has nothing to translate): a cheap
+    check that keeps warm materials away from the translation workers (viewer.loader.TranslationPool)."""
+    disk = getattr(source, 'translation_disk_cache', None)
+    if disk is None or not CODE_SHA256:
+        return True
+    try:
+        graph, data = _graph(source, material_key), source.asset_data(material_key)
+        program = None
+        if graph is None:
+            from rc2016.games.rcra.fur import fur_program
+            program = fur_program(source, data)
+    except (NotTranslated, ValueError, KeyError, OSError):
+        return True   # translate fails at once
+    return disk.has(_disk_key(disk, data, graph, program))
 
 
 NON_FINITE = '__nonfinite__'
@@ -412,8 +436,8 @@ def translate_shell(source, material_key):
     except (ValueError, OSError) as error:
         raise NotTranslated(str(error)) from error
     disk = getattr(source, 'translation_disk_cache', None)
-    key = disk.key(bytes(data), [program['key']], 'rcra-viewer-shell:%s' % CODE_SHA256) if disk is not None and CODE_SHA256 \
-        else None
+    key = disk.key(bytes(data), [program['key']], 'rcra-viewer-shell:%s' % CODE_SHA256, own_code=True) \
+        if disk is not None and CODE_SHA256 else None
     stored = _floats(disk.get(key), decode=True) if key else None
     if stored is not None:
         if 'error' in stored:

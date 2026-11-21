@@ -366,15 +366,21 @@ class TranslationDiskCache(TextureDiskCache):
     def stats(self):
         return dict(hits=self.hits, misses=self.misses)
 
-    def key(self, material_data, graph_datas, variant=''):
-        """Cache key; a non-empty ``variant`` separates alternative translations of the same inputs."""
-        if _TRANSLATION_CODE_SHA256 is None:
+    def key(self, material_data, graph_datas, variant='', own_code=False):
+        """Cache key; a non-empty ``variant`` separates alternative translations of the same inputs. ``own_code``: the
+        variant carries the hash of the code that made the result (Rift Apart), so the R&C 2016 translator's is left out
+        and editing that translator keeps the entry."""
+        if _TRANSLATION_CODE_SHA256 is None and not own_code:
             return None
-        parts = (TRANSLATION_DISK_CACHE_VERSION, _TRANSLATION_CODE_SHA256,
+        parts = (TRANSLATION_DISK_CACHE_VERSION, None if own_code else _TRANSLATION_CODE_SHA256,
                  hashlib.sha256(material_data).hexdigest(),
                  [hashlib.sha256(g).hexdigest() for g in graph_datas])
         if variant: parts += (variant,)
         return hashlib.sha256(repr(parts).encode()).hexdigest()
+
+    def has(self, key):
+        """True when a result is stored under ``key`` (not checked: get may still find it damaged)."""
+        return key is not None and self._file(key).is_file()
 
     def get(self, key):
         import json, os
