@@ -329,6 +329,27 @@ class ConstantNormalTests(unittest.TestCase):
                 self.assertAlmostEqual(a, b, delta=2e-3)   # 12-bit quantisation
 
 
+class FurLayerMapTests(unittest.TestCase):
+    def test_layer_map_matches_the_start_up_routine(self):
+        """fur.layer_map against the start-up routine's per-texel loop (x outer, y inner), for the first columns."""
+        from rc2016.games.rcra import fur
+        f, size = np.float32, fur.LAYER_SIZE
+        slices = [np.frombuffer(s, np.uint8).reshape(size, size) for s in fur.layer_map()]
+        self.assertEqual((len(slices), slices[0].shape), (fur.LAYER_SLICES, (size, size)))
+        state, lengths = fur.XORSHIFT_SEED, set()
+        for x in range(3):
+            for y in range(size):
+                value, state = fur._xorshift128(state)
+                r = f(value >> 8)
+                n = min(int(f(f(r * r) * f(2.0 ** -43))) + 1, fur.LAYER_SLICES)
+                lengths.add(n)
+                for d in range(fur.LAYER_SLICES):
+                    h = max(f(f(f(f(d + 1) + f(d + 1)) * (f(1.0) / f(n))) - f(1.0)), f(0.0))
+                    level = int(f(min(max(f(1.0) - f(f(h * h) * f(0.8)), f(0.0)), f(1.0)) * f(255.0))) if d < n else 0
+                    self.assertEqual(int(slices[d][y, x]), level, (x, y, d))
+        self.assertGreater(len(lengths), 10)   # the columns cover many strand lengths
+
+
 class VolumeTests(unittest.TestCase):
     def test_atlas_tiles_wrap(self):
         slices = [np.full((2, 3, 4), k, np.float32) + np.arange(3, dtype=np.float32)[None, :, None] for k in range(5)]

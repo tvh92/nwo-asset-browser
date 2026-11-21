@@ -174,19 +174,22 @@ def layer_map():
     with _LOCK:
         if 'layer_map' not in _WRITERS:
             f = np.float32
-            data = np.zeros((LAYER_SLICES, LAYER_SIZE, LAYER_SIZE), np.uint8)
-            state = XORSHIFT_SEED
             scale, fall, full = f(2.0 ** -43), f(0.8), f(255.0)
-            for x in range(LAYER_SIZE):
-                for y in range(LAYER_SIZE):
-                    value, state = _xorshift128(state)
-                    r = f(value >> 8)
-                    n = min(int(f(f(r * r) * scale)) + 1, LAYER_SLICES)
-                    inv = f(1.0) / f(n)
-                    for d in range(n):
-                        h = max(f(f(f(f(d + 1) + f(d + 1)) * inv) - f(1.0)), f(0.0))
-                        level = min(max(f(1.0) - f(f(h * h) * fall), f(0.0)), f(1.0))
-                        data[d, y, x] |= int(f(level * full))
+            # A layer's byte depends only on (n, d): levels[n, d], computed in float32 as the routine does (0 for d >= n).
+            levels = np.zeros((LAYER_SLICES + 1, LAYER_SLICES), np.uint8)
+            for n in range(1, LAYER_SLICES + 1):
+                inv = f(1.0) / f(n)
+                for d in range(n):
+                    h = max(f(f(f(f(d + 1) + f(d + 1)) * inv) - f(1.0)), f(0.0))
+                    level = min(max(f(1.0) - f(f(h * h) * fall), f(0.0)), f(1.0))
+                    levels[n, d] = int(f(level * full))
+            values, state = [], XORSHIFT_SEED   # one number per texel column, x outer and y inner
+            for _ in range(LAYER_SIZE * LAYER_SIZE):
+                value, state = _xorshift128(state)
+                values.append(value >> 8)
+            r = np.array(values, np.uint32).astype(f).reshape(LAYER_SIZE, LAYER_SIZE).T   # [y, x]; exact (< 2^24)
+            n = np.minimum(((r * r) * scale).astype(np.int64) + 1, LAYER_SLICES)        # float32 products, truncated
+            data = np.ascontiguousarray(levels[n].transpose(2, 0, 1))                     # [d, y, x]
             _WRITERS['layer_map'] = [bytes(data[d]) for d in range(LAYER_SLICES)]
         return _WRITERS['layer_map']
 
