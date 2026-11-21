@@ -7,7 +7,8 @@ grid in UV0 space gives a texture the glTF material can carry: the game's own al
 forward alpha, with every tint, mask, palette and blend the program applies there.
 
 - The test is structural (``blocker``): a term counts only when no path through its operations reaches another input.
-  Terms that read UV1, the normal, the tangent, the vertex colour or the view stay out, with the reason.
+  Terms that read UV1, the normal, the tangent, the vertex colour or the view stay out, with the reason. Branches
+  weighted by a constant 0 are taken out first (``fold``), so only inputs that change the value count.
 - The grid is the size of the largest texture the baked terms sample (each side at most ``MAX_SIZE``); a texture
   sampled at a scaled UV (a tiled detail map) is resampled at that grid, so detail finer than a grid texel is lost.
 - Sampling is bilinear with wrap at the top mip, as the Blender export samples: the game's sampler states are not in the
@@ -17,6 +18,7 @@ forward alpha, with every tint, mask, palette and blend the program applies ther
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -36,7 +38,10 @@ INPUT_NAMES = {'TEXCOORD': 'the draw alpha', 'TEXCOORD1': 'UV1', 'TEXCOORD2': 't
                'TEXCOORD4': 'the vertex colour', 'TEXCOORD5': 'the previous position', 'TEXCOORD6': 'the particle values',
                'TEXCOORD7': 'the particle values', 'VIEW': 'the view direction', 'CAMERA': 'the camera position',
                'SV_Position': 'the screen position', 'SV_POSITION': 'the screen position', 'BACKGROUND': 'the scene behind'}
-MIP_NOTE = 'a sample at an explicit mip level, bias or gradient reads the top mip'
+# Operations that can make NaN or infinity from finite values, or whose value the translation does not know.
+FINITE_UNSAFE = frozenset(('div', 'rcp', 'rsq', 'log2', 'sqrt', 'exp2', 'bits2f', 'f16tof32', 'udiv', 'urem', 'unknown',
+                           'cbload'))
+MIP_NOTE ='a sample at an explicit mip level, bias or gradient reads the top mip'
 
 
 def _srgb_decode(x):
@@ -67,6 +72,44 @@ def _reach(recipe, names):
             unknown.append(n.get('reason') or n['op'])
         stack.extend(n['args'])
     return inputs, samples, unknown
+
+
+def fold(recipe):
+    """``recipe`` with its zero-weighted branches taken out: x * 0 is 0 where x reaches no operation that can make NaN or
+    infinity from finite values (FINITE_UNSAFE, a NaN or infinite constant, an unknown value), x + 0 is x, and -0, sat(0)
+    and |0| are 0. A writer's damage overlay, for example, is mixed in at a constant weight of 0, and its UV1 mask then
+    no longer blocks the bake. The values are the program's own for finite inputs and texels, apart from the sign of a
+    zero; ``blocker`` and ``bake`` take the result. Node indices are kept; folded nodes become constants."""
+    if recipe is None:
+        return None
+    nodes = [dict(n) for n in recipe['nodes']]
+    alias, finite = {}, []
+
+    def zero(i):
+        n = nodes[i]
+        return n['op'] == 'const' and n['type'] == 'f' and n['value'] == 0.0
+
+    def constant(i):
+        nodes[i] = dict(op='const', type='f', value=0.0, args=[])
+        finite[i] = True
+
+    for i, n in enumerate(nodes):
+        n['args'] = args = [alias.get(a, a) for a in n['args']]
+        op = n['op']
+        if op == 'const':
+            v = n['value']
+            finite.append(not (isinstance(v, float) and not math.isfinite(v)))
+        else:
+            finite.append(op not in FINITE_UNSAFE and all(finite[a] for a in args))
+        if n['type'] != 'f':
+            continue
+        if op == 'mul' and len(args) == 2 and ((zero(args[0]) and finite[args[1]]) or (zero(args[1]) and finite[args[0]])):
+            constant(i)
+        elif op == 'add' and len(args) == 2 and (zero(args[0]) or zero(args[1])):
+            alias[i] = args[1] if zero(args[0]) else args[0]
+        elif op in ('neg', 'sat', 'abs') and zero(args[0]):
+            constant(i)
+    return dict(recipe, nodes=nodes, terms={k: alias.get(v, v) for k, v in recipe['terms'].items()})
 
 
 def describe(name):

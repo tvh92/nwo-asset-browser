@@ -65,6 +65,22 @@ class BlockerTests(unittest.TestCase):
         self.assertEqual(bake.blocker(r, ('alpha',)), 'the program has no such term')
         self.assertEqual(bake.blocker(None, ('alpha',)), 'the program does not translate')
 
+    def test_a_branch_weighted_by_zero_folds_out(self):
+        # albedo = uv.x + uv1.x x 0 (a damage overlay at weight 0); gloss = rcp(uv1.x) x 0 (may be infinite: kept)
+        nodes = uv_nodes() + [node('input', name='TEXCOORD1.x'), node('const', value=0.0), node('mul', 2, 3),
+                              node('add', 0, 4), node('rcp', 2), node('mul', 6, 3), node('neg', 3), node('sat', 8)]
+        r = recipe(nodes, {'albedo.r': 5, 'gloss': 7, 'occlusion': 9})
+        self.assertEqual(bake.blocker(r, ('albedo.r',)), 'it reads UV1')
+        folded = bake.fold(r)
+        self.assertEqual(folded['terms']['albedo.r'], 0)   # x + 0 is x
+        self.assertIsNone(bake.blocker(folded, ('albedo.r',)))
+        self.assertEqual(bake.blocker(folded, ('gloss',)), 'it reads UV1')
+        self.assertEqual(folded['nodes'][9], dict(op='const', type='f', value=0.0, args=[]))
+        self.assertIsNone(bake.fold(None))
+        self.assertEqual(r['nodes'][4]['op'], 'mul')   # the input recipe is not changed
+        out = bake.bake(folded, ('albedo.r',), sampler({}), (2, 1))
+        np.testing.assert_allclose(out['albedo.r'], [[0.25, 0.75]])
+
     def test_cube_maps_and_volumes_do_not_bake(self):
         r = tinted()
         r['nodes'][2]['dimension'] = 6

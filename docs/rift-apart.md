@@ -43,6 +43,7 @@ The portable export (GLB, glTF, OBJ) writes only what is decoded, through `rc201
 
 1. **Baked over UV0** (`rc2016/games/rcra/bake.py`):
    - **When:** every operation of the group's terms reaches no input but UV0 (`TEXCOORD.xy`) and the front-face flag, and samples only 1D or 2D textures or one array slice per texel (`bake.blocker`; the test is structural).
+   - **Zero weights:** branches the program weights by a constant 0 are taken out first (`bake.fold`): x × 0 becomes 0 where x reaches no operation that can make NaN or infinity from finite values, and x + 0 becomes x. Many enemy writers mix a UV1 damage mask in at weight 0, and the mask then no longer blocks the bake. On 40 freed materials the folded bake equals the unfolded program at random UV1 and other inputs.
    - **How:** the terms are evaluated at the texel centres of a grid in UV0 space, with every tint, palette, mask, detail map and blend the program applies there. The grid is the largest texture they sample (at most 4096 per side); a texture read at a scaled UV is resampled at that grid.
    - **Sampling:** bilinear with wrap at the top mip, as the Blender export samples, with sRGB decoded before filtering. A sample at an explicit mip, bias or gradient reads the top mip, with a note.
    - **Evaluation:** the SM5 graph is run over arrays (`bake.evaluate`, the vertex programs' vectorised operations). On the install it equals the scalar evaluator at every checked texel, and where a writer reads plain `_g` channels the baked F0 and gloss equal them within the G-buffer's 8-bit rounding.
@@ -66,13 +67,15 @@ Over the install (5,274 materials with a G-buffer surface, 1,306 alpha-over):
 
 | Group | Carried | Of which baked | Mostly blocked by |
 | --- | --- | --- | --- |
-| Albedo | 3,696 baked (the others keep `_c`) | 3,696 | UV1, the normal and view |
-| F0 and gloss | 4,159 | 4,157 (1,554 constants) | UV1, a volume or cube map, the normal |
+| Albedo | 3,787 baked (the others keep `_c`) | 3,787 | UV1, the normal and view |
+| F0 and gloss | 4,166 | 4,164 (1,554 constants) | UV1, a volume or cube map, the normal |
 | Occlusion | about 1,245 | | UV1, the normal |
 | Emission | about 916 | 911 | an albedo or E that reads UV1 or the view (about 444 left) |
 | Alpha-over alpha | about 357 | 350 | the view (soft-particle and distance fades of effects), the normal |
 
-Additive (427) and modulate (11) materials stay opaque, and 139 alpha-over materials have a forward alpha of 1.
+The zero-weight fold accounts for 91 of the baked albedos and 7 of the F0 and gloss groups; it also frees 148 occlusion and 150 emission groups, which the occlusion and emission counts above do not yet include (a freed group is carried only when its baked value is not 1 or 0 everywhere).
+
+Additive (427) and modulate (11) materials stay opaque, and 139 alpha-over materials have a forward alpha of 1. Each has only a forward program, and its colour and alpha both bake over UV0 for 39 additive materials and no modulate one: most read the view and the normal (rims and fades) or the vertex colour.
 
 A texture stored in a float or 16-bit data format is used as its sampled values rounded to 8 bits when they all lie in 0..1 ([Float and 16-bit textures](#float-and-16-bit-textures)), with a note. This carries the flat 4×4 `R32G32_FLOAT` `default_pink_shader_n` placeholder of 386 materials and the `R16G16` normal of the escape ship. A texture with values outside 0..1 is left out with its range. The bake samples float textures as stored.
 
@@ -1269,10 +1272,10 @@ A blended material's entry carries `blend` and a `forward` recipe ([Forward prof
 | Mode | Shader |
 | --- | --- |
 | Blended | Transparent(mix(white, B, alpha)) + alpha × (BRDF + Emission(colour)); with B = 0 this is mix(Transparent, BRDF + Emission(colour), alpha). The BRDF's own emission input is left unlinked, because the forward colour already holds it. |
-
-A material that lights the scene behind it (`lit_background`, [The scene behind](#forward-profile)) needs the diffuse light reaching the point, which Cycles has no node for. `surface.unit_irradiance` folds it at a unit white light, B = background + lit_background, and the material's limitations say so (`UNIT_IRRADIANCE_NOTE`).
 | Additive | Transparent(1 + alpha B) + Emission(colour, strength alpha) |
 | Modulate | Transparent tinted by mix(white, colour, alpha) |
+
+A material that lights the scene behind it (`lit_background`, [The scene behind](#forward-profile)) needs the diffuse light reaching the point, which Cycles has no node for. `surface.unit_irradiance` folds it at a unit white light, B = background + lit_background, and the material's limitations say so (`UNIT_IRRADIANCE_NOTE`).
 
 B is the background tint of a program that passes the scene behind it through ([Forward profile](#forward-profile)); a modulate material that does so is not linear in it and keeps its opaque surface.
 

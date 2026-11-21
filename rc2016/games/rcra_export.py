@@ -7,6 +7,7 @@ programs, per group of terms, in this order:
 1. **Baked** (``rcra.bake``): a group whose terms in the translated G-buffer writer (albedo; F0 and gloss; occlusion;
    emission, with the albedo) or forward program (alpha, for an alpha-over material) reach only UV0 and constants is
    evaluated at the texel centres of a UV0 grid, with every tint, palette, mask and blend the program applies there.
+   Branches weighted by a constant 0 are taken out first (``rcra.bake.fold``).
 2. **Plain channels** (``decoded_maps``): the terms are evaluated at random texels and inputs, and a group is used when it
    is exactly a plain channel of the _g or _m map at UV0 (``_plain``), a constant times one _c, _g or _m channel
    (``decoded_emission``) or a constant times _c alpha (``decoded_alpha``). This keeps the few writers whose terms reach UV1
@@ -214,7 +215,7 @@ def decoded_maps(source, key):
     emission form (decoded_emission, with the mask texture path) and the alpha-over alpha form (decoded_alpha) with their
     reasons; ``bake`` {group: None when it bakes over UV0, else why not} for BAKE_GROUPS and, for an alpha-over material,
     'alpha'; the texture bindings and the recipes the bake evaluates."""
-    from rc2016.games.rcra import material as rmat, shaders as rshaders, viewer_materials as vm
+    from rc2016.games.rcra import bake as rbake, material as rmat, shaders as rshaders, viewer_materials as vm
     out = dict(layout=None, occlusion=False, g=None, m=None, reason=None, emission=None, emission_reason=None,
                alpha=None, alpha_reason=None, blend='opaque')
     try:
@@ -223,6 +224,7 @@ def decoded_maps(source, key):
     except (ValueError, KeyError, OSError) as error:   # NotTranslated and Unsupported are ValueErrors
         out['reason'] = 'the writer does not translate: %s' % error
         return out
+    surface, forward = rbake.fold(surface), rbake.fold(forward)   # zero-weighted branches out (a UV1 damage overlay)
     out.update(blend=blend, bake=_bake_plan(surface, forward, blend), bindings=textures, surface=surface, forward=forward)
     if graph is None:   # a fur material: the engine fur writer's maps (rc2016.games.rcra.fur)
         c_binding, g_binding, m_binding = 'g_BaseMap', 'g_FurGlossMap', 'g_FurControlMap'
