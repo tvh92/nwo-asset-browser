@@ -48,15 +48,28 @@ def _graph(source, material_key):
     return source.asset_data(graph_key)
 
 
+# The sources a translated receipt is built from, relative to the rc2016 package: the code that runs while a receipt is
+# translated (traced with sys.monitoring) and the modules whose constants it reads (rcra_glsl.LIMITATION).
+# tests/test_translation_cache.py checks both. Editing any other module (the model decoder, blend shapes, the browser)
+# keeps the cache. The asset readers (READERS) are left out: the key holds the material and graph bytes they return.
+CODE_FILES = ('games/rcra/viewer_materials.py', 'games/rcra/surface.py', 'games/rcra/material.py', 'games/rcra/fur.py',
+              'games/rcra/shaders.py', 'games/rcra/texture.py', 'games/rcra/unit_texture.py', 'games/rcra/blender_export.py',
+              'games/rcra/lighting.py', 'shaders/sm5.py', 'shaders/dxbc.py', 'formats/texture.py', 'common.py',
+              'viewer/rcra_glsl.py')
+READERS = ('games/rcra/source.py', 'games/rcra/dsar.py', 'games/rcra/toc.py', 'games/rcra/gdeflate.py')
+# Modules the CODE_FILES import that a translation does not use: display texture loading and Blender image export
+# (viewer.textures, formats.linear_png), the GLSL program emission rcra_glsl runs on a receipt (viewer.shading,
+# viewer.native_glsl) and the 2016 archive readers that formats.texture also serves.
+NOT_TRANSLATION = ('viewer/textures.py', 'formats/linear_png.py', 'viewer/shading.py', 'viewer/native_glsl.py',
+                   'formats/container.py', 'formats/archive.py')
+
+
 def _code_sha256():
-    """The sources a translated receipt depends on: the Rift Apart reader and translation, the SM5 translator and the viewer
-    emitter. Any change to them invalidates every cached translation."""
+    """The sources a translated receipt depends on (CODE_FILES): any change to them invalidates every cached translation."""
     from pathlib import Path
     package = Path(__file__).resolve().parents[2]
-    files = sorted((package / 'games' / 'rcra').glob('*.py')) + [package / 'shaders' / 'sm5.py', package / 'shaders' / 'dxbc.py',
-                                                                 package / 'viewer' / 'rcra_glsl.py']
     try:
-        return hashlib.sha256(b''.join(f.name.encode() + f.read_bytes() for f in files)).hexdigest()
+        return hashlib.sha256(b''.join(name.encode() + (package / name).read_bytes() for name in CODE_FILES)).hexdigest()
     except OSError:   # frozen executable without sources: no disk cache
         return None
 

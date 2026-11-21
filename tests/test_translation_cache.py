@@ -1,4 +1,5 @@
 """Native translations persist on disk across sessions and load back exactly."""
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -142,6 +143,77 @@ class TranslationCodeKeyTests(unittest.TestCase):
                           if self.name in native_glsl.TRANSLATION_CODE_EXCLUDED | {'native_glsl.py'} else b'x'):
             self.assertEqual(len(native_glsl._translation_code_sha256()), 64)
         self.assertTrue((sources / 'shaders' / 'translator.py').exists())
+
+
+def _rc2016_imports(path, package):
+    """Package-relative files of the rc2016 modules ``path`` imports anywhere (module level or in functions)."""
+    import ast
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+        names = []
+        if isinstance(node, ast.ImportFrom) and (node.module or '').startswith('rc2016'):
+            names = [node.module] + [node.module + '.' + a.name for a in node.names]
+        elif isinstance(node, ast.Import):
+            names = [a.name for a in node.names if a.name.startswith('rc2016')]
+        for name in names:
+            relative = Path(*name.split('.')[1:])
+            if (package / relative).with_suffix('.py').exists():
+                found.add(relative.with_suffix('.py').as_posix())
+    return found
+
+
+class RcraReceiptKeyTests(unittest.TestCase):
+    """The Rift Apart receipt cache key (viewer_materials.CODE_FILES) covers the code a translation runs and reads."""
+
+    def test_key_files_import_only_keyed_readers_or_listed_modules(self):
+        from rc2016.games.rcra import viewer_materials as vm
+        package = Path(vm.__file__).resolve().parents[2]
+        known = set(vm.CODE_FILES) | set(vm.READERS) | set(vm.NOT_TRANSLATION)
+        for name in vm.CODE_FILES + vm.READERS + vm.NOT_TRANSLATION:
+            self.assertTrue((package / name).exists(), name)
+        for name in vm.CODE_FILES:
+            self.assertEqual(_rc2016_imports(package / name, package) - known, set(), name)
+        for name in ('games/rcra/model.py', 'games/rcra/morph.py', 'games/rcra/vertex.py', 'viewer/loader.py'):
+            self.assertNotIn(name, vm.CODE_FILES)   # editing these keeps the cache
+
+    @unittest.skipUnless(os.environ.get('RCRA_GAME'), 'RCRA_GAME is not set')
+    def test_translation_runs_only_keyed_code(self):
+        """Every function that runs while materials translate (cache off) is in CODE_FILES or READERS."""
+        import sys
+        from rc2016.games.rcra import viewer_materials as vm
+        from rc2016.games.rcra.source import RcraSource
+        package = Path(vm.__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as folder:
+            source = RcraSource(os.environ['RCRA_GAME'], Path(folder) / 'out')
+            try:
+                ran, monitor = set(), sys.monitoring
+                tool = monitor.PROFILER_ID
+                monitor.use_tool_id(tool, 'receipt-key-test')
+
+                def started(code, _offset):
+                    path = Path(code.co_filename)
+                    if path.is_relative_to(package):
+                        ran.add(path.relative_to(package).as_posix())
+                    return monitor.DISABLE
+                monitor.register_callback(tool, monitor.events.PY_START, started)
+                monitor.set_events(tool, monitor.events.PY_START)
+                try:
+                    for path in ('material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material',
+                                 'material/visualeffect/global/gbl_camera_pane/gbl_camera_pane_hologram.material',
+                                 'material/character/enemy/enm_molonoth_robot/enm_dr_nefarious_laser_tube.material'):
+                        key = next(k for k in source.resolve(path) if source.entries[k]['type'] == 'material')
+                        for translate in (vm.translate, vm.translate_shell):
+                            try:
+                                translate(source, key)
+                            except vm.NotTranslated:
+                                pass
+                finally:
+                    monitor.set_events(tool, 0)
+                    monitor.free_tool_id(tool)
+            finally:
+                source.close()
+        self.assertIn('games/rcra/surface.py', ran)
+        self.assertEqual(ran - set(vm.CODE_FILES) - set(vm.READERS), set())
 
 
 if __name__ == '__main__':
