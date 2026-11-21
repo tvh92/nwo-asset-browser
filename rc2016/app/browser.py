@@ -665,6 +665,8 @@ class AssetBrowser:
         if item is None:
             app.filter_var.set('');app.state_var.set('All');app.folder_scope=''
             if hasattr(app,'shading_var'):app.shading_var.set('All')
+            kind=app._variant_kinds().get(id(record)) if hasattr(app,'hide_variant_vars') else None
+            if kind:app.hide_variant_vars[kind].set(False)   # a hidden variant kind shows again
             app.refresh_table()
             item=next((i for i,r in app.item_by_record.items() if r is record),None)
         if item is None:return False

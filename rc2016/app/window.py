@@ -14,6 +14,7 @@ from rc2016.app.batch import (
     BatchRunner, ExportBatchRunner, ModelCandidate, PipelineBatchRunner, PipelineIndexScanner,
     PipelineModelCandidate, discover_models, ensure_disjoint, folder_layout, parse_prefixes, status_for)
 from rc2016.app.settings import _default_blender, _default_interpreter, _load_settings, _save_settings
+from rc2016.app.variants import VARIANT_KINDS, search_reveals, variant_kind
 from rc2016.common import remember_var, reset_remembered
 from rc2016.games import APP_TITLE, SOURCE_PICKER_TITLE, detect as detect_game
 from rc2016.app.theme import (
@@ -121,9 +122,12 @@ HELP = {
     "tree": (
         "The models in the selected folder, with their output state. Ctrl-click or Shift-click selects several for "
         "extraction. The selection stays when you choose another folder."),
-    "hide_topiary": (
-        "Hides the topiary variant (<name>_topiary.model) of each Rift Apart enemy and vehicle. "
-        "The topiary weapon, plants and NPCs stay listed."),
+    "variants": (
+        "Ticked kinds of model variant are hidden from the list, grid and folder counts. A suffix variant "
+        "(<name>_topiary.model, <name>_snow.model, ...) is hidden only when its base <name>.model is listed, "
+        "so the Topiary Blaster, the topiary plants and models without a base stay listed.\n\n"
+        "A hidden kind shows again while a search word names it, for example 'topiary' or 'legacy'. "
+        "The count is how many listed models are of that kind."),
     "expand": (
         "Opens every folder on the left, or closes them all again.\n\n"
         "Without this, folders open by themselves for short lists and searches. "
@@ -172,12 +176,6 @@ SHADING_FILTERS = {"Native translation": "native translation", "Generic reading"
                    "No material graph": "no material graph", "Exact rules only": None}
 # The game capability (rc2016.games) each asset type needs.
 ASSET_TYPE_CAPABILITY = {"Model": "models", "Level": "levels", "Texture": "textures", "Flash UI": "flash"}
-
-
-def _is_topiary_variant(path: str) -> bool:
-    """True for <name>_topiary.model of an enemy or a vehicle (the 'Hide topiary' filter)."""
-    path = path.casefold()
-    return path.endswith("_topiary.model") and (path.startswith("characters/enemy/") or "vehicle/" in path)
 
 
 class AssetBrowserApp:
@@ -260,7 +258,9 @@ class AssetBrowserApp:
         self._rebuilding = False   # True while the folder tree and the list are refilled; their selection events are ignored
         self.state_var = tk.StringVar(value="All")
         self.shading_var = tk.StringVar(value="All")
-        self.hide_topiary_var = remember_var(tk.BooleanVar(value=False), "browser.hide_topiary")
+        self.hide_variant_vars = {kind.key: remember_var(tk.BooleanVar(value=kind.hidden_by_default), f"browser.hide_variant.{kind.key}")
+                                  for kind in VARIANT_KINDS}
+        self._variant_cache: tuple = (None, {}, {})   # (records list, record key -> variant kind, kind -> count)
         self.prefix_var = remember_var(tk.StringVar(), "export.prefixes")
         # Export options (Options… window): every option is restored from, and saved to, the settings file on change.
         from rc2016.export.models import FORMATS
@@ -411,12 +411,18 @@ class AssetBrowserApp:
         self._gate("decoded_shading", HELP["shading"], shading, "readonly")
         self._gate("decoded_shading", HELP["shading"], shading_label, None)
         shading.bind("<<ComboboxSelected>>", lambda _event: self.refresh_table())
-        topiary_check = ttk.Checkbutton(filters, text="Hide topiary", variable=self.hide_topiary_var,
-                                        command=self.refresh_table)
-        topiary_check.grid(row=0, column=9, padx=(18, 0))
-        self._tip(HELP["hide_topiary"], topiary_check)
+        self.variants_button = variants = ttk.Menubutton(filters, text="Variants")
+        variants.grid(row=0, column=9, padx=(18, 0))
+        self.variants_menu = track(tk.Menu(variants, tearoff=False), background="panel", foreground="fg",
+                                   activebackground="accent", activeforeground="select_fg", disabledforeground="disabled_fg")
+        for kind in VARIANT_KINDS:
+            self.variants_menu.add_checkbutton(label=kind.label, variable=self.hide_variant_vars[kind.key],
+                                               command=self.refresh_table)
+        variants.configure(menu=self.variants_menu)
+        self._update_variants_button()
+        self._tip(HELP["variants"], variants)
         # Model-only controls: hidden for the Texture type, which shares the Search and List|Grid switch.
-        self.model_only_tools = (self.expand_button, state_label, state, shading_label, shading, topiary_check)
+        self.model_only_tools = (self.expand_button, state_label, state, shading_label, shading, variants)
         # Layout of the viewers (all asset types): Vertical = viewport left, controls right; Horizontal = stacked.
         layout_box = ttk.Frame(toolbar)
         layout_box.grid(row=0, column=2, sticky="e", padx=(18, 0))
@@ -997,11 +1003,13 @@ class AssetBrowserApp:
         self._sync_selection()   # selected models stay selected, even the ones this list is about to hide
         open_folders = {item for item in self._folder_items() if self.folder_tree.item(item, "open")} if hasattr(self, "folder_tree") else set()
         terms = needle.split()
-        hide_topiary = self.hide_topiary_var.get()
+        variant_of = self._variant_kinds()
+        hidden_kinds = {key for key, var in self.hide_variant_vars.items() if var.get() and not search_reveals(key, terms)}
+        self._update_variants_button()
         self._cancel_pending_refresh()
         matched, statuses = [], []
         for record in self.records:
-            if hide_topiary and _is_topiary_variant(self._record_path(record)):
+            if hidden_kinds and variant_of.get(id(record)) in hidden_kinds:
                 continue
             is_pipeline = isinstance(record, PipelineModelCandidate)
             relative_model = record.archive_path if is_pipeline else record.relative_model
@@ -1192,6 +1200,34 @@ class AssetBrowserApp:
                 found.append(child)
                 found.extend(self._folder_items(child))
         return found
+
+    def _variant_kinds(self) -> dict[int, str]:
+        """Variant kind of each listed record (by id), worked out once per model list; also counts each kind."""
+        records, kinds, _counts = self._variant_cache
+        if records is not self.records:
+            paths = [self._record_path(record) for record in self.records]
+            listed = frozenset(path.casefold() for path in paths)
+            kinds, counts = {}, {}
+            for record, path in zip(self.records, paths):
+                kind = variant_kind(path, listed)
+                if kind:
+                    kinds[id(record)] = kind
+                    counts[kind] = counts.get(kind, 0) + 1
+            self._variant_cache = (self.records, kinds, counts)
+        return kinds
+
+    def _update_variants_button(self) -> None:
+        """Menu labels with each kind's count, and the button with how many listed models the menu hides."""
+        if not hasattr(self, "variants_menu"):
+            return
+        counts = self._variant_cache[2]
+        hidden = 0
+        for index, kind in enumerate(VARIANT_KINDS):
+            count = counts.get(kind.key, 0)
+            self.variants_menu.entryconfigure(index, label=f"{kind.label}  ({count})" if counts else kind.label)
+            if self.hide_variant_vars[kind.key].get():
+                hidden += count
+        self.variants_button.configure(text=f"Variants: {hidden} hidden" if hidden else "Variants: none hidden")
 
     @staticmethod
     def _record_path(record: ModelCandidate | PipelineModelCandidate) -> str:

@@ -80,6 +80,7 @@ The Level tab and standalone level viewer include **Actors (source placements)**
 - The search box matches path, ID, actor names and animation-set names. Several words must all match.
 - The State filter reflects saved builds in the output root and offers only the states the backend produces: with the full archive pipeline All, READY, EXPORTED (a folder that holds an `export.json`) and PREVIOUS (an earlier research run recorded the model); with the transform-only backend All, READY, VERIFIED, STALE and NO ANIMSET. Browsing does not approve backend cache reuse.
 - The **Shading** filter (All, Native translation, Generic reading, Family fallback, No material graph, Exact rules only) sits next to State and uses the links table ([Rule coverage](#rule-coverage)).
+- The **Variants** menu (`rc2016/app/variants.py`) hides ticked kinds of model variant from the list, grid and folder counts, and shows how many listed models each kind covers. A suffix variant (`_topiary`, `_skeleton`, `_havok`, `_anim`/`_static`/`_nonstatic`, `_snow`, `_economy`, `_cine`/`_hologram`/`_dimensionswap`) counts only when its base `<name>.model` is listed in the same folder, so the Topiary Blaster and the topiary plants stay listed; the `characters/test/` and `legacy/` folders are kinds of their own. Topiary versions and the test folder are hidden by default; each choice is remembered. A hidden kind shows again while a search word names it (`topiary`, `snow`, `legacy`, ...).
 
 ## 3D view
 
@@ -602,7 +603,7 @@ The table is built once per archive on a worker thread (about 20 seconds, about 
 - **Textures tab:** a **Used by** row under the export row lists the models whose materials reference the selected texture. It is marked "(graph default)" when only a material graph's default reaches the texture. **Open model** selects that model in the tree and shows the 3D model tab.
 - **Details tab:** "Placed in levels: N instances in Z zones of L levels", with one line per zone (`level · zone: count`, at most 12 lines, most instances first). A zone that no `.level` lists is marked as such.
 - **Level viewer:** a click identifies a model and **Open in Model tab** selects it in the tree (see [levels](levels.md)).
-- `AssetBrowser.open_model(path)` clears the search, State and Shading filters if they hide the model.
+- `AssetBrowser.open_model(path)` clears the search, State and Shading filters if they hide the model, and shows its variant kind if the Variants menu hides it.
 
 ## Portable export (Extract selected)
 
