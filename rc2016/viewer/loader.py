@@ -49,12 +49,17 @@ def _tangent_w(mesh):
     return w if w is not None else mesh.get('tangent_signs')
 
 
+def _present(values):
+    """A per-vertex stream that is there: a non-empty list or array (arrays cannot be tested for truth)."""
+    return values is not None and len(values) > 0
+
+
 def _vertex_colours(decoded, meshes):
     """{'vertex_colours': (n, 4) uint8 RGBA} for a Rift Apart model with a colour section, else {}: the stored bytes, which
     the translated materials (rcra_glsl) read as TEXCOORD4. Meshes without colours read 255 (1.0), the engine's value for a
     subset without a colour stream. R&C 2016 rules read the colour alpha only (rock_alpha)."""
-    if decoded.get('game')!='rcra' or not any(mesh.get('colors') for mesh in meshes):return {}
-    parts=[np.rint(np.asarray(mesh['colors'],dtype=np.float64).reshape(-1,4)*255.0) if mesh.get('colors')
+    if decoded.get('game')!='rcra' or not any(_present(mesh.get('colors')) for mesh in meshes):return {}
+    parts=[np.rint(np.asarray(mesh['colors'],dtype=np.float64).reshape(-1,4)*255.0) if _present(mesh.get('colors'))
            else np.full((len(mesh['positions']),4),255.0) for mesh in meshes]
     return dict(vertex_colours=np.clip(np.concatenate(parts),0,255).astype(np.uint8))
 
@@ -101,9 +106,9 @@ def _motion_payload(decoded, meshes):
 
 
 def _mesh_payload_arrays(decoded, meshes, selected):
-    """mesh_payload for decode_model(..., as_arrays=True) meshes: vertices, normals and triangles
-    as numpy arrays (viewport.prepare_viewport takes them as-is); uvs, skin and rock alpha as the
-    same flat lists as the list path, since the viewport tests those for truth."""
+    """mesh_payload for decode_model(..., as_arrays=True) meshes: vertices, normals, triangles, uvs ((n, 2)), skin
+    joints and weights (flat, 8 per vertex) and rock alpha as numpy arrays, which viewport.prepare_viewport and
+    set_mesh take as-is (the list path gives the same values as lists)."""
     vertices,normals,raw_vectors,triangles,uvs,batches,joints,weights,alpha,alpha_sources=[],[],[],[],[],[],[],[],[],[]
     tangents=[];uv1s=[];has_uv1=False
     raw_vector_eligible = True
@@ -120,9 +125,9 @@ def _mesh_payload_arrays(decoded, meshes, selected):
             raw_vector_eligible = False
         else:
             raw_vectors.append(_basis_array(raw))
-        colors=mesh.get('colors')
-        alpha.append(np.asarray(colors,dtype=np.float64).reshape(-1,4)[:,3] if colors else np.ones(count))
-        alpha_sources.append(dict(mesh=mesh['index'], source='native_colors_alpha' if colors else 'viewer_white_default_1_runtime_input_unresolved'))
+        colors=mesh.get('colors') if _present(mesh.get('colors')) else None
+        alpha.append(np.asarray(colors,dtype=np.float64).reshape(-1,4)[:,3] if colors is not None else np.ones(count))
+        alpha_sources.append(dict(mesh=mesh['index'], source='native_colors_alpha' if colors is not None else 'viewer_white_default_1_runtime_input_unresolved'))
         if mesh.get('skin_joint_array') is not None:
             joints.append(np.asarray(mesh['skin_joint_array'],dtype=np.float64));weights.append(np.asarray(mesh['skin_weight_array'],dtype=np.float64))
         else:
@@ -149,10 +154,10 @@ def _mesh_payload_arrays(decoded, meshes, selected):
                 static_vector_eligible=bool(raw_vector_eligible and len(raw_vectors)==len(vertices)),
                 tangents=np.concatenate(tangents) if len(tangents)==len(vertices) else None,
                 triangles=np.concatenate(triangles),
-                uvs=np.concatenate(uvs).tolist() if uvs is not None else None,batches=batches,
+                uvs=np.concatenate(uvs) if uvs is not None else None,batches=batches,
                 **({'uv1s':np.concatenate(uv1s)} if has_uv1 else {}),
-                skin_joints=np.concatenate(joints).ravel().tolist(),skin_weights=np.concatenate(weights).ravel().tolist(),
-                rock_alpha=np.concatenate(alpha).tolist(),rock_alpha_sources=alpha_sources,**_vertex_colours(decoded,meshes),
+                skin_joints=np.concatenate(joints).ravel(),skin_weights=np.concatenate(weights).ravel(),
+                rock_alpha=np.concatenate(alpha),rock_alpha_sources=alpha_sources,**_vertex_colours(decoded,meshes),
                 source_sha256=decoded['source_sha256'],selected_mesh_indices=sorted(selected),
                 source_exact_geometry=True,game_equivalence=False,material_preview='neutral geometry inspection')
 

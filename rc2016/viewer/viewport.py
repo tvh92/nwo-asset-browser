@@ -301,10 +301,11 @@ def _prepare_viewport_numpy(payload, np):
         keep = square > 1e-40
         normals = np.where(keep[:, None], accum / np.sqrt(np.where(keep, square, 1.0))[:, None], (0.0, 0.0, 1.0))
     floats = lambda values: (ctypes.c_float * values.size).from_buffer_copy(np.ascontiguousarray(values, dtype=np.float32))
-    uvs = payload.get("uvs")
-    uv_array = floats(np.asarray(uvs, dtype=np.float64)) if uvs and len(uvs) == len(vertices) else None
-    joints, weights = payload.get("skin_joints") or [], payload.get("skin_weights") or []
-    skinned = len(joints) == len(weights) == 8 * len(vertices) and any(weights)
+    uvs = payload.get("uvs")   # lists or arrays (loader._mesh_payload_arrays): tested with len, not for truth
+    uv_array = floats(np.asarray(uvs, dtype=np.float64)) if uvs is not None and len(uvs) == len(vertices) else None
+    joints, weights = payload.get("skin_joints"), payload.get("skin_weights")
+    joints, weights = (np.asarray(values if values is not None else (), dtype=np.float64).ravel() for values in (joints, weights))
+    skinned = len(joints) == len(weights) == 8 * len(vertices) and bool(weights.any())
     raw_values = payload.get("raw_vectors")
     raw_array = None
     if payload.get("static_vector_eligible") and raw_values is not None:
@@ -324,8 +325,8 @@ def _prepare_viewport_numpy(payload, np):
     arrays = (floats(vertices), floats(normals),
               (ctypes.c_uint * triangles.size).from_buffer_copy(np.ascontiguousarray(triangles, dtype=np.uint32)),
               uv_array,
-              floats(np.asarray(joints, dtype=np.float64)) if skinned else None,
-              floats(np.asarray(weights, dtype=np.float64)) if skinned else None,
+              floats(joints) if skinned else None,
+              floats(weights) if skinned else None,
               raw_array, tangent_array)
     low, high = vertices.min(axis=0), vertices.max(axis=0)
     center = (low + high) * 0.5
@@ -350,8 +351,9 @@ def prepare_viewport(payload):
     flat_normals=[x for row in normals for x in row]
     flat_indices=[i for tri in triangles for i in tri]
     uvs=payload.get("uvs")
-    flat_uvs=[x for row in uvs for x in row] if uvs and len(uvs)==len(vertices) else []
-    joints,weights=payload.get("skin_joints") or [],payload.get("skin_weights") or []
+    flat_uvs=[float(x) for row in uvs for x in row] if uvs is not None and len(uvs)==len(vertices) else []
+    joints,weights=[[float(x) for x in payload.get(key)] if payload.get(key) is not None else []
+                    for key in ("skin_joints","skin_weights")]
     skinned=len(joints)==len(weights)==8*len(vertices) and any(weights)
     raw_array = None
     raw_values = payload.get("raw_vectors")
@@ -511,8 +513,11 @@ class ModelViewport(_TkFrame):
         self._morph_weights = self._motion = None
         if self._shading_draw_failed:   # a failed draw belongs to the previous model; the next one tries the shaded path again
             self._shading_draw_failed, self.shading_error = False, None
-        alpha = payload.get('rock_alpha') or []
-        self._rock_alpha = (ctypes.c_float*len(alpha))(*alpha) if len(alpha)==len(payload.get('vertices',[])) else None
+        alpha = payload.get('rock_alpha')   # a list or an array (loader._mesh_payload_arrays)
+        self._rock_alpha = None
+        if alpha is not None and len(alpha) == len(payload.get('vertices', [])):
+            import numpy as np
+            self._rock_alpha = (ctypes.c_float * len(alpha)).from_buffer_copy(np.ascontiguousarray(alpha, dtype=np.float32))
         self._uv1 = None   # the second UV pair (window glass rule), (u, v) per vertex
         uv1 = payload.get('uv1s')
         if uv1 is not None and len(uv1) == len(payload.get('vertices', [])):

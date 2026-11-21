@@ -255,8 +255,11 @@ class ModelDecodeTests(unittest.TestCase):
             self.assertEqual(old['normals'], [tuple(v) for v in new['normals'].tolist()])
             self.assertEqual(old['triangles'], [tuple(t) for t in new['triangles'].tolist()])
             self.assertEqual(old['uvs'], [tuple(v) for v in new['uvs']])
-            for key in ('batches', 'skin_joints', 'skin_weights', 'rock_alpha', 'rock_alpha_sources', 'selected_mesh_indices', 'source_sha256'):
+            for key in ('batches', 'rock_alpha_sources', 'selected_mesh_indices', 'source_sha256'):
                 self.assertEqual(old[key], new[key], key)
+            for key in ('skin_joints', 'skin_weights', 'rock_alpha'):   # arrays in the array payload
+                self.assertIsInstance(new[key], np.ndarray)
+                self.assertEqual(old[key], new[key].tolist(), key)
             self.assertEqual(old['static_vector_eligible'], new['static_vector_eligible'])
             self.assertEqual(old['raw_vectors'], new['raw_vectors'])
             from rc2016.viewer.viewport import prepare_viewport
@@ -275,7 +278,7 @@ class ModelDecodeTests(unittest.TestCase):
         old = ld.mesh_payload(dict(decoded, meshes=[listed]), 'All')
         self.assertIsNone(new['uvs']); self.assertIsNone(old['uvs'])
         for key in ('skin_joints', 'skin_weights', 'rock_alpha'):
-            self.assertEqual(old[key], new[key])
+            self.assertEqual(old[key], new[key].tolist())
 
 
 class LoaderTests(unittest.TestCase):

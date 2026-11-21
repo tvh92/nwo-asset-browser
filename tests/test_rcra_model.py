@@ -156,7 +156,7 @@ class SyntheticModelTests(unittest.TestCase):
         np.testing.assert_allclose(quad['positions'][2], (2.0, 1.0, 0.0))        # 4096/4096 + offset x 1
         np.testing.assert_allclose(quad['normals'], [[0, 0, 1]] * 4, atol=2e-3)
         np.testing.assert_allclose(quad['uv0'][2], (1.0, 0.0))                  # V flipped
-        self.assertEqual(quad['uv1'][2], (0.5, 0.5))
+        self.assertEqual(tuple(quad['uv1'][2]), (0.5, 0.5))
         self.assertEqual(quad['triangles'].tolist(), [[0, 1, 2], [0, 2, 3]])
         self.assertAlmostEqual(quad['colors'][0][3], 128 / 255)
         self.assertEqual(quad['material']['path'], 'materials/test.material')
@@ -169,6 +169,10 @@ class SyntheticModelTests(unittest.TestCase):
         b = rm.decode_model('t', data=build_model(), as_arrays=False)
         np.testing.assert_allclose(np.array(b['meshes'][1]['positions']), a['meshes'][1]['positions'])
         self.assertEqual(b['meshes'][1]['triangles'], [[0, 1, 2]])
+        for x, y in zip(a['meshes'], b['meshes']):   # as_arrays builds the weight lists only when read (SkinLists)
+            self.assertEqual(list(x['weights']), y['weights'])
+            np.testing.assert_allclose(x['colors'], y['colors'])
+            np.testing.assert_allclose(x['uv1'], y['uv1'])
 
     def test_lods_and_viewer_payload(self):
         d = rm.decode_model('t', data=build_model(), as_arrays=True)
@@ -218,6 +222,9 @@ class RealModelTests(unittest.TestCase):
         self.assertIn('hero_Ratchet_Boots', [m['name'] for m in d['materials']])
         self.assertEqual(d['joint_count'], 205)
         self.assertTrue(all(m['skinned'] and m['unweighted_vertices'] == 0 for m in d['meshes']))
+        path = 'characters/hero/hero_ratchet/hero_ratchet.model'
+        listed = rm.decode_model(path, data=self.source.asset_data(self.source.resolve(path)[0]), lod='Highest')
+        self.assertEqual(list(d['meshes'][0]['weights']), listed['meshes'][0]['weights'])   # SkinLists reads the same lists
         payload = mesh_payload(d, 'Highest', 0)
         height = payload['vertices'][:, 2].max() - payload['vertices'][:, 2].min()
         self.assertAlmostEqual(float(height), 1.39, delta=0.02)

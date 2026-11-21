@@ -70,14 +70,15 @@ def _fields(raw, count, bits, per_vertex=6):
 
 def _runs(words, chunk):
     """Mesh vertex indices of one chunk's (skip, run) words."""
-    out, at = [], chunk * WINDOW
-    for word in words:
-        at += word & 0xFFFF
-        run = (word >> 16) or 32
-        out.append(np.arange(at, at + run, dtype=np.int64))
-        at += run
-    require(at <= (chunk + 1) * WINDOW, 'morph runs leave their 2560-vertex window')
-    return np.concatenate(out) if out else np.zeros(0, np.int64)
+    words = np.asarray(words, np.int64)
+    if not len(words):
+        return np.zeros(0, np.int64)
+    runs = words >> 16
+    runs[runs == 0] = 32
+    ends = chunk * WINDOW + np.cumsum((words & 0xFFFF) + runs)   # one past each run
+    require(ends[-1] <= (chunk + 1) * WINDOW, 'morph runs leave their 2560-vertex window')
+    # Each run's vertices: its first vertex (end - run) plus 0 .. run - 1.
+    return np.repeat(ends - runs, runs) + (np.arange(runs.sum()) - np.repeat(np.cumsum(runs) - runs, runs))
 
 
 def model_shapes(dat1, table, mesh_vertex_counts=None):
@@ -130,7 +131,7 @@ def model_shapes(dat1, table, mesh_vertex_counts=None):
             field_at = do + data_at + data_offsets[k]
             vertices, values = [], []
             for c, (vertex_count, word_count) in enumerate(chunks):
-                words = struct.unpack_from(f'<{word_count}I', dat1, word_at)
+                words = np.frombuffer(dat1, '<u4', word_count, word_at)
                 word_at += 4 * word_count
                 index = _runs(words, c)
                 require(len(index) == vertex_count, 'morph runs do not match the chunk vertex count')

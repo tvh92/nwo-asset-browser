@@ -199,7 +199,8 @@ def _batch_weights(skin, offset, count, limit):
 
 
 def _mesh_weights(skin, remap, batches, first_batch, batch_count, vertex_count, joint_count, mesh_index, as_arrays):
-    """(per-vertex [(joint, weight)] lists, (n, 8) joint array, (n, 8) weight array) of one mesh's skin batches."""
+    """(per-vertex [(joint, weight)] lists, (n, 8) joint array, (n, 8) weight array) of one mesh's skin batches. With
+    ``as_arrays`` the lists are a ``SkinLists`` view over the arrays, built per vertex only when read."""
     if first_batch + batch_count > len(batches):
         raise ValueError(f'Mesh {mesh_index} skin batches run past the batch table')
     joints = np.zeros((vertex_count, MAX_INFLUENCES), np.int64)
@@ -228,8 +229,41 @@ def _mesh_weights(skin, remap, batches, first_batch, batch_count, vertex_count, 
         raise ValueError(f'Mesh {mesh_index} has a vertex with zero skin weight')
     values = raw / total[:, None]
     joints = np.where(raw > 0, joints, 0)
-    lists = [[(j, w) for j, w in zip(jr, wr) if w > 0] for jr, wr in zip(joints.tolist(), values.tolist())]
-    return lists, (joints if as_arrays else None), (values if as_arrays else None)
+    if as_arrays:
+        return SkinLists(joints, values), joints, values
+    return _influences(joints, values), None, None
+
+
+def _influences(joints, values):
+    return [[(j, w) for j, w in zip(jr, wr) if w > 0] for jr, wr in zip(joints.tolist(), values.tolist())]
+
+
+class SkinLists:
+    """The per-vertex [(joint, weight)] lists of an as_arrays mesh, read from its (n, 8) arrays on first use: the viewer
+    reads the arrays only, and building ~200k Python lists took most of a large rig's decode."""
+
+    def __init__(self, joints, values):
+        self._joints, self._values, self._lists = joints, values, None
+
+    def _built(self):
+        if self._lists is None:
+            self._lists = _influences(self._joints, self._values)
+        return self._lists
+
+    def __len__(self):
+        return len(self._joints)
+
+    def __bool__(self):
+        return len(self._joints) > 0
+
+    def __getitem__(self, index):
+        return self._built()[index]
+
+    def __iter__(self):
+        return iter(self._built())
+
+    def __eq__(self, other):
+        return list(self) == list(other)
 
 
 def _tuples(values):
@@ -311,15 +345,17 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
                 membership[index].append(dict(look=look_row['index'], lod=level['index']))
     selected = _selected_meshes(looks, mesh_count, lod, look)
     index_words = np.frombuffer(indexes, '<u2')
-    # As in the 2016 schema, colours and UV1 are lists of tuples in both modes (consumers test them for truth).
-    uv1_out = _tuples(uv1) if uv1 is not None else None
-    colors_out = _tuples(colors) if colors is not None else None
+    # Lists mode keeps the 2016 schema's lists of tuples; as_arrays gives (n, k) arrays, colours and UV1 included
+    # (consumers test those with ``is not None``, not for truth).
     if not as_arrays:
         positions_out, normals_out, uvs_out = _tuples(positions), _tuples(normals), _tuples(uvs)
         tangents_out, signs_out, w_out = _tuples(tangents), tangent_signs.tolist(), tangent_w.tolist()
+        uv1_out = _tuples(uv1) if uv1 is not None else None
+        colors_out = _tuples(colors) if colors is not None else None
     else:
         positions_out, normals_out, uvs_out = positions, normals, uvs
         tangents_out, signs_out, w_out = tangents, tangent_signs, tangent_w
+        uv1_out, colors_out = uv1, colors
     result = []
     for mesh_index in selected:
         at = mesh_index * MESH_STRIDE
