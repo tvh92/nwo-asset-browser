@@ -417,7 +417,7 @@ class AssetBrowser:
         self.motion_work=LatestWork();self.motion_job=None;self.motion_busy=False;self.motion_start=0.0
         tip('Play the vertex programs that move this model\'s vertices over time (crowds and other vertex-animation '
             'textures, flags, wind sway, rotating parts) on the shader clock, from time 0. The 3D view shows the newest '
-            'frame the worker has finished, so a heavy model (the stadium crowd: about 3 frames a second) steps. Off '
+            'frame the worker has finished, so a heavy model steps (the stadium crowd: about 10 frames a second). Off '
             'shows time 0. Wind, force fields and other engine inputs stay at rest. Shown only for models with such '
             'programs (Rift Apart).',self.vertex_motion_check)
         tip('Shade materials from their translated game shader program instead of the generic reading. Replaces the fallback rules only; exact hand-decoded rules stay.\nShown when a material of this model has a translation; Shaded mode only.',self.native_check)

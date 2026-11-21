@@ -616,10 +616,12 @@ def at_time(recipe, local, reader, offset, normals, seconds):
 class VertexMotion:
     """The meshes of a decoded model whose vertex programs move over shader time. ``at(seconds)`` gives
     {mesh index: (positions, normals)} in the decoder's frame (positions with the decoder's offset, as the mesh's own);
-    a group that stops evaluating (non-finite values) is left out of that call."""
+    a group that stops evaluating (non-finite values) is left out of that call. ``meshes`` limits the run to those mesh
+    indices (the viewer's shown LOD), so the other meshes' vertices are not evaluated."""
 
     def __init__(self):
         self.groups = []   # (recipe, local inputs, reader, offset, stored normals, [(mesh index, start, count)])
+        self._cuts = {}    # (group number, meshes) -> (local inputs, stored normals, [(mesh index, start, count)])
 
     def add(self, recipe, local, reader, offset, normals, meshes):
         self.groups.append((recipe, local, reader, offset, normals, meshes))
@@ -628,9 +630,27 @@ class VertexMotion:
     def meshes(self):
         return [index for group in self.groups for index, _start, _count in group[5]]
 
-    def at(self, seconds):
+    def _cut(self, number, only):
+        """A group's inputs, normals and mesh spans cut to the meshes in ``only`` (None: all of them)."""
+        recipe, local, reader, offset, normals, meshes = self.groups[number]
+        if only is None:
+            return local, normals, meshes
+        key = (number, only)
+        if key not in self._cuts:
+            kept = [(i, s, c) for i, s, c in meshes if i in only]
+            rows = np.concatenate([np.arange(s, s + c) for _i, s, c in kept]) if kept else np.zeros(0, np.int64)
+            starts = np.cumsum([0] + [c for _i, _s, c in kept])
+            cut = {k: (v[rows] if np.ndim(v) else v) for k, v in local.items()}
+            self._cuts[key] = (cut, normals[rows], [(i, int(s), c) for (i, _s, c), s in zip(kept, starts)])
+        return self._cuts[key]
+
+    def at(self, seconds, meshes=None):
         out = {}
-        for recipe, local, reader, offset, normals, meshes in self.groups:
+        only = None if meshes is None else frozenset(meshes)
+        for number, (recipe, _local, reader, offset, _normals, _meshes) in enumerate(self.groups):
+            local, normals, meshes = self._cut(number, only)
+            if not meshes:
+                continue
             try:
                 result = at_time(recipe, local, reader, offset, normals, seconds)
             except (Unsupported, sm5.Unknown, ValueError, KeyError, OSError):

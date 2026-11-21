@@ -35,7 +35,7 @@ class FakeMotion:
     def __init__(self, count=3):
         self.count = count
 
-    def at(self, seconds):
+    def at(self, seconds, meshes=None):
         positions = np.zeros((self.count, 3))
         positions[:, 0] = seconds
         return {4: (positions, np.tile([0.0, 0.0, 1.0], (self.count, 1)))}
@@ -57,6 +57,10 @@ class TimerTests(unittest.TestCase):
         out = motion.at(2.0)
         np.testing.assert_allclose(out[7][0], [[2, 10, 0]])
         np.testing.assert_allclose(out[9][0][:, 0], [3, 4])
+        only = motion.at(2.0, [9])   # the shown meshes only: the same values, mesh 7 not evaluated
+        self.assertEqual(list(only), [9])
+        np.testing.assert_allclose(only[9][0], out[9][0])
+        self.assertEqual(motion.at(2.0, []), {})
 
     def test_translation_binds_the_timer_as_an_input(self):
         bindings = rv._VertexBindings(None, None, dict(colour=False, uv1=False, uv_word=0, scale=1.0), 0)

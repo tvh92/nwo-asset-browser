@@ -91,7 +91,7 @@ def _motion_payload(decoded, meshes):
 
     def at(seconds):
         index,positions,normals=[],[],[]
-        for mesh,(p,n) in motion.at(seconds).items():
+        for mesh,(p,n) in motion.at(seconds,starts).items():
             if mesh in starts:
                 index.append(np.arange(starts[mesh],starts[mesh]+len(p),dtype=np.int64))
                 positions.append(_basis_array(p));normals.append(_basis_array(n))
