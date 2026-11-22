@@ -182,7 +182,8 @@ class GlassEntryTests(unittest.TestCase):
         """The preview's adapted luminance is the translated programs' review value (the game's 0.18 / L exposure at 1)."""
         from nwo.games.rcra import surface
         self.assertEqual(shading.RCRA_ADAPTED_LUMINANCE, surface.REVIEW_ADAPTED_LUMINANCE)
-        self.assertEqual(surface.REVIEW_VALUES['GlobalWorldCBuffer.m_AdaptedLuminance'], 0.18)
+        for name in ('m_AdaptedLuminance', 'm_ActualLuminance', 'm_ToneMapAnchor'):   # one review luminance for all three
+            self.assertEqual(surface.REVIEW_VALUES['GlobalWorldCBuffer.' + name], 0.18)
 
 
 @unittest.skipUnless(GAME, 'RCRA_GAME is not set')

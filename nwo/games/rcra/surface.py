@@ -85,12 +85,17 @@ class _NotAffine(Unsupported):
 # render exposes by 1 with no automatic exposure, which is the game's exposure at L = 0.18: the review adapted luminance.
 REVIEW_ADAPTED_LUMINANCE = 0.18
 
-# Engine values a Blender material cannot supply, bound to review values (everything not listed is 0): the adapted
-# luminance above (as the viewer's RCRA_ADAPTED_LUMINANCE), the pixel centre of a 1920x1080 view for screen-space dither.
-# The measured luminance and the tone-map anchor are a review value of 1 (their relation to the exposure is not traced).
+# The frame's world-buffer fill (RiftApart.exe 0x141206700) stores the measured luminance as m_ActualLuminance, clamped to
+# [1e-4, 100] as the adapted one is, and m_ToneMapAnchor as 2^(EV - 13) from the tone-map settings (0x1411dcf00; with the
+# tone map off the EV is 10.526, 2^-2.474 = 0.18). Both are luminances in the adapted luminance's units, and within the
+# adaptation range the adapted luminance follows the measured one, so the review render, with nothing to meter, binds both
+# at the review adapted luminance too.
+# Engine values a Blender material cannot supply, bound to review values (everything not listed is 0): the three
+# luminances above (as the viewer's RCRA_ADAPTED_LUMINANCE), the pixel centre of a 1920x1080 view for screen-space dither.
 # Not game data.
-REVIEW_VALUES = {'GlobalWorldCBuffer.m_AdaptedLuminance': REVIEW_ADAPTED_LUMINANCE, 'GlobalWorldCBuffer.m_ActualLuminance': 1.0,
-                 'GlobalWorldCBuffer.m_ToneMapAnchor': 1.0, 'SV_POSITION.x': 0.5, 'SV_POSITION.y': 0.5,
+REVIEW_VALUES = {'GlobalWorldCBuffer.m_AdaptedLuminance': REVIEW_ADAPTED_LUMINANCE,
+                 'GlobalWorldCBuffer.m_ActualLuminance': REVIEW_ADAPTED_LUMINANCE,
+                 'GlobalWorldCBuffer.m_ToneMapAnchor': REVIEW_ADAPTED_LUMINANCE, 'SV_POSITION.x': 0.5, 'SV_POSITION.y': 0.5,
                  'SV_POSITION.z': 0.5, 'SV_POSITION.w': 1.0, 'GlobalViewportCBuffer.m_Dimensions': 1920.0,
                  'GlobalViewportCBuffer.m_Dimensions+4': 1080.0, 'GlobalViewportCBuffer.m_InvDimensions': 1 / 1920.0,
                  'GlobalViewportCBuffer.m_InvDimensions+4': 1 / 1080.0, 'GlobalViewportCBuffer.m_NearClip': 0.1,
