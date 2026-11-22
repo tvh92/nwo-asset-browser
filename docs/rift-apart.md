@@ -333,9 +333,16 @@ Four things differ from 2016:
 | `0x2BB5BC8F` base | Joint records and scale tail as in 2016; one additive clip adds the 4-byte (u16 joint, u16 value) records the built header counts, which are not read |
 
 A clip with only custom float tracks (`0x14014CB6`/`0x116EB684`: camera and property curves) is not skeletal and is
-refused. The root motion section `0xE08AA35F` is read by `motion` ([Root motion](#root-motion)); the path section
-`0x3976E44C` (two 4x4 float matrices) and triggers are not read; the morph sections are read by `rcra.morph`
-([Blend shapes](#blend-shapes)).
+refused. The root motion section `0xE08AA35F` is read by `motion` ([Root motion](#root-motion)); the morph sections
+are read by `rcra.morph` ([Blend shapes](#blend-shapes)); triggers are not read.
+
+**Path section** `0x3976E44C` (in 23,295 clips, always 128 bytes): two 4x4 f32 matrices, row-vector layout (three
+basis rows, then the translation row; the last column is always 0, 0, 0, 1). In 22,873 clips both are a rotation
+times a uniform scale; in 11,683 the two are equal and in 2,454 both are the identity. The game does not read it:
+its id occurs nowhere in `RiftApart.exe` (code or data), while the clip loader names the root motion section
+(`0x140F27724`). It is not root motion, a joint's transform, or the root motion start: in Ratchet's clips the
+matrices sit about 1.2 units up, with a 9° pitch and, in some, a 1.5-unit sideways offset, and match no joint's world
+transform. Neither the viewer nor the export uses it.
 
 **Scale sentinel.** In 10 additive clips (bladeball turns, horned-toad aim and look layers, the emergency-raft
 wobble) a joint's packed scale is `0x8000` on all three axes, which would be −8 or −16 (exponent 12 or 11).
@@ -375,12 +382,19 @@ and translation `start_t + start_q * t`. There is one record per frame, or one m
 the frame table). Record 0 has the identity rotation.
 
 - **Format 0** (16 bytes; animset clips): i16 rotation xyzw with unit length at 32767, i16 translation xyz, u8
-  exponent e (the translation is the integer times 2^-e, 12 in most records), and a u8 that only kind-3
-  (locomotion) clips set. That byte is not read.
-- **Format 1** (24 bytes; mostly cutscene shots): a u64 smallest-three rotation, f32 translation xyz, and a u32 that
-  171 cutscene clips set. That u32 is not read. The rotation word holds three signed 20-bit fields from bit 0, each
+  exponent e (the translation is the integer times 2^-e, 12 in most records), and the i8 foot phase.
+- **Format 1** (24 bytes; mostly cutscene shots): a u64 smallest-three rotation, f32 translation xyz, and a u32 whose
+  low byte is the i8 foot phase. The rotation word holds three signed 20-bit fields from bit 0, each
   times sqrt(1/2) / (2^19 - 1). They are the components other than the largest, in xyzw order, and bits 60-61 give
   the largest one's index. That component is sqrt(1 - the others' squares), so it is positive.
+
+**Foot phase.** Kind-3 (locomotion) clips set it in every record: the i8 / 127, −1 where the left foot lands and +1
+where the right foot lands, linear in between. In Ratchet's `neutral_strafe_walk_n` it is −1 at frame 0 with the left
+foot planted and +1 at frame 14 as the right foot lands, and his strafe run is the same over 20 frames. Of the 1,108
+format-0 kind-3 clips, 845 vary and 263 hold one value (−91 in `walk_forward_wrench`); 164 format-1 kind-3 cutscene
+clips carry the same triangle in the u32 (all below 256). Kind-2 clips leave it 0, except 7 cutscene clips whose u32
+holds larger values, which are not read. `motion` returns it as `phase` (None unless kind 3); playback does not use
+it. How the runtime uses it (for example to match the step of blended locomotion clips) is not traced.
 
 **Coverage.** All 23,317 installed clips read. 10,464 have records (3,700 in format 0, 6,764 in format 1). In each
 of them the stored minimum and maximum equal those of `start_t + start_q * t` within quantization: format 0's
@@ -406,7 +420,7 @@ as well, such as jump arcs and attack lunges.
 (record 0 inverted, times record f). A closing record past the last frame is not played. With `root_motion`,
 `AnimationLibrary.clip_frames` applies it to the joints without a parent: their local T R S becomes D T R S. This
 drives the viewer's **Root motion** box ([viewer](viewer.md#animation-playback)) and the export's *Root motion* option.
-The scene placement of the start transform is not used, and neither is the `0x3976E44C` path section.
+The scene placement of the start transform is not used.
 
 ### Skinning
 
@@ -524,28 +538,65 @@ and that `RATC_BOARDS_SLICE1_017` drives 53 of Ratchet's shapes.
 ### Additive layers
 
 1,033 clips carry the additive flag (built-header bit `0x40`): aims, head looks, leans, twitches, face pose clips. The
-game adds them to whatever its animation graph plays. An animset's graph is its driver classes: 80-byte records in
-`0x66CA6C6F`, a 16-byte lookup per class in `0xA40B51D2` whose first u32 is the byte offset of the class's node data
-in `0x73CEE17F`. The node data layout is not decoded. `rcra.animation.driver_classes` returns each class's bytes as
-u32 words, and `RcraAnimationLibrary.layer_partners` keeps the words that are name hashes of the animset's own clips.
-A class that holds an additive clip and absolute clips adds the layer over them: the thug shooter's aim-idle class
-holds `shooter_aim_idle_fwd`, `_l090` and `_r090` with `Shooter_Aim_Idle_Fwd_Pitch`, `_L090_Pitch` and `_R090_Pitch`;
-its strafe class holds the eight strafe runs with the three strafe aims.
+game adds them to what its animation graph plays. An animset's graph is its driver classes, which
+`rcra.animation.driver_graph` decodes (layout in the module docstring):
 
-Partners are ranked by the name words they share with the layer, then by class order, so a layer starts over its
-best-named partner. Over the install, 541 of the 951 skeletal additive clips sit in a class, and 290 share one with an
-absolute clip; the others' base comes from a parent node, which is not read. On `enm_thug_brawler` 55 of its 160
-additive clips get partners.
+- **Class:** an 80-byte record in `0x66CA6C6F` (name hash, data size, root node, node count, bindings), a 16-byte row in
+  `0xA40B51D2` (offset of its data in `0x73CEE17F`), and that data: nodes, then 12-byte variable bindings. Names are
+  game CRC-32 hashes of strings in the animset (`Celebrate`, `Node 4`, `Aim_Horizontal`). Empty classes have size 0.
+- **Node:** a 40-byte header (name hash, kind, id, phase at +8, rate at +16, a fixed signature at +24 to +36), then
+  its kind's fields. Children are u16 word offsets into the class data, inline or in u16 lists after the nodes.
 
-`tests/test_layers.py` checks `layer_over`, the class split at lookup offsets and the ranking, and with `RCRA_GAME`
-that `Shooter_Aim_Idle_Fwd_Pitch` plays over `shooter_aim_idle_fwd` and moves it.
+| Kind | Nodes | Fields |
+| --- | --- | --- |
+| 1 clip | 8,896 | a reference the animset's clip lookup resolves (`clip_references`): a clip asset, or a clip group; flag `0x100` on 2,383, of which 1,698 name an additive clip and 4 an absolute one (the rest name groups or clips of other sets) |
+| 2 pair | 1,260 | child 0, child 1, a mode byte (2 in 1,183, 1 in 56, 3 in 21) and a weight (1 in 1,193; 0, 0.25, 0.4, 0.5, 0.7, 0.8 or 0.95 in the others) |
+| 5 blend space | 1,006 | a variable slot and per child a (low, high) span: 0 to 1, or angles such as −180 to −90, −180 to 0, −90 to 90 … for five children 90° apart, so each child's span reaches its neighbours' positions |
+| 7 select | 291 | a list of children (states, variations) |
+| 9 list | 158 | a list of children |
+| 10, 12 | 26 | one child |
+
+- **Bindings:** u32 variable name hash, u16 slot, u16 word offset of the bound field or of a list of them, u32 flags
+  (low byte set for a list). Over the install, 1,654 bindings drive a blend space's input (1,004 fields), an additive
+  clip's phase (929: head and aim layers posed by `Head_Aim_Horizontal` and the like), a list's +44 (90) and a pair's
+  weight (15).
+- **Clip lookup** `0xB79CF1D7`: 24-byte rows (u32 hash, u32 kind, i32 group offset, u64 asset id, u32 0). Kinds 0 and
+  `0x8000` name a clip by its path CRC-64. Kind 1 names a group: an inner DAT1 in `0x9FD19C20` whose entries list tag
+  hashes and their clips (`React_Knockback_Group`: front, back, left and right, high and low). All 3,325 group
+  entries' clips resolve through the lookup; 32 groups are empty.
+
+Every class of the install's 321 animsets with classes parses (4,199 classes, 11,637 nodes): the header signature
+finds exactly the record's node count, the root is a node and every child link lands on one. 10,439 nodes are
+reached from their class root; the others are not linked to it, and 390 of them are named by nothing in their class.
+
+**Partners.** A pair whose child 1 holds additive clips adds them over child 0. `RcraAnimationLibrary.layer_partners`
+lists the absolute clips under child 0 (a group's clips included) of every pair that holds the layer in an offered
+animset, the pair nearest the layer first, then graph order; `layer_weight` gives that pair's weight. The thug
+shooter's aim idle class is a blend space on `Aim_Horizontal` over three pairs, (`shooter_aim_idle_fwd`,
+`Shooter_Aim_Idle_Fwd_Pitch`) and its `_l090` and `_r090` siblings, so each pitch layer plays over its own idle.
+Grunthor's eye looks are added at 0.5.
+
+| Count (skeletal additive clips, by name) | Before (clip hashes shared with a class) | Graph |
+| --- | --- | --- |
+| In a class | 541 of 951 | 806 |
+| With an absolute base | 290 | 431 |
+| `enm_thug_brawler` (offered clips) | 55 of 160 | 72 |
+
+That a pair adds child 1 scaled by its weight is a reading of the data (mode 2 pairs hold the additive clips in
+child 1), as are the phase and rate fields; the evaluator is not traced in the runtime. A weight a variable drives,
+or one stored as 0 that no variable drives (game code then sets it), plays at 1.
+
+`tests/test_layers.py` checks the parser, bindings, groups, partners and weight on a synthetic animset, the weighted
+`layer_over`, and with `RCRA_GAME` that each thug aim pitch layer plays over its own idle and moves it, and
+Grunthor's eye-look weight of 0.5.
 
 ### Not decoded
 
-- The path section `0x3976E44C` and the unread record values of the root motion section (the kind-3 byte, the
-  format-1 u32).
-- The driver class node layout, and so which partner the animation graph plays a layer over at a moment, its
-  blend weights, and the base of a layer whose node holds no absolute clip ([Additive layers](#additive-layers)).
+- Game state in the animation graph: which state a select node plays, a blend space's input, a group's tags, the
+  variables that drive phases and weights, and the base of a layer whose class holds no absolute clip under the pair
+  (it plays over whatever other classes play). The pair mode byte, the clip node mode, the list node's bound +44 and
+  the class record's remaining words (four floats, possibly blend times) are not read.
+- The format-1 root motion u32 of 7 kind-2 cutscene clips.
 - The per-channel u32 after the clip morph channel hashes, and the last u32 of the model morph info header.
 - The face pose clips' group names (`0x495BA079`), and the gesture clips some performance sets also play.
 

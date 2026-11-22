@@ -998,7 +998,9 @@ class ModelExporter:
                     kind, fps, tracks = clip_tracks(library, i, options.root_motion, base)
                     name = labels[i]
                     if base is not None and kind == 'relative/additive-style layer':
-                        name, layered = f'{labels[i]} (over {library.clips[base]["name"]})', layered + 1
+                        weight = library.layer_weight(i, base) if hasattr(library, 'layer_weight') else 1.0
+                        at = '' if weight == 1.0 else f' at {weight:g}'
+                        name, layered = f'{labels[i]} (over {library.clips[base]["name"]}{at})', layered + 1
                     morph_weights = library.morph_weights(i, len(tracks)) if shapes and hasattr(library, 'morph_weights') else None
                     clips_out.append(dict(name=name, kind=kind, fps=fps, tracks=tracks, morph_weights=morph_weights,
                                           source=library.clips[i].get('source', 'animset'),
@@ -1009,9 +1011,9 @@ class ModelExporter:
                                         asset=library.clips[i]['animset'], offset=library.clips[i]['offset']))
             self.log(f'  {len(clips_out)} clip(s) decoded' + (f', {len(skipped)} skipped' if skipped else ''))
             if layered:
-                notes.append(f'{layered} additive layer(s) play over the first clip they share an animation graph node '
-                             'with (named "over ..."); the game picks among such clips at run time. The others play on '
-                             'the rest pose.')
+                notes.append(f'{layered} additive layer(s) play over the first clip an animation graph pair node adds '
+                             'them to, at its weight (named "over ..."); the game picks among such clips at run time. The '
+                             'others play on the rest pose.')
             if options.root_motion and clips_out:
                 notes.append('Clips move by their root motion since their first frame, on the joints without a parent; '
                              'additive layers and clips without root motion play in place.')

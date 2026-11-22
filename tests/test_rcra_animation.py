@@ -178,6 +178,7 @@ class RootMotionTests(unittest.TestCase):
         np.testing.assert_allclose(found['translation'], [[0, 0, 0], [1, 0, -0.5], [1.5, 0, 0]])
         np.testing.assert_allclose(found['rotation_xyzw'][1], yaw(90), atol=1e-4)
         self.assertEqual((found['layout'], found['kind']), (0, 3))
+        np.testing.assert_allclose(found['phase'], [-91 / 127] * 3)   # i8 foot phase 0xA5 of a kind-3 clip
 
     def test_twenty_four_byte_records(self):
         rotations = [yaw(0), yaw(-170), np.array([0.5, -0.5, 0.5, 0.5])]
@@ -187,6 +188,10 @@ class RootMotionTests(unittest.TestCase):
         for got, want in zip(found['rotation_xyzw'], rotations):
             self.assertAlmostEqual(abs(float(np.dot(got, want))), 1.0, places=9)   # q and -q are one rotation
         np.testing.assert_allclose(found['translation'][1], [1.5, -2.0, 300.25])
+        self.assertIsNone(found['phase'])                             # kind 2: no foot phase
+        records = b''.join(struct.pack('<Q3fI', smallest_three(yaw(0)), 0, 0, 0, b) for b in (0x81, 0, 0x7F))
+        found = ra.motion(build_clip([(0, 0)] * 3, extra={ra.MOTION: motion_section(1, 3, records, 3, 3)}))
+        np.testing.assert_allclose(found['phase'], [-1, 0, 1])        # the u32's low byte, i8 / 127
 
     def test_no_records_and_no_section(self):
         found = ra.motion(build_clip([(0, 0)] * 3, extra={ra.MOTION: motion_section(1, 0, b'', 0, 3)}))
@@ -453,6 +458,21 @@ class RealAnimationTests(unittest.TestCase):
         # A clip without root motion records plays as before (the face lines are checked separately).
         index = library.labels().index('hero_ratchet: relaxed_neutral_idle_hero_ratchet')
         self.assertEqual(library.clip_frames(index, True)[2][0], library.clip_frames(index)[2][0])
+
+    def test_foot_phase_marks_ratchets_contacts(self):
+        # Kind-3 clips carry a foot phase per record: -1 where the left foot lands, +1 where the right foot lands.
+        from rc2016.formats.clips import worlds_batch
+        library = self.library(self.RATCHET)
+        names = [r['name'] for r in library.rows]
+        ankles = [names.index('LF_ankle'), names.index('RT_ankle')]
+        for name in ('neutral_strafe_walk_n_hero_ratchet', 'neutral_strafe_run_s_hero_ratchet'):
+            index = next(i for i, c in enumerate(library.clips) if c['path'].endswith(f'/{name}.animclip'))
+            phase = ra.motion(library._bytes(library.clips[index]))['phase']
+            _clip, _kind, frames = library.clip_frames(index)
+            height = worlds_batch(library.rows, frames, library.inheritance)[:, ankles][..., 1, 3]   # (frames, 2)
+            left, right = int(np.argmin(phase[:len(frames)])), int(np.argmax(phase[:len(frames)]))
+            self.assertLess(height[left, 0], height[left, 1], name)      # left foot down at -1
+            self.assertLess(height[right, 1], height[right, 0], name)    # right foot down at +1
 
     def test_face_performances_open_ratchets_jaw(self):
         from rc2016.games.rcra.clip_library import PERFORMANCE

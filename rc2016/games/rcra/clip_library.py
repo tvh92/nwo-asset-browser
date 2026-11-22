@@ -20,8 +20,9 @@ by joint coverage alone:
 * **Face performances** (``with_performances``): the voice-line lip sync of the speaker whose face pose clip
   the model plays (``performance_sources``), blended from that pose clip (``rcra.animation.performance_frames``).
 
-``layer_partners`` names the absolute clips an additive clip plays over: those that share a driver class (an
-animation graph node, ``rcra.animation.driver_classes``) with it in one of the offered animsets.
+``layer_partners`` names the absolute clips an additive clip plays over and ``layer_weight`` the weight: a pair
+node of an offered animset's animation graph (``rcra.animation.driver_graph``) adds the layer under its child 1
+over the absolute clips under its child 0.
 
 Each found clip is still classified on its first frame; one that does not drive the skeleton is listed as
 unplayable. ``root_displacement`` gives a clip's root motion since its first frame, which ``clip_frames``
@@ -39,10 +40,11 @@ import numpy as np
 
 from rc2016.common import sha
 from rc2016.formats.animation_transforms import sample_transforms
-from rc2016.games.rcra.animation import (clip_dat1, decode_clip, driver_classes, header, motion, performance_clip,
+from rc2016.games.rcra.animation import (NODE_CLIP, NODE_PAIR, PAIR_WEIGHT, clip_dat1, clip_references, decode_clip,
+                                         driver_graph, graph_reach, header, motion, performance_clip,
                                          performance_frames, pose_table)
 from rc2016.games.rcra.morph import clip_weights, shape_hashes
-from rc2016.games.rcra.toc import sections as dat1_sections
+from rc2016.games.rcra.toc import path_crc64_many, sections as dat1_sections
 from rc2016.viewer.animation import AnimationLibrary, _quat_mul, _quat_rotate, on_rest
 
 CUTSCENE_SOURCE = 'cinematic2'
@@ -239,7 +241,7 @@ class RcraAnimationLibrary(AnimationLibrary):
         self.rows, self.inverse, self.clips, self.animset_data = [], [], [], {}
         self._kinds, self.retarget, self._cutscenes, self._last = {}, {}, None, (None, None)
         self._performances = None
-        self._partners = None   # {clip name hash: [absolute clip name hashes]} from driver classes (layer_partners)
+        self._partners = None   # {layer clip path: [(base clip path, weight)]} from the animation graphs (layer_partners)
         self.inheritance = self.rest_inheritance = 'full'
         self.names = {}
         with tempfile.TemporaryDirectory(prefix='rcra-anim-') as tmp:
@@ -373,50 +375,72 @@ class RcraAnimationLibrary(AnimationLibrary):
         return result
 
     def layer_partners(self, index):
-        """Indices of the absolute clips additive clip ``index`` plays over in the game, best first; [] for a clip
-        that is not additive or shares no driver class with an absolute clip.
+        """Indices of the absolute clips additive clip ``index`` plays over in the game, nearest first; [] for a clip
+        that is not additive or that no pair node of an offered animset's graph adds over an absolute clip.
 
-        Every offered animset's driver classes (``rcra.animation.driver_classes``) are scanned for the name hashes
-        of its own clips; an additive clip's partners are the non-additive clips of the classes that hold it. They
-        are ranked by the name words they share with the layer (``shooter_aim_idle_fwd`` before ``_l090`` for
-        ``Shooter_Aim_Idle_Fwd_Pitch``), then by class order. Which partner the game picks at a moment is the
-        animation graph's runtime state, which is not decoded."""
+        A pair node (``rcra.animation.driver_graph``) adds the additive clips under its child 1 over child 0: the
+        partners are the absolute clips under child 0, a clip group's clips included (``clip_references``). The pair
+        deepest in the graph (nearest the layer) comes first, then graph order. Which partner plays at a moment (a
+        blend space's input, a group's tags) is game state, which is not decoded."""
         entry = self.clips[index]
-        if not entry.get('additive') or entry.get('hash') is None:
+        if not entry.get('additive') or entry.get('source') == PERFORMANCE:
             return []
-        if self._partners is None:
-            self._partners = self._driver_partners()
-        found = self._partners.get(entry['hash'], ())
-        at = {}
-        for number, clip in enumerate(self.clips):
-            if clip.get('source') != PERFORMANCE and not clip.get('additive') and clip.get('hash') is not None:
-                at.setdefault(clip['hash'], number)
-        words = set(_words(entry['name']))
-        ranked = sorted(range(len(found)), key=lambda k: (-len(words & set(_words(self.clips[at[found[k]]]['name'])))
-                                                         if found[k] in at else 0, k))
-        return [at[found[k]] for k in ranked if found[k] in at]
+        at = self._clip_numbers()
+        return [at[base] for base, _weight in self._layer_pairs().get(entry['path'], ()) if base in at]
 
-    def _driver_partners(self):
-        """{additive clip name hash: [absolute clip name hashes in class order]} over the offered animsets."""
-        known = {}
-        for clip in self.clips:
-            if clip.get('source') == 'animset' and clip.get('hash') is not None:
-                known.setdefault(clip['animset'], {})[clip['hash']] = clip.get('additive', False)
-        partners = {}
-        for animset, hashes in known.items():
+    def layer_weight(self, index, base):
+        """The weight of the pair node that adds clip ``index`` over clip ``base``. A weight a variable drives, or
+        one stored as 0 (which game code then sets), plays at 1.0; so does a pair the graphs do not hold."""
+        target = self.clips[base]['path']
+        for other, weight in self._layer_pairs().get(self.clips[index]['path'], ()):
+            if other == target:
+                return weight if weight else 1.0
+        return 1.0
+
+    def _clip_numbers(self):
+        numbers = {}
+        for number, clip in enumerate(self.clips):
+            if clip.get('source') == 'animset':
+                numbers.setdefault(clip['path'], number)
+        return numbers
+
+    def _layer_pairs(self):
+        if self._partners is None:
+            self._partners = self._graph_partners()
+        return self._partners
+
+    def _graph_partners(self):
+        """{additive clip path: [(absolute clip path, weight or None when a variable drives it)]} over the offered
+        animsets' graphs, nearest pair first."""
+        offered = [c for c in self.clips if c.get('source') == 'animset']
+        by_asset = dict(zip((int(i) for i in path_crc64_many([c['path'] for c in offered])), offered))
+        found = {}
+        for animset in dict.fromkeys(c['animset'] for c in offered):
             key = _key(self.source, animset)
             if key is None:
                 continue
             try:
-                classes = driver_classes(self.source.bytes(key)[0])
+                data = self.source.bytes(key)[0]
+                graph, refs = driver_graph(data), clip_references(data)
             except (ValueError, struct.error):
                 continue
-            for words in classes:
-                inside = list(dict.fromkeys(w for w in words if w in hashes))
-                bases = [h for h in inside if not hashes[h]]
-                for layer in (h for h in inside if hashes[h]):
-                    listed = partners.setdefault(layer, [])
-                    listed.extend(h for h in bases if h not in listed)
+            for graph_class in graph:
+                nodes, depth = graph_class['nodes'], _depths(graph_class)
+                for at in graph_reach(graph_class):
+                    node = nodes[at]
+                    if node['kind'] != NODE_PAIR:
+                        continue
+                    below, above = (_graph_clips(graph_class, child, refs, by_asset) for child in node['children'])
+                    bases = [c['path'] for c in below if not c.get('additive')]
+                    weight = None if PAIR_WEIGHT in node['bound'] else node['weight']
+                    for layer in (c for c in above if c.get('additive')):
+                        found.setdefault(layer['path'], []).extend((-depth[at], base, weight) for base in bases)
+        partners = {}
+        for layer, rows in found.items():
+            ordered = {}
+            for _depth, base, weight in sorted(rows, key=lambda row: row[0]):
+                ordered.setdefault(base, weight)
+            partners[layer] = list(ordered.items())
         return partners
 
     def clip_frames(self, index, root_motion=False, base=None):
@@ -469,9 +493,28 @@ class RcraAnimationLibrary(AnimationLibrary):
         return other
 
 
-def _words(name):
-    """Lower-case name words of a clip name, for ranking layer partners."""
-    return [w for w in re.split(r'[^a-z0-9]+', (name or '').lower()) if w]
+def _depths(graph_class):
+    """{node offset: depth below the class root} over the nodes the root reaches."""
+    depth, queue = {}, [(graph_class['root'], 0)] if graph_class['root'] is not None else []
+    while queue:
+        at, level = queue.pop(0)
+        if at in depth:
+            continue
+        depth[at] = level
+        queue.extend((child, level + 1) for child in graph_class['nodes'][at]['children'])
+    return depth
+
+
+def _graph_clips(graph_class, start, refs, by_asset):
+    """The offered clip entries the clip nodes under ``start`` name (a group's clips included), in graph order."""
+    clips = {}
+    for at in graph_reach(graph_class, start):
+        node = graph_class['nodes'][at]
+        if node['kind'] == NODE_CLIP:
+            for asset in refs.get(node['ref'], ()):
+                if asset in by_asset:
+                    clips.setdefault(asset, by_asset[asset])
+    return list(clips.values())
 
 
 def animation_library(source, model_bytes, model_path, clips=True):

@@ -145,11 +145,27 @@ def on_rest(rows, frames):
              for row in frame if row['hash'] in rest] for frame in frames]
 
 
-def layer_over(rows, layer, base):
+def _quat_power(q, weight):
+    """Unit quaternion ``q`` (xyzw) raised to ``weight``: the identity slerped toward ``q`` by ``weight``."""
+    if weight == 1.0:
+        return q
+    x, y, z, w = q
+    if w < 0:
+        x, y, z, w = -x, -y, -z, -w
+    angle = np.arccos(min(1.0, w))
+    sine = np.sin(angle)
+    if sine < 1e-9:
+        return [0.0, 0.0, 0.0, 1.0]
+    k = np.sin(weight * angle) / sine
+    return [x * k, y * k, z * k, float(np.cos(weight * angle))]
+
+
+def layer_over(rows, layer, base, weight=1.0):
     """Additive-style ``layer`` frames on the absolute ``base`` frames, as ``on_rest`` puts them on the rest pose:
     base T + delta T, base Q * delta Q, base S * delta S. Both loop to the longer one's length (an aim or lean
     layer is a short sweep, its base a cycle). A joint the base frame does not sample starts from its rest values;
-    joints the model does not have are dropped."""
+    joints the model does not have are dropped. ``weight`` scales each delta (T by w, Q by slerp from the identity,
+    S to the power w)."""
     rest = {r['hash']: r for r in rows}
     out = []
     for number in range(max(len(layer), len(base))):
@@ -159,9 +175,11 @@ def layer_over(rows, layer, base):
             if under is None:
                 continue
             q = under['rotation_xyzw'] or rest[delta['hash']]['rotation_xyzw']
-            frame[delta['hash']] = dict(under, translation=[a + b for a, b in zip(under['translation'], delta['translation'])],
-                                        rotation_xyzw=_quat_mul(q, delta['rotation_xyzw']) if delta['rotation_xyzw'] else q,
-                                        scale=[a * b for a, b in zip(under['scale'], delta['scale'])])
+            dq = _quat_power(delta['rotation_xyzw'], weight) if delta['rotation_xyzw'] else None
+            frame[delta['hash']] = dict(under, translation=[a + weight * b for a, b in zip(under['translation'],
+                                                                                           delta['translation'])],
+                                        rotation_xyzw=_quat_mul(q, dq) if dq else q,
+                                        scale=[a * b ** weight for a, b in zip(under['scale'], delta['scale'])])
         out.append(list(frame.values()))
     return out
 
@@ -344,6 +362,11 @@ class AnimationLibrary:
         decodes no animation graph, so none is; Rift Apart reads them from its animsets' driver classes."""
         return []
 
+    def layer_weight(self, index, base):
+        """The weight additive clip ``index`` plays at over clip ``base`` (``layer_over``): 1.0 unless the game's
+        animation graph stores another."""
+        return 1.0
+
     def clip_frames(self, index, root_motion=False, base=None):
         """(decoded clip, kind, frames) for clip ``index``: the source samples as this model plays them.
 
@@ -364,8 +387,9 @@ class AnimationLibrary:
             _base_clip, base_kind, base_frames = self.clip_frames(base, root_motion)
             if base_kind == 'relative/additive-style layer' or not base_frames:
                 raise NotPlayable(f"'{self.clips[base]['name']}' is itself a layer; a layer plays over an absolute clip")
-            frames = layer_over(self.rows, frames, base_frames)
-            clip = dict(clip, base=self.clips[base]['name'])
+            weight = self.layer_weight(index, base)
+            frames = layer_over(self.rows, frames, base_frames, weight)
+            clip = dict(clip, base=self.clips[base]['name'], weight=weight)
         elif kind == 'relative/additive-style layer':
             frames = on_rest(self.rows, frames)
         elif entry['animset'] in getattr(self, 'retarget', {}):
@@ -393,4 +417,4 @@ class AnimationLibrary:
             skin = np.stack(worlds(self.rows, frame, self.inheritance)) @ inverse
             poses.append((BASIS @ skin @ BASIS.T).astype(np.float32))
         return dict(name=entry['name'], kind=kind, fps=float(clip['metadata']['sample_rate_fps'] or 30.0),
-                    frames=poses, joint_count=len(self.rows), base=clip.get('base'))
+                    frames=poses, joint_count=len(self.rows), base=clip.get('base'), weight=clip.get('weight'))

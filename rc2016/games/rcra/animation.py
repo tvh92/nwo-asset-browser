@@ -35,23 +35,57 @@ in some clips, a closing one), each the root's rotation and translation relative
   +64  u32 bytes from +124 (records, zero-padded so the section is a multiple of 16), u32 frames; +76 f32 minimum xyz and
        +100 f32 maximum xyz of the root translation over the clip (start + start rotation * record)
   +124 records. Format 0: i16 rotation xyzw (unit at 32767), i16 translation xyz, u8 exponent e (the
-       translation is the integer times 2^-e), u8 a value of kind 3 (locomotion) clips that is not read.
-       Format 1: u64 smallest-three rotation (three signed 20-bit fields from bit 0, each times
-       sqrt(1/2) / (2^19 - 1), in xyzw order without the largest; bits 60-61 its index; that component is
-       positive), f32 translation xyz, u32 a value that is not read (0 in all but 171 cutscene clips).
+       translation is the integer times 2^-e), i8 foot phase. Format 1: u64 smallest-three rotation (three
+       signed 20-bit fields from bit 0, each times sqrt(1/2) / (2^19 - 1), in xyzw order without the largest;
+       bits 60-61 its index; that component is positive), f32 translation xyz, u32 whose low byte is the i8 foot
+       phase (0 in all but 171 cutscene clips; 164 of them kind 3).
 
-The 0x3976E44C path section (two 4x4 float matrices) is not read; neither are triggers, morph and face
-sections.
+Kind 3 (locomotion) clips set the foot phase: the i8 / 127, -1 where the left foot lands and +1 where the right
+foot lands, linear between (Ratchet's strafe walk and run). Other clips leave it 0, except 7 kind-2 cutscene
+clips whose format-1 u32 is not read.
 
-``driver_classes`` lists the clips of each driver class (animation graph node) of an ``.animset``: the 80-byte
-class records of 0x66CA6C6F (counted, not read), the 16-byte 0xA40B51D2 lookup rows (+0 u32 byte offset of
-the class's node data in 0x73CEE17F) and that node data. The node layout is not decoded: a class's bytes are
-scanned for u32 values at 4-byte steps, and the caller keeps those that are clip name hashes it knows. A class
-that holds an additive clip and absolute clips is a node that adds the layer over them (the thug shooter's aim
-idle class holds ``shooter_aim_idle_fwd``, ``_l090`` and ``_r090`` with their ``_Pitch`` layers).
+The 0x3976E44C path section (two 4x4 float matrices) is not read: RiftApart.exe never names it (its id occurs
+nowhere in the executable), so the game does not use it. Triggers, morph and face sections are read elsewhere or
+not at all.
+
+``driver_graph`` decodes the driver classes (animation graphs) of an ``.animset``. Each class is an 80-byte
+record in 0x66CA6C6F, a 16-byte row in 0xA40B51D2 (+0 u32 byte offset of its data in 0x73CEE17F) and that data:
+a run of nodes, then 12-byte variable bindings. Record (u32 words): +0 class name hash, +12 data bytes, +16 root
+node offset, +20 node count, +24 binding count, +28 binding offset; the rest is not read. Names are game CRC-32
+hashes (``container.game_crc32``) of strings the animset holds.
+
+  node header (40 bytes)  +0 u32 node name hash, +4 u16 type (low byte the kind, high byte flags), +6 u16 id,
+                          +8 f32 phase, +16 f32 rate, +24 and +28 f32 -1, +36 u32 0xFFFFFFFF
+  kind 1 clip            +40 u32 mode, +44 u32 reference (``clip_references``)
+  kind 2 pair            +40 u16 child 0, u16 child 1, +44 u8 mode, +52 f32 weight
+  kind 5 blend space     +40 u16 variable slot, u16 children, +44 u16 child list, u16 span list: per child a
+                          (low, high) f32 span on the bound variable
+  kind 7 select          +40 u16, u16 children, +44 u16 child list
+  kind 9 list            +40 u16 children, u16 child list
+  kind 10, 12 wrap       +40 u32 child
+
+Child references and lists are u16 word offsets into the class data (byte offset / 4); a list holds u16 word
+offsets of the children. Nodes are found by their header signature (+24, +28 and +36), which yields the record's
+node count in every class of the install. A binding is u32 variable name hash, u16 slot, u16 word offset, u32
+flags: with flags low byte nonzero the word offset holds a zero-terminated u16 list of the bound fields' word
+offsets, else it is the bound field. Bound fields are a blend space's +48 (its input), a clip's phase +8, a list's
++44 and a pair's weight +52. Which clip phase or weight a variable gives at a moment is game state.
+
+``clip_references`` resolves a clip node's reference through the animset's clip lookup 0xB79CF1D7 (24-byte rows:
+u32 hash, u32 kind, i32 group offset, u64 asset id, u32 0). Kind 0 and 0x8000 name a clip asset by its path
+CRC-64; kind 1 names a clip group: an inner DAT1 at the group offset in 0x9FD19C20, whose 0x5025990D section
+(16-byte header, then rows of u32 list offset, u32, u32 clip count, u32 0) indexes tag lists in 0x51A11F85 (tag
+hashes, two 0xFFFFFFFF words, then the entry's clip hashes, which the lookup resolves). The game picks a group's
+entry by its tags (hit direction, height).
+
+A pair node whose child 1 holds additive clips adds them over child 0 (``RcraAnimationLibrary.layer_partners``):
+the thug shooter's aim idle class blends, by its ``Aim_Horizontal`` variable, three pairs such as
+(``shooter_aim_idle_fwd``, ``Shooter_Aim_Idle_Fwd_Pitch``). That the pair adds child 1 scaled by the weight is a
+reading of the data (its mode byte is 2 in 1,183 of the 1,260 pairs), not traced in the runtime.
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import math
 import struct
@@ -257,10 +291,11 @@ def _smallest_three(words):
 def motion(data):
     """The root motion of a clip asset (section 0xE08AA35F), or None when the clip has none.
 
-    Returns dict(start_rotation_xyzw, start_translation, rotation_xyzw (R, 4), translation (R, 3), bounds),
+    Returns dict(start_rotation_xyzw, start_translation, rotation_xyzw (R, 4), translation (R, 3), bounds, phase),
     where record r places the root at start * record (rotation start_q * q, translation start_t +
-    start_q * t). R is the frame count or one more (a closing record, as with the frame table). A clip with
-    no records returns empty arrays; its root stays at the start."""
+    start_q * t). R is the frame count or one more (a closing record, as with the frame table). ``phase`` is
+    the foot phase per record (R,) in [-1, 1] for a kind-3 clip, else None. A clip with no records returns empty
+    arrays; its root stays at the start."""
     dat1, table = clip_dat1(data)
     if MOTION not in table:
         return None
@@ -288,6 +323,7 @@ def motion_section(section):
     if layout:
         rotation = _smallest_three(records[:, :8].copy().view('<u8').ravel())
         translation = records[:, 8:20].copy().view('<f4').reshape(count, 3).astype(float)
+        phase_bytes = records[:, 20]
     else:
         values = records.copy().view('<i2').reshape(count, 8).astype(float)
         rotation = values[:, :4] / 32767.0
@@ -295,10 +331,12 @@ def motion_section(section):
         require(bool(np.all(np.abs(norms - 1.0) < 1e-3)), 'root motion rotation is not a unit quaternion')
         rotation /= norms[:, None]
         translation = values[:, 4:7] * np.exp2(-records[:, 14].astype(float))[:, None]
+        phase_bytes = records[:, 15]
+    phase = phase_bytes.astype(np.int8) / 127.0 if kind == 3 else None
     require(np.isfinite(start_q).all() and np.isfinite(start_t).all() and np.isfinite(translation).all(),
             'non-finite root motion')
     return dict(start_rotation_xyzw=start_q, start_translation=start_t, rotation_xyzw=rotation,
-                translation=translation, bounds=bounds, layout=layout, kind=kind)
+                translation=translation, bounds=bounds, layout=layout, kind=kind, phase=phase)
 
 
 PHONEME_TABLE = 0x1D4BD9FA
@@ -317,29 +355,147 @@ def pose_table(data):
 
 
 DRIVER_BUILT, DRIVER_LOOKUP, DRIVER_DATA = 0x66CA6C6F, 0xA40B51D2, 0x73CEE17F
+CLIP_LOOKUP, CLIP_GROUPS, GROUP_ENTRIES, GROUP_LISTS = 0xB79CF1D7, 0x9FD19C20, 0x5025990D, 0x51A11F85
+NODE_HEADER = 40
+NODE_CLIP, NODE_PAIR, NODE_BLEND_SPACE, NODE_SELECT, NODE_LIST = 1, 2, 5, 7, 9
+NODE_WRAPS = (10, 12)
+PAIR_WEIGHT = 52   # a pair node's weight field, which a binding may drive
+LOOKUP_GROUP = 1
+_NODE_SIGNATURE = struct.pack('<2f', -1.0, -1.0)
 
 
-def driver_classes(data):
-    """Per driver class of an animset asset (toc header + DAT1), in record order: the u32 words of its node data.
-    [] for an animset without driver classes. The words are candidates for clip name hashes; the node layout
-    is not decoded (module docstring)."""
+def _word_list(blob, word, count):
+    return [4 * w for w in struct.unpack_from(f'<{count}H', blob, 4 * word)]
+
+
+def _graph_node(blob, at):
+    """One driver class node at byte ``at`` of its class data (module docstring)."""
+    name, kind_word, ident, phase, _zero, rate = struct.unpack_from('<IHHfIf', blob, at)
+    kind = kind_word & 0xFF
+    first, second = struct.unpack_from('<HH', blob, at + NODE_HEADER)
+    node = dict(at=at, name=name, kind=kind, flags=kind_word >> 8, id=ident, phase=phase, rate=rate, children=[],
+                bound={})
+    if kind == NODE_CLIP:
+        node.update(mode=struct.unpack_from('<I', blob, at + 40)[0], ref=struct.unpack_from('<I', blob, at + 44)[0])
+    elif kind == NODE_PAIR:
+        node.update(children=[4 * first, 4 * second], mode=blob[at + 44],
+                    weight=struct.unpack_from('<f', blob, at + 52)[0])
+    elif kind == NODE_BLEND_SPACE:
+        children, spans = struct.unpack_from('<HH', blob, at + 44)
+        values = struct.unpack_from(f'<{2 * second}f', blob, 4 * spans)
+        node.update(slot=first, children=_word_list(blob, children, second),
+                    spans=[values[2 * k:2 * k + 2] for k in range(second)])
+    elif kind == NODE_SELECT:
+        node.update(children=_word_list(blob, struct.unpack_from('<H', blob, at + 44)[0], second))
+    elif kind == NODE_LIST:
+        node.update(children=_word_list(blob, second, first))
+    elif kind in NODE_WRAPS:
+        node.update(children=[4 * struct.unpack_from('<I', blob, at + 40)[0]])
+    return node
+
+
+def _bound_fields(blob, word, flags):
+    if not flags & 0xFF:
+        return [4 * word]
+    fields, at = [], 4 * word
+    while at + 2 <= len(blob):
+        value = struct.unpack_from('<H', blob, at)[0]
+        if not value:
+            break
+        fields.append(4 * value)
+        at += 2
+    return fields
+
+
+def driver_graph(data):
+    """The driver classes (animation graphs) of an animset asset (toc header + DAT1), in record order; [] for an
+    animset without them. Each is dict(name: class name hash, root: root node offset or None, nodes: {byte offset:
+    node}, bindings: [dict(variable: name hash, slot, fields: [bound field byte offsets])]). A node is dict(at,
+    name, kind, flags, id, phase, rate, children: [node offsets], bound: {field offset in the node: variable name
+    hash}) plus its kind's fields (module docstring)."""
     dat1 = data[HEADER:]
     table = dat1_sections(dat1)
     if not all(tag in table for tag in (DRIVER_BUILT, DRIVER_LOOKUP, DRIVER_DATA)):
         return []
-    _built_at, built_size = table[DRIVER_BUILT]
+    built_at, built_size = table[DRIVER_BUILT]
     lookup_at, lookup_size = table[DRIVER_LOOKUP]
     data_at, data_size = table[DRIVER_DATA]
     count = built_size // 80
     require(lookup_size // 16 == count, 'driver class lookup does not match its records')
-    starts = [struct.unpack_from('<I', dat1, lookup_at + 16 * i)[0] for i in range(count)]
-    require(all(s <= data_size for s in starts), 'driver class data offset outside its section')
-    ends = sorted(set(starts) | {data_size})
     classes = []
-    for start in starts:
-        end = ends[ends.index(start) + 1] if start < data_size else start
-        classes.append(struct.unpack_from(f'<{(end - start) // 4}I', dat1, data_at + start))
+    for number in range(count):
+        record = struct.unpack_from('<8I', dat1, built_at + 80 * number)
+        start = struct.unpack_from('<I', dat1, lookup_at + 16 * number)[0]
+        size, root, node_count, bound_count, bound_at = record[3:8]
+        if not size:   # an empty class: no nodes, lookup offset 0xFFFFFFFF
+            classes.append(dict(name=record[0], root=None, nodes={}, bindings=[]))
+            continue
+        require(start + size <= data_size, 'driver class data outside its section')
+        blob = dat1[data_at + start:data_at + start + size]
+        end = bound_at if bound_count else size
+        require(end <= size and bound_at + 12 * bound_count <= size, 'driver class bindings outside its data')
+        nodes = {at: _graph_node(blob, at) for at in range(0, end - NODE_HEADER + 1, 4)
+                 if blob[at + 24:at + 32] == _NODE_SIGNATURE and blob[at + 36:at + 40] == b'\xff' * 4}
+        require(len(nodes) == node_count, 'driver class node count mismatch')
+        require(not nodes or root in nodes, 'driver class root is not a node')
+        require(all(child in nodes for node in nodes.values() for child in node['children']),
+                'driver class node links outside its nodes')
+        bindings, starts = [], sorted(nodes)
+        for k in range(bound_count):
+            variable, slot, word, flags = struct.unpack_from('<IHHI', blob, bound_at + 12 * k)
+            bindings.append(dict(variable=variable, slot=slot, fields=_bound_fields(blob, word, flags)))
+            for field in bindings[-1]['fields']:
+                owner = starts[bisect.bisect_right(starts, field) - 1] if starts and field >= starts[0] else None
+                if owner is not None:
+                    nodes[owner]['bound'][field - owner] = variable
+        classes.append(dict(name=record[0], root=root if nodes else None, nodes=nodes, bindings=bindings))
     return classes
+
+
+def graph_reach(graph_class, start=None):
+    """Node offsets reachable from ``start`` (default the class root), depth first in child order. Nodes no path
+    reaches are not played by the class."""
+    nodes = graph_class['nodes']
+    start = graph_class['root'] if start is None else start
+    order, stack, seen = [], [start] if start in nodes else [], set()
+    while stack:
+        at = stack.pop()
+        if at in seen:
+            continue
+        seen.add(at)
+        order.append(at)
+        stack.extend(reversed(nodes[at]['children']))
+    return order
+
+
+def clip_references(data):
+    """{clip node reference hash: [clip asset ids (path CRC-64)]} of an animset asset: one asset for a clip, a
+    group's clips in entry order (each once) for a group (module docstring)."""
+    dat1 = data[HEADER:]
+    table = dat1_sections(dat1)
+    if CLIP_LOOKUP not in table:
+        return {}
+    at, size = table[CLIP_LOOKUP]
+    rows = [struct.unpack_from('<IIiQI', dat1, at + 24 * k) for k in range(size // 24)]
+    assets = {row[0]: row[3] for row in rows if row[1] != LOOKUP_GROUP}
+    found = {name: [asset] for name, asset in assets.items()}
+    groups_at, groups_size = table.get(CLIP_GROUPS, (0, 0))
+    for name, _kind, offset, _asset, _zero in (row for row in rows if row[1] == LOOKUP_GROUP):
+        require(0 <= offset < groups_size, 'clip group outside its section')
+        inner = dat1[groups_at + offset:groups_at + groups_size]
+        sections = dat1_sections(inner)
+        members = []
+        if GROUP_ENTRIES in sections and GROUP_LISTS in sections:
+            entries_at, entries_size = sections[GROUP_ENTRIES]
+            lists_at, lists_size = sections[GROUP_LISTS]
+            entries = [struct.unpack_from('<4I', inner, entries_at + 16 * k) for k in range(1, entries_size // 16)]
+            ends = [entry[0] for entry in entries[1:]] + [lists_size]
+            for (start, _flags, clips, _zero), end in zip(entries, ends):
+                require(start <= end <= lists_size and 4 * clips <= end - start, 'malformed clip group')
+                hashes = struct.unpack_from(f'<{clips}I', inner, lists_at + end - 4 * clips)
+                members.extend(assets[h] for h in hashes if h in assets)
+        found[name] = list(dict.fromkeys(members))
+    return found
 
 
 def performance_clip(data):
