@@ -129,6 +129,33 @@ def material_blend(data):
     return mode
 
 
+# Bit 0x1 is the material's DoubleSided property, which the engine's reflection describes as "Both sides of geometry with
+# this material will be drawn (no back-face culling)". The main model-instance draw (0x1411229ff, again for another list at
+# 0x1411250b9) tests it and marks the packet two-sided (sort word +0x2E bit 0x800) unless the mesh record's flags force
+# single-sided: 0x4000 at every LOD, 0x2000 from LOD 1 (the test is 0x4000, or 0x6000 when the chosen LOD is not 0). These
+# are the per-geometry DoubleSidedType options kForceSingleSided and kForceSingleSidedInLod1. Where the pipeline turns the
+# packet bit into its rasterizer cull mode is not traced. Evidence: Research/rift-apart/decodes/2026-11-22_rcra-cull-mode/.
+DOUBLE_SIDED_BIT = 0x1
+FORCE_SINGLE_SIDED, FORCE_SINGLE_SIDED_FROM_LOD1 = 0x4000, 0x2000
+
+
+def double_sided(data):
+    """True when the material's flags word sets DoubleSided (bit 0x1): the game draws both faces, without back-face culling.
+    A material whose flags block cannot be read is single-sided."""
+    try:
+        flags = flags_word(data)
+    except (ValueError, struct.error):
+        return False
+    return bool(flags is not None and flags & DOUBLE_SIDED_BIT)
+
+
+def mesh_double_sided(material_double_sided, mesh_flags, lod=0):
+    """Whether the game draws a mesh two-sided at ``lod``: its material is double-sided and its mesh record's flags do not force
+    single-sided (0x4000 at every LOD, 0x2000 from LOD 1)."""
+    force = FORCE_SINGLE_SIDED | (FORCE_SINGLE_SIDED_FROM_LOD1 if lod else 0)
+    return bool(material_double_sided and not mesh_flags & force)
+
+
 # Material alpha: f32 5 of section 0xE1275683. The loader copies it to the material object's +0x70 (RiftApart.exe
 # 0x1410d16af), whose default is 1.0 (0x1410d162a). The main model-instance draw (0x1411212d0) tests it for a material on
 # the blended path: a = min(1 - LOD fade, instance alpha) x material alpha + distance fade (material flag 0x20000 only), and
@@ -446,7 +473,8 @@ def _arch_glass(source, key, slots, cache, hd):
         role = ARCH_GLASS_ROLES.get(row[0])
         if role:
             textures[role] = _load(source, slot_texture(slots, row), cache, hd)
-    forward = dict(kind='rcra_arch_glass', blend='alpha_over', two_sided=False, params=params, writer='gbl_arch_glass',
+    forward = dict(kind='rcra_arch_glass', blend='alpha_over', two_sided=double_sided(source.asset_data(key)), params=params,
+                   writer='gbl_arch_glass',
                    limitation=GLASS_LIMITATION)
     return forward, textures
 
@@ -511,7 +539,8 @@ def _translated(source, key, entry, hd):
             entry['fur_shell_translation'], entry['fur_shell_textures'] = shells
     if receipt['blend'] != 'opaque':
         from rc2016.viewer.rcra_glsl import reads_scene
-        entry['forward'] = dict(kind=TRANSLATED_KIND, blend=receipt['blend'], two_sided=False, fallback=entry.get('forward'),
+        entry['forward'] = dict(kind=TRANSLATED_KIND, blend=receipt['blend'], fallback=entry.get('forward'),
+                                two_sided=double_sided(source.asset_data(key)),
                                 limitation=' '.join(receipt['limitations']),
                                 reads_scene=bool(receipt.get('forward')) and reads_scene(receipt['forward']))
 

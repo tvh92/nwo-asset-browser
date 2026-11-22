@@ -648,6 +648,7 @@ class GLTF:
                         nodes=[], meshes=[], materials=[], accessors=[], bufferViews=[], buffers=[])
         self.blob = bytearray()
         self.images = []   # (name, png bytes)
+        self.locator_note = ''   # set by ModelExporter._build_gltf when it adds locator nodes
 
     def _view(self, data, target=None):
         while len(self.blob) % 4:
@@ -1025,7 +1026,11 @@ class ModelExporter:
         if options.textures and any(f in options.formats for f in ('gltf', 'obj')):
             tex_dir.mkdir(exist_ok=True)
         if need_gltf:
-            gltf = self._build_gltf(stem, parts, maps, library if joint_count else None, clips_out, shapes, baked)
+            locators = decoded.get('locators') or []   # Rift Apart attach points (rcra.model._locators)
+            gltf = self._build_gltf(stem, parts, maps, library if joint_count else None, clips_out, shapes, baked,
+                                    locators=locators, joint_names=[j['name'] for j in decoded.get('joints') or []])
+            if gltf.locator_note:
+                notes.append(gltf.locator_note)
             doc, blob = gltf.finish(embed=True)
             if 'gltf' in options.formats:
                 file_doc, file_blob = gltf.finish(embed=False, texture_dir='textures')
@@ -1155,7 +1160,9 @@ class ModelExporter:
         return found, notes
 
     # -- glTF assembly
-    def _build_gltf(self, stem, parts, maps, library, clips, shapes=(), baked=()):
+    def _build_gltf(self, stem, parts, maps, library, clips, shapes=(), baked=(), locators=(), joint_names=()):
+        """The glTF document. ``locators`` (Rift Apart): empty nodes named after each locator, children of their joint
+        (matched by name in the skeleton) with the stored local transform, or of the model for one without a joint."""
         g = GLTF('R&C PS4 asset browser export')
         doc = g.doc
         material_ids = {}
@@ -1287,6 +1294,26 @@ class ModelExporter:
             targets = mesh(f'{stem}_static' if skinned_parts else stem, rigid_parts, False)
             root_children.append(g.node(name=f'{stem}_static' if skinned_parts else stem, mesh=len(doc['meshes']) - 1))
             shaped[root_children[-1]] = targets
+        if locators:
+            by_name = {row['name']: joint_nodes[j] for j, row in enumerate(library.rows)} if library is not None else {}
+            placed, unplaced = [], []
+            for loc in locators:
+                matrix = [float(v) for v in np.asarray(loc['matrix'], np.float64).T.reshape(-1)]   # glTF: column-major
+                joint = loc.get('joint')
+                if joint is None:
+                    placed.append(g.node(name=loc['name'], matrix=matrix))
+                elif joint < len(joint_names) and joint_names[joint] in by_name:
+                    node = g.node(name=loc['name'], matrix=matrix)
+                    doc['nodes'][by_name[joint_names[joint]]].setdefault('children', []).append(node)
+                else:
+                    unplaced.append(loc['name'])
+            if placed:
+                root_children.append(g.node(name=f'{stem}_locators', children=placed))
+            g.locator_note = (f'{len(locators) - len(unplaced)} locator(s) as empty nodes, each a child of its joint with the '
+                              'stored transform read column by column (the axis convention is not checked against a '
+                              'runtime use).')
+            if unplaced:
+                g.locator_note += f' {len(unplaced)} left out: their joint is not in the exported skeleton.'
         top = g.node(name=stem, children=root_children)
         doc['scenes'][0]['nodes'] = [top]
         if clips:

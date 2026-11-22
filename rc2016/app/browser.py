@@ -23,6 +23,12 @@ LAYER_REST = 'Rest pose'   # the Over box: an additive layer on its own
 FOLDER_MIN, TABLE_MIN = 160, 300   # narrowest folder tree and model list when the divider between them is dragged
 
 
+def look_label(look, index=0):
+    """'index: name' of a look row, or the index alone when the model does not name it."""
+    index = look.get('index', index)
+    return f"{index}: {look['name']}" if look.get('name') else str(index)
+
+
 def source_details(payload, used_by='', native_translation=True):
     """Details tab text for one decoded source model, read from the game files only."""
     lines = [payload['source_path'], f"Asset ID: {payload['model_id']}"]
@@ -31,10 +37,20 @@ def source_details(payload, used_by='', native_translation=True):
     joints = payload.get('joint_count') or 0
     lines.append(f"Geometry: skinned, {joints} joints" if joints else 'Geometry: static (no skeleton)')
     looks = payload.get('looks') or []
+    look = payload.get('look', 0)
+    shown = look_label(looks[look], look) if isinstance(look, int) and 0 <= look < len(looks) else look
     lines.append(f"Meshes: {payload.get('mesh_record_count', '?')} in the file · {len(looks)} looks · "
-                 f"showing look {payload.get('look', 0)}, {payload.get('lod', 'Highest')} LOD: "
+                 f"showing look {shown}, {payload.get('lod', 'Highest')} LOD: "
                  f"{len(payload.get('selected_mesh_indices') or [])} meshes, "
                  f"{len(payload['vertices']):,} vertices, {len(payload['triangles']):,} triangles")
+    locators = payload.get('locators') or []
+    if locators:
+        named = [m['name'] + (f" (on {m.get('joint_name') or 'joint %d' % m['joint']})" if m.get('joint') is not None else '')
+                 for m in locators]
+        lines.append(f"Locators ({len(locators)}): " + ', '.join(named[:12]) + (', …' if len(named) > 12 else ''))
+    unread = payload.get('unread_sections') or {}
+    if unread:
+        lines.append(f'Sections not read ({len(unread)}): ' + '; '.join(f'{tag} {note}' for tag, note in unread.items()))
     materials = payload.get('materials') or []
     lines.append(f'Materials ({len(materials)}), with the viewer shading rule each one gets:')
     for i, m in enumerate(materials):
@@ -371,7 +387,7 @@ class AssetBrowser:
         self.source_row=lodrow=ttk.Frame(side);lodrow.grid(row=1,column=0,sticky='ew',pady=(0,4))
         self.native_look=self.tk.StringVar(value='0')
         self.native_look_label=ttk.Label(lodrow,text='Look')
-        self.native_look_box=ttk.Combobox(lodrow,textvariable=self.native_look,values=(),state='disabled',width=4)
+        self.native_look_box=ttk.Combobox(lodrow,textvariable=self.native_look,values=(),state='disabled',width=18)
         self.native_look_box.bind('<<ComboboxSelected>>',lambda _e:self._reload_source())
         self.native_lod=self.tk.StringVar(value='Highest')
         self.native_lod_label=ttk.Label(lodrow,text='LOD')
@@ -773,7 +789,7 @@ class AssetBrowser:
         self.clip_list_work.submit(lambda:None)
         self.material_work.submit(lambda:None)
         self.source_output_root=self._output_root()
-        self.source_work.submit(self._load_geometry,root,ident,path,self.native_lod.get(),int(self.native_look.get()),self.source_output_root)
+        self.source_work.submit(self._load_geometry,root,ident,path,self.native_lod.get(),self._look_index(),self.source_output_root)
 
     def _load_geometry(self,root,ident,path,lod,look,output_root):
         """The source worker's load: geometry first; animations and materials follow on their own workers."""
@@ -1220,13 +1236,19 @@ class AssetBrowser:
         state='normal' if self.view_mode.get()=='Shaded' else 'disabled'
         self.native_check.configure(state=state);self.experimental_check.configure(state=state)
 
+    def _look_index(self):
+        """The chosen look's index: the Look box shows 'index: name' where the model names its looks."""
+        try:return int(self.native_look.get().split(':')[0] or 0)
+        except ValueError:return 0
+
     def _update_source_controls(self,payload):
         """Show the LOD, look and material toggles only where they change something for this model."""
         looks=payload.get('looks') or []
-        look=int(self.native_look.get() or 0)
+        look=self._look_index()
         multi_look=len(looks)>1
         lod=lod_choices_differ(looks,payload.get('mesh_record_count',0),look) if looks else False
-        self.native_look_box.configure(values=[str(r['index']) for r in looks],state='readonly' if multi_look else 'disabled')
+        self.native_look_box.configure(values=[look_label(r) for r in looks],state='readonly' if multi_look else 'disabled')
+        if multi_look and look<len(looks):self.native_look.set(look_label(looks[look]))
         self.native_lod_box.configure(state='readonly' if lod else 'disabled')
         for widget in (self.native_look_label,self.native_look_box):
             if multi_look:widget.pack(side='left',padx=(0,4),before=self.native_lod_label)

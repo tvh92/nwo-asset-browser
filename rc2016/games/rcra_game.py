@@ -98,14 +98,22 @@ def list_models(folder, output, progress=None):
     from rc2016.app.batch import PipelineModelCandidate
     source = open_source(folder, GAME.cache_dir() / 'source_preview', lambda *_a, **_k: None)
     try:
-        rows = sorted((source.entries[key]['path'], key) for key in source.ids_of_type('model'))
+        rows = sorted((source.entries[key]['path'], key, _no_geometry(source.asset_header(key)))
+                      for key in source.ids_of_type('model'))
     finally:
         close = getattr(source, 'close', None)
         if close is not None:
             close()
     if progress is not None:
         progress(1.0)
-    return [PipelineModelCandidate(model_id=key, archive_path=path) for path, key in rows]
+    return [PipelineModelCandidate(model_id=key, archive_path=path, no_geometry=empty) for path, key, empty in rows]
+
+
+def _no_geometry(header):
+    """True for a model whose toc header names no streamed sections. In the install these are exactly the 24 models
+    without a vertex or mesh section (rcra.model.geometry_free_note), so the browser can tell them apart without reading
+    the archives."""
+    return header is not None and struct.unpack_from('<I', header, 8)[0] == 0
 
 
 def animation_library(source, model_bytes, model_path, clips=True):

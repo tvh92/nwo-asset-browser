@@ -383,12 +383,15 @@ class LoaderDispatchTests(unittest.TestCase):
 
     def test_rift_apart_lists_its_models_in_process(self):
         closed = []
+        # k2's toc header names no streamed sections (streamed size 0): a model without geometry.
+        headers = {'k1': struct.pack('<III', 0x9D2C0FA9, 400, 1200) + bytes(24), 'k2': struct.pack('<III', 0x9D2C0FA9, 400, 0) + bytes(24)}
         source = SimpleNamespace(ids_of_type=lambda kind: {'model': ['k2', 'k1']}[kind],
                                  entries={'k1': dict(path='a/one.model'), 'k2': dict(path='b/two.model')},
-                                 close=lambda: closed.append(True))
+                                 asset_header=headers.get, close=lambda: closed.append(True))
         with patch('rc2016.games.rcra_game.open_source', return_value=source):
             rows = RCRA.list_models('install', 'output')
-        self.assertEqual([(r.model_id, r.archive_path) for r in rows], [('k1', 'a/one.model'), ('k2', 'b/two.model')])
+        self.assertEqual([(r.model_id, r.archive_path, r.no_geometry) for r in rows],
+                         [('k1', 'a/one.model', False), ('k2', 'b/two.model', True)])
         self.assertEqual(closed, [True])
 
     def test_levels_need_the_levels_capability(self):

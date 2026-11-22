@@ -61,7 +61,9 @@ How each group reaches glTF:
 - **Occlusion** is the red channel of the metal/rough image, which glTF's `occlusionTexture` reads. A baked occlusion of 1 everywhere is left out. OBJ has no occlusion map.
 - **Emission** is the self-lit term, albedo × E. The emissive map is albedo × E divided by the largest E, at that largest E as strength (`KHR_materials_emissive_strength`).
 - **Alpha:** an alpha-over material (flags blend "blended") is glTF `BLEND`, with the baked alpha in the base map's alpha, or a constant factor. A forward alpha of 1 stays opaque.
-- **Not carried:** additive and modulate materials have no glTF blend and stay opaque. Every material is single-sided, because the culling state is not decoded. Terms that depend on the view, the normal, UV1 or the vertex colour are not carried.
+- **Sides:** a material whose flags word sets DoubleSided ([Flags word](#flags-word)) is glTF `doubleSided`; the others are single-sided. On a double-sided material a term that reads the front-face flag does not bake, as its back faces differ.
+- **Locators:** each locator ([Locators](#locators)) is an empty node named after it, a child of its joint with the stored transform.
+- **Not carried:** additive and modulate materials have no glTF blend and stay opaque. Terms that depend on the view, the normal, UV1 or the vertex colour are not carried.
 
 Over the install (5,274 materials with a G-buffer surface, 1,306 alpha-over):
 
@@ -173,6 +175,8 @@ A texture stored in a float or 16-bit data format is used as its sampled values 
 | `0x0859863D` | u16 indices. Mesh flag `0x10` makes them relative to the mesh's first vertex; without it they are global |
 | `0x78D9CBDE` | 64-byte mesh record (fields below) |
 | `0x06EB7EFC` | Looks: 8 (u16 first mesh, u16 count) LOD slots per look. The 2016 game uses 4 |
+| `0x811902D7` | Look names: one 80-byte record per look. The first u32 of the section is the records' byte size; each record ends with u32 count, u32 name hash, u32 lowercase-name hash and u32 name pointer (+64). The 16 u32 before them and the data after the records are not read |
+| `0x9F614FAB` | [Locators](#locators), 64 bytes each |
 | `0x3250BB80` | Materials: the first half of the section holds (u64 path, u64 name) string pointers |
 | `0x6B855EED` | int16 UV1 per vertex, at the same UV scale |
 | `0x5CBA9DE9` | u8 RGBA per vertex |
@@ -240,11 +244,58 @@ skinned mesh:
 
 `joint_count` is the skeleton size when the model has `0xDCC88A19`. The skeleton is still listed in `joints`.
 
-### Not decoded yet
+### Looks and locators
 
-These sections are listed in `unsupported_sections` and are not interpreted.
+**Look names** (`looks[i]['name']`): every model names its looks. All 11,387 have `Default` as look 0. The others name alternative mesh sets: `base`, `topiary`, `pristine` and `damaged` pairs, `coll` (collision geometry), `skeleton`, and the `_chunk` pieces of breakable models. The model view's Look box shows `index: name`.
 
-**Models without geometry:** 24 models have no vertex or mesh section, only looks, locators or joints. Decoding one raises `UnsupportedModelError` with a message saying so.
+### Locators
+
+`decode_model` returns `locators`: the named attach points of section `0x9F614FAB` (580 models, 10,126 locators, every name `igLoc_…`).
+
+| Bytes | Field |
+| --- | --- |
+| 0 | u32 name hash |
+| 4 | u32 name pointer |
+| 8 | i32 joint; −1: on the model (74 locators) |
+| 12 | u32 0 |
+| 16 | 3 × 4 f32 transform, stored column by column: the three axis columns, then the translation |
+
+- **Space:** the transform is relative to the joint. On Ratchet, `igLoc_belt_buckle` is 0.068 in front of the pelvis; read in model space it would sit at his feet. A locator without a joint is in model space.
+- **Axes:** the axes are orthonormal (within 3 × 10⁻⁷ on 300 models). Reading them as columns follows the inverse binds' storage; no runtime use of a locator's axes is traced.
+- **Lookups:** `0x731CBC2E` is the sorted (name hash, locator) table of `0x9F614FAB`. `0xEE31971C` is the sorted (name hash, joint) table of the joints, closed by a (`0xFFFFFFFF`, `0xFFFFFFFF`) row. Both hold only what the tables they index hold.
+- **Use:** the Details tab lists them, and the model export writes each as an empty node under its joint.
+
+### Sections not read
+
+`decode_model` returns `unread_sections`: each section it does not read, with what is known of it (`model.SECTION_ROLES`, `model.DERIVED`). `unsupported_sections` lists those with no known meaning. Names in quotes come from ALERT `dat1lib`; counts are models of 11,387. None of these is needed to draw the geometry.
+
+| Section | Models | What is known |
+| --- | --- | --- |
+| `0xEFD92E68` | 4,907 | Havok physics data: the collision shapes ("Model Physics Data") |
+| `0xCCBAFF15` | 954 | The skin weights again, as fixed records ([Skin weights](#skin-weights)) |
+| `0xC5354B60` | 1,123 | Joint mirror ids ("Model Mirror Ids") |
+| `0x3C9DABDF` | 32 | Spline subsets ("Model Spline Subsets"). Only in Ratchet's and Rivet's bangle models, always with `0x27CA5246`, `0xB25B3163` and `0xBB7303D5` |
+| `0x7CA37DA0` | 11 | Ambient shadow primitives ("Ambient Shadow Prims"), 48 bytes |
+| `0x707F1B58` | 9,216 | Unknown: u32 16, u32 data size, counts, then float matrices |
+| `0x4CCEA4AD` | 11,387 | Unknown: holds look-name hashes and look indices |
+| `0xDF9FDF12` | 11,104 | Unknown: 16-byte records |
+| `0x90CDB60C`, `0xB7380E8C` | 1,123 | Unknown, in every rigged model: 80 bytes; u16 values |
+| `0x0AD3A708` | 958 | Unknown: a count and 20-byte records, in skinned models |
+| `0x665DA362` | 371 | Unknown: 8 or 16 bytes |
+| `0x27CA5246`, `0xB25B3163`, `0xBB7303D5` | 32 | Unknown: with the spline subsets |
+| Seven more | 1 to 22 | Unknown: `0xBCE86B01`, `0xADD1CBD3`, `0x9A434B29`, `0x5A39FAB7`, `0x855275D7`, `0x8A84E4D6`, `0xCD903318`, `0x00823787` |
+
+The morph sections are read by `attach_shapes` ([Blend shapes](#blend-shapes)), and the joint rest transforms `0xDCC88A19` by the skeleton.
+
+### Models without geometry
+
+24 models have no vertex or mesh section:
+
+- **22 river and lake models** under `levels/i29/…/houdinigenerateddata/` (Savali rivers, the catacombs water). Each holds only its bounds, an empty look and section `0x707F1B58`, about 2 KB.
+- **`garden_planter_bush_x2_stump`:** one joint, locators and a Havok collision shape.
+- **`…_finalcrystal`** (a Blizar grind rail): a Havok collision shape only.
+
+Their 36-byte header names no streamed sections: its streamed size is 0. In the install that is true of exactly these 24 models. So `Game.list_models` marks them (`PipelineModelCandidate.no_geometry`) from the toc alone, and the browser's Variants menu hides them by default ([viewer](viewer.md)). Opening one raises `UnsupportedModelError` with a message naming what it holds (`model.geometry_free_note`).
 
 ## Animation
 
@@ -574,8 +625,20 @@ The engine's material loader copies u32 2 of section `0xE1275683` into the mater
 | `0x800` | Lit: the draw's render flag `0x400` | Draw setup, `(word >> 11 & 1) << 10`. Programs with the flag clear use a lighting term of 1 (unlit). |
 | `0x4000` | Fur | The loader reads the fur section |
 | `0x800000` | Water | The loader reads the water section |
+| `0x1` | DoubleSided: both faces are drawn, without back-face culling (634 materials) | The main instance draw (`0x1411229ff`, and `0x1411250b9` for a second list) marks the packet two-sided (sort word `+0x2E` bit `0x800`) unless the mesh forces single-sided ([below](#double-sided)) |
 
 `material_blend` returns `opaque`, `additive`, `blended` or `modulate`; `draw_flags` returns the lit bit. Over 5,721 materials: 3,974 opaque, 1,309 blended, 427 additive and 11 modulate. The blend factors are pipeline state outside the files.
+
+#### Double-sided
+
+`material.double_sided` reads bit `0x1`, and `mesh_double_sided` adds the mesh override:
+
+- **The property:** the engine's reflection names the material property DoubleSided: "Both sides of geometry with this material will be drawn (no back-face culling)". Per geometry, `DoubleSidedType` can force single-sided (`kForceSingleSided`, `kForceSingleSidedInLod1`).
+- **The draw:** it tests bit `0x1`. When it is set, the draw marks the packet two-sided unless the mesh record's flags (`+0x24` at run time, the file's `+36`) force single-sided. The test is `0x4000` at LOD 0 and `0x4000 | 0x2000` at a higher LOD, the LOD the draw chose for the instance. So `0x4000` is single-sided at every LOD and `0x2000` from LOD 1. A global option sets the packet bit for every mesh.
+- **Corpus:** 634 materials set the bit: 265 opaque, 231 blended, 131 additive and 7 modulate. 42 % of the foliage materials set it, against 11 % of all materials. Only 3 meshes set `0x4000`, all with single-sided materials, and none sets `0x2000`.
+- **Not traced:** where the pipeline turns the packet's bit into its rasterizer cull mode.
+
+The portable export makes these materials glTF `doubleSided`, and the Blender materials turn back-face culling off for them. The viewer draws their blended passes without culling; it draws every opaque material two-sided anyway.
 
 ### Material alpha
 
@@ -1278,6 +1341,8 @@ A blended material's entry carries `blend` and a `forward` recipe ([Forward prof
 A material that lights the scene behind it (`lit_background`, [The scene behind](#forward-profile)) needs the diffuse light reaching the point, which Cycles has no node for. `surface.unit_irradiance` folds it at a unit white light, B = background + lit_background, and the material's limitations say so (`UNIT_IRRADIANCE_NOTE`).
 
 B is the background tint of a program that passes the scene behind it through ([Forward profile](#forward-profile)); a modulate material that does so is not linear in it and keeps its opaque surface.
+
+Back-face culling follows the flags word's DoubleSided bit (`material.double_sided`; [Double-sided](#double-sided)): off for a double-sided material, on for the others. Cycles ignores it.
 
 `VIEW` and `CAMERA` come from Geometry Incoming and Camera Data View Distance. EEVEE materials use the blended render method. The engine names the modes, but the blend factors are the standard ones for those names and are labelled as such. A blended material whose forward program does not translate keeps its opaque surface, with the reason in its limitations.
 

@@ -68,9 +68,10 @@ def build_model(pad_uv1=True, flags=0x11):
     uvs = [(0, 0), (1024, 0), (1024, 1024), (0, 1024), (0, 0), (512, 0), (0, 512)]
     vertices = b''.join(struct.pack('<4hI2h', x, y, z, 7, normal, u, v) for (x, y, z), (u, v) in zip(positions, uvs))
     indices = struct.pack('<9H', 0, 1, 2, 0, 2, 3, 0, 1, 2)
-    strings = b'\0materials/test.material\0testMat\0root\0'
-    pool = 16 + 12 * 10                          # 10 sections
+    strings = b'\0materials/test.material\0testMat\0root\0Default\0igLoc_tip\0'
+    pool = 16 + 12 * 12                          # 12 sections
     path_ptr, name_ptr, joint_ptr = pool + 1, pool + 1 + len('materials/test.material') + 1, pool + strings.index(b'root')
+    look_name_ptr, locator_ptr = pool + strings.index(b'Default'), pool + strings.index(b'igLoc_tip')
 
     def mesh(first_vertex, first_index, index_count, vertex_count):
         return (struct.pack('<IQ', 0, 0x1122334455667788) + bytes(8) + struct.pack('<4I', first_vertex, first_index, index_count, vertex_count)
@@ -84,9 +85,14 @@ def build_model(pad_uv1=True, flags=0x11):
     joints = struct.pack('<hHHHII', -1, 0, 0, 0, 0xABCD, joint_ptr)
     uv1 = b''.join(struct.pack('<2h', u // 2, v // 2) for u, v in uvs) + (bytes(4) if pad_uv1 else b'')
     colors = bytes([255, 0, 0, 128]) * 7 + (bytes(4) if pad_uv1 else b'')
+    # The look record's first u32 is the records' byte size; count, name hashes and name pointer close it at +64.
+    look_built = struct.pack('<I', 80) + bytes(60) + struct.pack('<4I', 0, 0xE2B463E7, 0x2D095A7B, look_name_ptr)
+    # One locator on joint 0: x axis (0, 1, 0), y axis (-1, 0, 0), z axis (0, 0, 1), translation (1, 2, 3), column by column.
+    locator = struct.pack('<IIiI', 0x1234, locator_ptr, 0, 0) + struct.pack('<12f', 0, 1, 0, -1, 0, 0, 0, 0, 1, 1, 2, 3)
     sections = {rm.BUILT: bytes(built), rm.VERTICES: vertices, rm.INDEXES: indices,
                 rm.MESHES: mesh(0, 0, 6, 4) + mesh(4, 6, 3, 3), rm.LOOK: look, rm.MATERIALS: materials,
-                rm.UV1: uv1, rm.COLORS: colors, rm.JOINTS: joints, 0x4CCEA4AD: b'unknown'}
+                rm.UV1: uv1, rm.COLORS: colors, rm.JOINTS: joints, 0x4CCEA4AD: b'unknown', rm.LOOK_BUILT: look_built,
+                rm.LOCATORS: locator}
     offset = pool + len(strings)
     table, body = b'', b''
     for tag, data in sections.items():
@@ -163,6 +169,51 @@ class SyntheticModelTests(unittest.TestCase):
         self.assertEqual(quad['material']['name'], 'testMat')
         self.assertEqual(d['joints'], [dict(index=0, parent=-1, name='root', name_hash='0x0000ABCD')])
         self.assertEqual(d['unsupported_sections'], ['0x4CCEA4AD'])
+
+    def test_look_names_locators_and_section_notes(self):
+        d = rm.decode_model('t', data=build_model(), as_arrays=True)
+        self.assertEqual((d['looks'][0]['name'], d['looks'][0]['name_hash']), ('Default', '0xE2B463E7'))
+        (loc,) = d['locators']
+        self.assertEqual((loc['name'], loc['joint'], loc['name_hash']), ('igLoc_tip', 0, '0x00001234'))
+        m = np.array(loc['matrix'])
+        np.testing.assert_allclose(m @ [1, 0, 0, 1], [1, 3, 3, 1])   # the x axis turned onto +y, then moved by (1, 2, 3)
+        self.assertEqual(d['unread_sections'], {'0x4CCEA4AD': rm.SECTION_ROLES[0x4CCEA4AD]})
+        self.assertEqual(rm.section_notes({rm.WEIGHTS, 0xEFD92E68, 0x12345678, rm.BUILT}),
+                         {'0x12345678': 'unknown', '0xCCBAFF15': rm.DERIVED[rm.WEIGHTS], '0xEFD92E68': rm.SECTION_ROLES[0xEFD92E68]})
+
+    def test_a_model_without_geometry_says_what_it_holds(self):
+        data = bytearray(build_model())
+        dat1 = bytes(data[36:])
+        table = rm.dat1_sections(dat1)
+        keep = (rm.BUILT, rm.LOOK, rm.JOINTS, 0xEFD92E68)
+        sections = {t: dat1[o:o + s] for t, (o, s) in table.items() if t in keep}
+        sections[0xEFD92E68] = b'havok'
+        pool, strings = 16 + 12 * len(sections), b'\0root\0'
+        sections[rm.JOINTS] = struct.pack('<hHHHII', -1, 0, 0, 0, 0xABCD, pool + 1)
+        offset, head, body = pool + len(strings), b'', b''
+        for tag, chunk in sections.items():
+            head += struct.pack('<III', tag, offset + len(body), len(chunk))
+            body += chunk
+        model = (struct.pack('<III', rm.MODEL_MAGIC, 0, 0) + bytes(24) + struct.pack('<4sIIHH', b'1TAD', rm.MODEL_MAGIC,
+                 offset + len(body), len(sections), 0) + head + strings + body)
+        with self.assertRaisesRegex(rm.UnsupportedModelError, 'only its bounds, an empty look table, 1 joint and a Havok collision shape'):
+            rm.decode_model('t', data=model)
+
+    def test_locators_become_gltf_nodes(self):
+        from rc2016.export import models
+        d = rm.decode_model('synthetic', data=build_model())
+        parts = [dict(name='a', material=None, arrays=models.mesh_arrays(d['meshes'][0], 0))]
+        exporter = models.ModelExporter.__new__(models.ModelExporter)
+        on_model = [dict(d['locators'][0], joint=None)]
+        gltf = exporter._build_gltf('m', parts, {}, None, [], locators=on_model, joint_names=['root'])
+        doc, _blob = gltf.finish(embed=True)
+        group = next(n for n in doc['nodes'] if n['name'] == 'm_locators')
+        node = doc['nodes'][group['children'][0]]
+        self.assertEqual(node['name'], 'igLoc_tip')
+        np.testing.assert_allclose(np.array(node['matrix']).reshape(4, 4).T, d['locators'][0]['matrix'])   # column-major
+        self.assertIn('1 locator(s)', gltf.locator_note)
+        unplaced = exporter._build_gltf('m', parts, {}, None, [], locators=d['locators'], joint_names=['root'])
+        self.assertIn('1 left out', unplaced.locator_note)   # on a joint, but no skeleton is exported
 
     def test_lists_mode_matches_arrays(self):
         a = rm.decode_model('t', data=build_model(), as_arrays=True)
@@ -295,8 +346,16 @@ class RealModelTests(unittest.TestCase):
         path = 'environment/megalopolis/architecture/meg_arch_rooftop_garden_01/meg_arch_rooftop_garden_planter_bush_x2/garden_planter_bush_x2_stump.model'
         if not self.source.resolve(path):
             self.skipTest('model not in this install')
-        with self.assertRaisesRegex(rm.UnsupportedModelError, 'no geometry'):
+        with self.assertRaisesRegex(rm.UnsupportedModelError, 'no geometry: .*1 joint, locators and a Havok collision shape'):
             self.decode(path)
+
+    def test_listing_marks_the_models_without_geometry(self):
+        from rc2016.games.rcra_game import _no_geometry
+        flagged = [k for k in self.source.ids_of_type('model') if _no_geometry(self.source.asset_header(k))]
+        self.assertEqual(len(flagged), 24)
+        for key in flagged[:3]:
+            with self.assertRaises(rm.UnsupportedModelError):
+                rm.decode_model('t', data=self.source.bytes(key)[0])
 
 
 if __name__ == '__main__':

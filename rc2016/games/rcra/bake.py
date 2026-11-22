@@ -1,8 +1,8 @@
 """Rift Apart material terms baked over UV0, for the portable (glTF/OBJ) export.
 
 A term of a translated program (a ``surface.surface`` or ``surface.forward`` recipe) whose operations reach no input but
-UV0 (``TEXCOORD.xy``) and the front-face flag (front: the export is single-sided), and sample only 1D or 2D textures or
-2D-array slices, takes the same value at every point of a mesh with the same UV0. Evaluating it at the texel centres of a
+UV0 (``TEXCOORD.xy``) and the front-face flag (bound to front; on a double-sided material, whose back faces the game also
+draws, a term that reads the flag does not bake), and sample only 1D or 2D textures or 2D-array slices, takes the same value at every point of a mesh with the same UV0. Evaluating it at the texel centres of a
 grid in UV0 space gives a texture the glTF material can carry: the game's own albedo, F0, gloss, occlusion, emission or
 forward alpha, with every tint, mask, palette and blend the program applies there.
 
@@ -37,7 +37,8 @@ DIMENSION_1D, DIMENSION_2D, DIMENSION_2D_ARRAY = 2, 3, 8   # a 1D texture is one
 INPUT_NAMES = {'TEXCOORD': 'the draw alpha', 'TEXCOORD1': 'UV1', 'TEXCOORD2': 'the world normal', 'TEXCOORD3': 'the tangent',
                'TEXCOORD4': 'the vertex colour', 'TEXCOORD5': 'the previous position', 'TEXCOORD6': 'the particle values',
                'TEXCOORD7': 'the particle values', 'VIEW': 'the view direction', 'CAMERA': 'the camera position',
-               'SV_Position': 'the screen position', 'SV_POSITION': 'the screen position', 'BACKGROUND': 'the scene behind'}
+               'SV_Position': 'the screen position', 'SV_POSITION': 'the screen position', 'BACKGROUND': 'the scene behind',
+               'SV_IsFrontFace': 'the front-face flag of a double-sided material'}
 # Operations that can make NaN or infinity from finite values, or whose value the translation does not know.
 FINITE_UNSAFE = frozenset(('div', 'rcp', 'rsq', 'log2', 'sqrt', 'exp2', 'bits2f', 'f16tof32', 'udiv', 'urem', 'unknown',
                            'cbload'))
@@ -116,8 +117,9 @@ def describe(name):
     return INPUT_NAMES.get(name.split('.')[0], name)
 
 
-def blocker(recipe, names):
-    """None when the terms ``names`` of ``recipe`` bake over UV0; else why not."""
+def blocker(recipe, names, two_sided=False):
+    """None when the terms ``names`` of ``recipe`` bake over UV0; else why not. ``two_sided``: the material is drawn without
+    back-face culling, so a term that reads the front-face flag differs on its back faces and does not bake."""
     from rc2016.games.rcra import blender_export as bexp
     if recipe is None:
         return 'the program does not translate'
@@ -126,7 +128,7 @@ def blocker(recipe, names):
     inputs, samples, unknown = _reach(recipe, names)
     if unknown:
         return 'it reads a value the translation does not know (%s)' % unknown[0]
-    other = sorted({describe(i) for i in inputs if i not in UV0 and i != FRONT_FACE})
+    other = sorted({describe(i) for i in inputs if i not in UV0 and (two_sided or i != FRONT_FACE)})
     if other:
         return 'it reads %s' % ', '.join(other)
     try:

@@ -37,6 +37,17 @@ on the installed files (docs/rift-apart.md):
                     meshes with flag 0x100, from the mesh's first weight index. Not read: the batches
                     hold every skinned mesh, their raw ids equal these on every vertex both hold, and
                     these records keep the palette-local ids of a remapped rig
+  0x811902D7        look built: one 80-byte record per look, the first record's first u32 being the records'
+                    byte size; each ends with u32 count, u32 name hash, u32 lowercase-name hash and u32 name
+                    pointer at +64 (the 16 u32 before them and the data after the records are not read). The
+                    look names: Default, base, pristine/damaged, topiary, coll
+  0x9F614FAB        locators, 64 bytes: u32 name hash, u32 name pointer, i32 joint (-1: none), u32 0, then a
+                    3x4 transform stored column by column (three axis columns, then the translation),
+                    relative to the joint (the model when there is none). 0x731CBC2E is the sorted
+                    (name hash, locator) lookup and 0xEE31971C the sorted (name hash, joint) lookup of the
+                    joints, closed by a (0xFFFFFFFF, 0xFFFFFFFF) row; both repeat the tables they index
+
+SECTION_ROLES names every other section the corpus holds: identified but not interpreted, or unknown.
 """
 import math
 import struct
@@ -52,13 +63,50 @@ BUILT, VERTICES, INDEXES, MESHES = 0x283D0383, 0xA98BE69B, 0x0859863D, 0x78D9CBD
 LOOK, MATERIALS, UV1, COLORS, JOINTS = 0x06EB7EFC, 0x3250BB80, 0x6B855EED, 0x5CBA9DE9, 0x15DF9D3B
 JOINT_TRANSFORMS, SKIN_BATCHES, SKIN_DATA, WEIGHTS = 0xDCC88A19, 0xC61B1FF5, 0xDCA379A2, 0xCCBAFF15
 SKIN_REMAP = 0x5240C82B
+LOOK_BUILT, LOCATORS, LOCATOR_LOOKUP, JOINT_LOOKUP = 0x811902D7, 0x9F614FAB, 0x731CBC2E, 0xEE31971C
+MORPH_SECTIONS = (0x380A5744, 0x5E709570, 0xA600C108)   # read by attach_shapes (rcra.morph)
+LOOK_RECORD = 80
+LOCATOR_RECORD = 64
 SKIN_SECTIONS = (SKIN_BATCHES, SKIN_DATA, WEIGHTS, SKIN_REMAP)
 SKIN_GROUP = 16            # vertices per skin-data group
 MAX_INFLUENCES = 8
 LODS_PER_LOOK = 8
 MESH_STRIDE = 64
 VERTEX = np.dtype([('xyzw', '<i2', 4), ('normal', '<u4'), ('uv', '<i2', 2)])
-DECODED = {BUILT, VERTICES, INDEXES, MESHES, LOOK, MATERIALS, UV1, COLORS, JOINTS, SKIN_BATCHES, SKIN_DATA, SKIN_REMAP}
+DECODED = {BUILT, VERTICES, INDEXES, MESHES, LOOK, MATERIALS, UV1, COLORS, JOINTS, SKIN_BATCHES, SKIN_DATA, SKIN_REMAP,
+           LOOK_BUILT, LOCATORS, *MORPH_SECTIONS,
+           JOINT_TRANSFORMS}   # the rest pose and inverse binds: read by the skeleton (rcra.animation)
+# Sections that only repeat a table that is read, as an index into it or in another layout (checked over the install).
+DERIVED = {LOCATOR_LOOKUP: 'sorted (name hash, locator) lookup of 0x9F614FAB',
+           JOINT_LOOKUP: 'sorted (name hash, joint) lookup of the joint table, closed by a 0xFFFFFFFF row',
+           WEIGHTS: 'the skin weights again as fixed 8-byte records; the 0xC61B1FF5 batches are read instead'}
+# Every other section in the installed models, with what is known of it (names in quotes are ALERT dat1lib's). Counts
+# are models of 11,387. None of them is needed to draw the geometry.
+SECTION_ROLES = {
+    0xEFD92E68: 'Havok physics data: the collision shapes ("Model Physics Data"; 4,907 models)',
+    0x707F1B58: 'unknown: u32 16, u32 data size, counts, then float matrices (9,216)',
+    0x4CCEA4AD: 'unknown: records that hold look-name hashes and look indices (every model)',
+    0xDF9FDF12: 'unknown: 16-byte (u32 x4) records ("0-70-0-2?"; 11,104)',
+    0x90CDB60C: 'unknown: 80 bytes in every rigged model (1,123)',
+    0xB7380E8C: 'unknown: u16 values, in rigged models (1,123)',
+    0xC5354B60: 'joint mirror ids ("Model Mirror Ids"; 1,123); not read',
+    0x0AD3A708: 'unknown: a count and 20-byte records, in skinned models (958)',
+    0x665DA362: 'unknown: 8 or 16 bytes (371)',
+    0x3C9DABDF: 'spline subsets ("Model Spline Subsets"): Ratchet and Rivet bangle models only (32), with 0x27CA5246, '
+                '0xB25B3163 and 0xBB7303D5',
+    0x27CA5246: 'unknown: with the spline subsets, Ratchet and Rivet bangle models only (32)',
+    0xB25B3163: 'unknown: with the spline subsets, Ratchet and Rivet bangle models only (32)',
+    0xBB7303D5: 'unknown: with the spline subsets, Ratchet and Rivet bangle models only (32)',
+    0xBCE86B01: 'unknown (22 models)',
+    0xADD1CBD3: 'unknown (20 models)',
+    0x7CA37DA0: 'ambient shadow primitives ("Ambient Shadow Prims"; 11 models, 48 bytes); not read',
+    0x9A434B29: 'unknown, related to the locators in ALERT (7 models)',
+    0x5A39FAB7: 'unknown (7 models)',
+    0x855275D7: 'unknown (3 models, 52 bytes)',
+    0x8A84E4D6: 'unknown (3 models)',
+    0xCD903318: 'unknown (3 models, 68 bytes)',
+    0x00823787: 'unknown (1 model, 4 bytes)',
+}
 SCHEMA = 'rcra-pc-model-v1'
 FLOAT32_MAX = float(np.finfo(np.float32).max)
 
@@ -134,6 +182,59 @@ def _looks(raw, mesh_count):
             lods.append(dict(index=lod, start=start, count=count, meshes=list(range(start, start + count))))
         looks.append(dict(index=look_index, lods=lods))
     return looks
+
+
+def _look_names(dat1, raw, bounds, looks):
+    """Name each look from section 0x811902D7: u32 byte size of the 80-byte look records, one per look, each with
+    u32 name hash, u32 lowercase-name hash and u32 name pointer from +68. Looks keep no name when the records do not
+    match the look table."""
+    if len(raw) < 4:
+        return
+    size = struct.unpack_from('<I', raw)[0]
+    if size != LOOK_RECORD * len(looks) or size > len(raw):
+        return
+    for look in looks:
+        name_hash, _lower, pointer = struct.unpack_from('<III', raw, LOOK_RECORD * look['index'] + 68)
+        look['name'] = _cstring(dat1, pointer, bounds)
+        look['name_hash'] = f'0x{name_hash:08X}'
+
+
+def _locators(dat1, raw, bounds, joint_count):
+    """The model's locators (section 0x9F614FAB): named attach points with a transform relative to a joint.
+
+    ``matrix`` is the 4x4 local transform, rows of a column-vector matrix: the stored 3x4 is read column by column (three
+    axis columns, then the translation), as the inverse binds are; ``joint`` is None for a locator on the model."""
+    if len(raw) % LOCATOR_RECORD:
+        raise ValueError('Locator table is not a multiple of 64 bytes')
+    out = []
+    for at in range(0, len(raw), LOCATOR_RECORD):
+        name_hash, pointer, joint, _zero = struct.unpack_from('<IIiI', raw, at)
+        if not -1 <= joint < joint_count:
+            raise ValueError('Locator joint outside the joint table')
+        columns = np.asarray(struct.unpack_from('<12f', raw, at + 16), np.float64).reshape(4, 3)
+        matrix = np.eye(4)
+        matrix[:3, :3], matrix[:3, 3] = columns[:3].T, columns[3]
+        out.append(dict(index=len(out), name=_cstring(dat1, pointer, bounds), name_hash=f'0x{name_hash:08X}',
+                        joint=None if joint < 0 else joint, matrix=matrix.tolist()))
+    return out
+
+
+def section_notes(tags):
+    """{'0xTAG': what is known of it} of the given section tags that are not read."""
+    return {f'0x{t:08X}': DERIVED.get(t) or SECTION_ROLES.get(t, 'unknown') for t in sorted(tags) if t not in DECODED}
+
+
+def geometry_free_note(table):
+    """Why a model holds nothing to draw, naming what it does hold."""
+    held = ['its bounds', 'an empty look table']
+    if JOINTS in table:
+        count = table[JOINTS][1] // 16
+        held.append('%d joint%s' % (count, '' if count == 1 else 's'))
+    if LOCATORS in table:
+        held.append('locators')
+    if 0xEFD92E68 in table:
+        held.append('a Havok collision shape')
+    return 'This model holds no geometry: it has no vertex or mesh section, only %s and %s.' % (', '.join(held[:-1]), held[-1])
 
 
 def _materials(dat1, raw, bounds):
@@ -296,8 +397,7 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
         return dat1[offset:offset + size]
 
     if VERTICES not in table and MESHES not in table:
-        raise UnsupportedModelError('This model holds no geometry (no vertex or mesh section); '
-                                    'it carries only looks, locators or joints')
+        raise UnsupportedModelError(geometry_free_note(table))
     built = chunk(BUILT, True)
     if len(built) < 0x34:
         raise ValueError('Model built section is too short')
@@ -338,6 +438,8 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
     batches = [struct.unpack_from('<IIHHHH', batches_raw, at) for at in range(0, len(batches_raw), 16)]
     mesh_count = len(meshes_raw) // MESH_STRIDE
     looks = _looks(chunk(LOOK), mesh_count)
+    _look_names(dat1, chunk(LOOK_BUILT), bounds, looks)
+    locators = _locators(dat1, chunk(LOCATORS), bounds, len(joints))
     membership = {i: [] for i in range(mesh_count)}
     for look_row in looks:
         for level in look_row['lods']:
@@ -397,7 +499,8 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
             skinned=weights is not None, material=materials[material_index] if material_index < len(materials) else None,
             index_base='local' if flags & 0x10 else 'global', memberships=membership[mesh_index]))
     section_sizes = {f'0x{k:08X}': size for k, (_o, size) in table.items()}
-    unsupported = sorted(f'0x{k:08X}' for k in table if k not in DECODED)
+    unread = section_notes(table)
+    unsupported = [tag for tag, note in unread.items() if note.startswith('unknown')]   # no interpretation at all
     stream_offset, stream_size = struct.unpack_from('<II', data, 4)
     return dict(
         schema=SCHEMA, game='rcra', source=str(path), source_sha256=source_sha256,
@@ -413,8 +516,8 @@ def decode_model(path, lod='All', look=0, data=None, as_arrays=False):
         skin='0xC61B1FF5/0xDCA379A2 skin batches: 16-vertex groups of 1 to 8 (joint, weight) influences',
         vertex_count=vertex_count, index_count=len(index_words), mesh_record_count=mesh_count,
         selected_mesh_count=len(result), selected_mesh_indices=selected, import_lod=lod, import_look=look,
-        looks=looks, materials=materials, joints=joints, skeleton_joint_count=len(joints), meshes=result,
-        section_sizes=section_sizes, unsupported_sections=unsupported,
+        looks=looks, materials=materials, joints=joints, skeleton_joint_count=len(joints), locators=locators, meshes=result,
+        section_sizes=section_sizes, unsupported_sections=unsupported, unread_sections=unread,
         skin_sections_present=[f'0x{t:08X}' for t in SKIN_SECTIONS if t in table])
 
 

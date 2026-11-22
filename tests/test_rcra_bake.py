@@ -61,7 +61,9 @@ class BlockerTests(unittest.TestCase):
         uv1 = recipe([node('input', name='TEXCOORD1.x')], {'occlusion': 0})
         self.assertEqual(bake.blocker(uv1, ('occlusion',)), 'it reads UV1')
         front = recipe(uv_nodes() + [node('input', name='SV_IsFrontFace', kind='b'), node('select', 2, 0, 1)], {'gloss': 3})
-        self.assertIsNone(bake.blocker(front, ('gloss',)))   # the export is single-sided: front faces
+        self.assertIsNone(bake.blocker(front, ('gloss',)))   # a single-sided material: front faces only
+        self.assertEqual(bake.blocker(front, ('gloss',), two_sided=True),   # its back faces differ
+                         'it reads the front-face flag of a double-sided material')
         self.assertEqual(bake.blocker(r, ('alpha',)), 'the program has no such term')
         self.assertEqual(bake.blocker(None, ('alpha',)), 'the program does not translate')
 

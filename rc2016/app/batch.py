@@ -47,6 +47,8 @@ class PipelineModelCandidate:
     # Named actors that use this model (and their animsets), for display and search.
     used_by: str = ""
     search_text: str = ""
+    # The model holds nothing to draw (Rift Apart: no vertex or mesh section); the Variants menu hides these.
+    no_geometry: bool = False
 
     @property
     def display_name(self) -> str:

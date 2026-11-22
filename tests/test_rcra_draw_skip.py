@@ -47,6 +47,16 @@ class DrawSkipRuleTests(unittest.TestCase):
             if note:
                 self.assertIn('Not drawn', note)
 
+    def test_double_sided_bit_and_mesh_overrides(self):
+        self.assertTrue(rmat.double_sided(material_bytes(0x1811, 1.0)))
+        self.assertFalse(rmat.double_sided(material_bytes(0x1810, 1.0)))
+        self.assertFalse(rmat.double_sided(bytes(36) + b'1TAD' + struct.pack('<IIHH', rmat.MATERIAL_MAGIC, 16, 0, 0)))
+        self.assertTrue(rmat.mesh_double_sided(True, 0x0011))
+        self.assertFalse(rmat.mesh_double_sided(True, 0x4011))           # kForceSingleSided
+        self.assertTrue(rmat.mesh_double_sided(True, 0x2011, lod=0))     # kForceSingleSidedInLod1 leaves LOD 0
+        self.assertFalse(rmat.mesh_double_sided(True, 0x2011, lod=1))
+        self.assertFalse(rmat.mesh_double_sided(False, 0x0011))
+
     def test_draw_alpha_is_the_packed_material_alpha(self):
         # the draw packs trunc(alpha x 4096) into 16 bits; the vertex program reads it back as TEXCOORD.w
         for alpha, expected in ((1.0, 1.0), (0.5, 0.5), (0.3, 1228 / 4096), (0.99, 4055 / 4096), (0.005, 20 / 4096)):

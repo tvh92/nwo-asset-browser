@@ -395,7 +395,7 @@ def _reads_background(recipe):
 
 def material_entry(source, material_path, folder, texture_cache=None, graph_cache=None):
     """The Blender entry of one material: dict(blend, recipe, forward, images, limitations), or dict(error)."""
-    from rc2016.games.rcra.material import _graphs, _material_key, material_blend
+    from rc2016.games.rcra.material import _graphs, _material_key, double_sided, material_blend
     key = _material_key(source, material_path)
     if key is None:
         return dict(error='material asset not found')
@@ -486,7 +486,7 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
         'frame so they turn with the armature; the draw is unmirrored (render flag 0x10000 clear).',
         'Texture filtering is Blender\'s linear repeat; the game\'s sampler states are not in the program.']
     entry = dict(graph=graph_path, blend=blend if 'forward' in results else 'opaque', game_blend=blend, images=images,
-                 limitations=limitations)
+                 limitations=limitations, double_sided=double_sided(data))
     entry.update(recipes)
     if program is not None:
         try:

@@ -19,8 +19,9 @@ F0 and gloss are converted to glTF metal/roughness with the Khronos spec-gloss c
 maximum, at that maximum as strength (KHR_materials_emissive_strength). An alpha-over material (flags blend "blended") is
 glTF BLEND with the forward alpha in the base map's alpha (or a constant factor). Additive and modulate materials have no
 glTF blend and stay opaque. Normal-, view- and UV1-dependent terms are not carried into these formats; the Blender formats
-translate them. Every material is single-sided: the culling state is not decoded. A float or 16-bit texture is used as its
-sampled values rounded to 8 bits when they lie in 0..1 (``rcra.unit_texture``); otherwise it is left out with its range.
+translate them. A material is double-sided when its flags word sets DoubleSided (``material.double_sided``), as the game
+draws it without back-face culling; the others are single-sided. A float or 16-bit texture is used as its sampled values
+rounded to 8 bits when they lie in 0..1 (``rcra.unit_texture``); otherwise it is left out with its range.
 """
 from __future__ import annotations
 
@@ -195,16 +196,16 @@ def _label(binding, channel, names):
     return '%s.%s' % (names.get(binding, binding), 'rgba'[channel])
 
 
-def _bake_plan(surface, forward, blend):
+def _bake_plan(surface, forward, blend, two_sided=False):
     """{group: None when its terms bake over UV0 (rcra.bake.blocker), else why not}."""
     from rc2016.games.rcra import bake as rbake
     plan = {}
     if surface is not None:
-        plan = {group: rbake.blocker(surface, names) for group, names in BAKE_GROUPS.items()}
+        plan = {group: rbake.blocker(surface, names, two_sided) for group, names in BAKE_GROUPS.items()}
         if plan['emission'] is None and plan['albedo'] is not None:
             plan['emission'] = 'the self-lit albedo does not bake: %s' % plan['albedo']
     if blend == 'blended' and forward is not None:
-        plan['alpha'] = rbake.blocker(forward, ('alpha',))
+        plan['alpha'] = rbake.blocker(forward, ('alpha',), two_sided)
     return plan
 
 
@@ -225,7 +226,9 @@ def decoded_maps(source, key):
         out['reason'] = 'the writer does not translate: %s' % error
         return out
     surface, forward = rbake.fold(surface), rbake.fold(forward)   # zero-weighted branches out (a UV1 damage overlay)
-    out.update(blend=blend, bake=_bake_plan(surface, forward, blend), bindings=textures, surface=surface, forward=forward)
+    two_sided = rmat.double_sided(source.asset_data(key))
+    out.update(blend=blend, bake=_bake_plan(surface, forward, blend, two_sided), bindings=textures, surface=surface,
+               forward=forward)
     if graph is None:   # a fur material: the engine fur writer's maps (rc2016.games.rcra.fur)
         c_binding, g_binding, m_binding = 'g_BaseMap', 'g_FurGlossMap', 'g_FurControlMap'
     else:
@@ -336,7 +339,7 @@ def _compose(size, albedo, f0, gloss, occlusion, emission, alpha):
 def material_maps(source, material, cache, map_cache=None):
     from rc2016.export.models import _convert_maps
     from rc2016.games.rcra import unit_texture
-    from rc2016.games.rcra.material import PREVIEW_ROLES, _material_key, material_slots
+    from rc2016.games.rcra.material import PREVIEW_ROLES, _material_key, double_sided, material_slots
     from rc2016.games.rcra.texture import load_texture_full
     name = material.get('name') or (Path(material['path']).stem if material.get('path') else f"material_{material.get('index', 0)}")
     out = dict(name=name, base=None, mr=None, normal=None, emissive=None, emissive_strength=0.0,
@@ -353,6 +356,7 @@ def material_maps(source, material, cache, map_cache=None):
             raise ValueError('no single material asset for this path')
         slots = dict(material_slots(source.asset_data(key)))
         paths = {role: slots[slot] for slot, role in PREVIEW_ROLES.items() if slots.get(slot)}
+        out['double_sided'] = double_sided(source.asset_data(key))
         decoded = decoded_maps(source, key)
     except (ValueError, KeyError, OSError) as error:
         out['notes'].append(f'material unreadable: {error}')

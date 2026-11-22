@@ -282,6 +282,14 @@ class RcraSource:
         data = self._read_occurrence(primary)
         return data, sha(data)
 
+    def asset_header(self, key):
+        """The 36-byte toc header of the copy ``bytes`` returns, or None, read from the toc alone."""
+        index = self._index(key)
+        if index is None:
+            raise KeyError(key)
+        primary = self._primary([self._occurrence(r) for r in self._rows(index)])
+        return self.toc.header(primary['row']) if primary and primary['header'] else None
+
     def texture_stream(self, key):
         """The HD mip stream of a streamed texture, or None."""
         index = self._index(key)

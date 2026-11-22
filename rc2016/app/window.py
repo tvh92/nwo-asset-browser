@@ -1283,7 +1283,7 @@ class AssetBrowserApp:
             listed = frozenset(path.casefold() for path in paths)
             kinds, counts = {}, {}
             for record, path in zip(self.records, paths):
-                kind = variant_kind(path, listed)
+                kind = variant_kind(path, listed, record)
                 if kind:
                     kinds[id(record)] = kind
                     counts[kind] = counts.get(kind, 0) + 1

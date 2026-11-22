@@ -55,8 +55,16 @@ class VariantKindTests(unittest.TestCase):
     def test_case_and_backslashes(self):
         self.assertEqual(kind(PATHS[1].upper().replace("/", "\\")), "topiary")
 
-    def test_defaults_hide_topiary_and_test_folders_only(self):
-        self.assertEqual({k.key for k in VARIANT_KINDS if k.hidden_by_default}, {"topiary", "test"})
+    def test_defaults_hide_topiary_test_folders_and_models_without_geometry(self):
+        self.assertEqual({k.key for k in VARIANT_KINDS if k.hidden_by_default}, {"topiary", "test", "no_geometry"})
+
+    def test_a_record_flag_marks_models_without_geometry(self):
+        from rc2016.app.batch import PipelineModelCandidate
+        empty = PipelineModelCandidate(model_id="1", archive_path=PATHS[1], no_geometry=True)
+        self.assertEqual(variant_kind(PATHS[1], LISTED, empty), "no_geometry")   # before the topiary suffix
+        self.assertEqual(variant_kind(PATHS[1], LISTED, PipelineModelCandidate(model_id="2", archive_path=PATHS[1])),
+                         "topiary")
+        self.assertTrue(search_reveals("no_geometry", ["geometry"]))
 
     def test_search_word_reveals_a_kind(self):
         self.assertTrue(search_reveals("topiary", ["bladeball", "topiary"]))

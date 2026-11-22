@@ -952,7 +952,8 @@ def _forward_shader(tree, entry, images, uv_maps, colour_attribute, lit, tangent
 def apply_recipe(material, entry, uv_maps, colour_attribute=None, tangent=False):
     """Replace ``material``'s nodes with the translated material.
 
-    ``entry``: dict(blend, recipe (G-buffer surface), forward (blended materials), images {binding: row}, limitations).
+    ``entry``: dict(blend, recipe (G-buffer surface), forward (blended materials), images {binding: row}, limitations,
+    double_sided (the flags word's DoubleSided, which sets the back-face culling)).
     An opaque entry needs ``recipe``; a blended one needs ``forward`` and uses ``recipe`` for its lit part when present.
     ``tangent``: the mesh carries the decoded tangent (``store_tangent_frame``); else the UV0 frame stands in, labelled."""
     mode = entry.get('blend', 'opaque')
@@ -981,6 +982,9 @@ def apply_recipe(material, entry, uv_maps, colour_attribute=None, tangent=False)
         elif prop in material:
             del material[prop]
     material['rc_rcra_blend'] = mode
+    if 'double_sided' in entry:   # the flags word's DoubleSided: the game draws both faces without back-face culling
+        material.use_backface_culling = not entry['double_sided']
+        material['rc_rcra_double_sided'] = bool(entry['double_sided'])
     material['rc_rcra_limitations'] = '\n'.join(entry.get('limitations', []) + ([] if tangent else [NO_TANGENT_NOTE]))
     material['rc_rcra_tangent'] = bool(tangent)
     return material
@@ -1054,6 +1058,8 @@ def validate_material(material):
     problems = []
     tree = material.node_tree
     mode = material.get('rc_rcra_blend', 'opaque')
+    if 'rc_rcra_double_sided' in material and material.use_backface_culling == bool(material['rc_rcra_double_sided']):
+        problems.append('%s: back-face culling does not follow the DoubleSided flag' % material.name)
     digest = material.get(RECIPE_PROPERTY)
     if mode == 'opaque' and not digest:
         problems.append('%s: opaque material without a surface recipe' % material.name)

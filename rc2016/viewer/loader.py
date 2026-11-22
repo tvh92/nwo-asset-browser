@@ -827,6 +827,8 @@ class SourcePreviewLoader:
             source_packed_sha256=current['packed_sha256'],codec=current['codec'],
             kind='skinned' if current['joint_count'] else 'static',joint_count=current['joint_count'],
             looks=current['looks'],lod=lod,look=look,mesh_record_count=current['mesh_record_count'],
+            locators=[dict(m,joint_name=current['joints'][m['joint']]['name'] if m.get('joint') is not None else None)
+                      for m in current.get('locators') or []],unread_sections=current.get('unread_sections') or {},
             animsets=current['animsets'],clips=animation.labels() if animation else [],
             clip_notes=animation.clip_notes() if animation and purpose=='view' else [],
             clip_seconds=animation.clip_seconds() if animation else [],
