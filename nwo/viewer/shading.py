@@ -2702,6 +2702,8 @@ uniform sampler2D uBloom; uniform bool uBloomOn;
 vec3 srgbDecode(vec3 c) { return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, vec3(lessThanEqual(c, vec3(0.04045)))); }
 vec3 displayBloom(vec3 color, vec3 bloom) {
     if (!uBloomOn) return display(color);
+    // Rift Apart (nwo/games/rcra/bloom.py): CS_ToneMap adds its bloom texture to the scene radiance before the exposure.
+    if (uTonemap == 3) return riftApartDisplay((color + bloom) * uExposure);
     if (uTonemap == 2) {
         color *= uExposure * GAME_EXPOSURE;
         vec3 t = clamp(vec3(gameCurve(color.r), gameCurve(color.g), gameCurve(color.b)) + bloom, 0.0, 1.0);
@@ -3073,10 +3075,14 @@ class Shading:
         return self.programs["hdr_resolve"]
 
     def bloom_program(self, kind):
-        """Model viewer bloom passes (nwo/viewer/bloom.py PROGRAMS): down13, prefilter, down or up."""
+        """Model viewer bloom passes (nwo/viewer/bloom.py PROGRAMS): down13, prefilter, down or up; Rift Apart's
+        (nwo/games/rcra/bloom.py PROGRAMS): rcra_half, rcra_down or rcra_up."""
         key = "bloom_" + kind
         if key not in self.programs:
-            from nwo.viewer import bloom
+            if kind.startswith("rcra_"):
+                from nwo.games.rcra import bloom
+            else:
+                from nwo.viewer import bloom
             fragment, uniforms = bloom.PROGRAMS[kind]
             self.programs[key] = self._link(bloom.VERTEX, fragment, {}, uniforms)
         return self.programs[key]

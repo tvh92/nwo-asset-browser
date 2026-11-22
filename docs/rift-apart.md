@@ -1138,7 +1138,24 @@ The game's lookup is built by `CS_ToneMapCreateLookup` in `RiftApart.exe`: a 32�
 
 `nwo/games/rcra/display.py` is the port. Translated by `nwo.shaders.sm5` and evaluated at random thread ids, the exe's program matches it to about 1e-5. The model viewer's **Game (Rift Apart)** tonemap (`uTonemap` 3, `riftApartDisplay` in `shading.LIGHTING`) samples the same table from the shared display texture, and on a Ratchet frame under the Shared HDRI it agrees with the CPU port to within 8-bit rounding. It is the default display for Rift Apart in the model browser, the clip viewer and the gallery thumbnails (`Game.display_tonemap`). The exposure is the viewer's (the lighting's, 1 for the rig), not the game's auto-exposure.
 
-Not part of it: the atmosphere colour-correction LUT (a model has no atmosphere), auto-exposure, bloom (the viewer's bloom is added as for the other display-referred tonemaps, a stand-in), lens flares, vignette and film grain.
+Not part of it: the atmosphere colour-correction LUT (a model has no atmosphere), auto-exposure, lens flares, vignette and film grain. Bloom is drawn ([Bloom](#bloom)).
+
+#### Bloom
+
+The bloom programs are SM5 pixel programs in `RiftApart.exe`. The exe's program names are sorted alphabetically and the programs sit in the same order, which `PS_BloomDownsampleLatLongThresholded` and `PS_ToneMapApplyBasic` confirm by their bindings. The screen chain uses `PS_BloomDownsampleThresholded`, `PS_BloomDownsample` and `PS_BloomUpsample`. The pass function (`0x1411da720`) fills their constants from the atmosphere's `BloomSettings`: Intensity, Threshold and GaussianStrength0 to 4, at offsets 656 to 680 of the built block, in schema order after the tone-map fields. It runs over `kBloom0` to `kBloom6`, at 1/2 to 1/128 of the screen (the render-target table's size shifts −1 to −7):
+
+1. B1 = down13(B0) × sat(luma × (1/L) / max(Threshold, 1/16) − 1) / (G0 + … + G4), with L the adapted luminance. down13 is a 13-tap filter at ±1 and ±2 source texels; the gate reads the luma of the filtered colour.
+2. B2 to B6: down13 of the level above, without the gate.
+3. Back up, each pass draws a 3 × 3 tent at ±1.5 source texels with blend state 6 (colour = src + srcAlpha × dst): B5 = G4 tent(B6) + G3 B5, B4 = tent(B5) + G2 B4, B3 = tent(B4) + G1 B3, B2 = tent(B3) + G0 B2, B1 = tent(B2), and B0 = Intensity × tent(B1), which overwrites. The five strengths weight the 1/8 to 1/128 levels.
+4. `CS_ToneMap` adds B0 to the scene radiance when `m_DoBloom` is set, before the exposure and the lookup.
+
+`nwo/games/rcra/bloom.py` holds the pass list, the GLSL and a numpy reference. The model viewer runs it on every frame under **Game (Rift Apart)**, over its float scene target. On a Ratchet frame with a raised intensity and lowered threshold (bloom changing pixels by up to 0.84), and on Clank with the default settings (up to 0.23), the viewer agrees with the reference to within 1/255. Viewer choices, not game data:
+
+- **Settings:** `required/atmospheres/default_atmosphere.atmosphere` (intensity 0.1, threshold 3, strengths 0.4, 0.5, 0.6, 0.8 and 1), since a model has no atmosphere. Most of the 95 atmospheres use intensity 0.1 to 0.3 with threshold 3; `atm_default_day` uses 0.
+- **B0:** a 2 × 2 box copy of the scene at half resolution. How the game fills `kBloom0` is not traced.
+- **Gate:** 1/L is the viewer exposure / 0.18, since the display exposure is `m_AcesMiddleGray / L`.
+- **Sizes:** levels halve with a floor, and the programs' uv scale for odd sizes (2 × destination / source) is taken as 1.
+- **Not drawn:** lens dirt (`BloomDirtiness`, 0 in the default atmosphere), lens flares and the LatLong variants.
 
 #### Missing textures
 

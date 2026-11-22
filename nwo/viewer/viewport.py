@@ -953,8 +953,9 @@ class ModelViewport(_TkFrame):
             self._release_effect_textures()
         if self.__dict__.get('_hdr_target') and self._make_current():
             self._hdr_release()
-        if self.__dict__.get('_bloom') and self._make_current():
-            self._bloom_release()
+        for key in ('_bloom', '_rcra_bloom'):
+            if self.__dict__.get(key) and self._make_current():
+                self._bloom_release(key)
         if self._gl_textures and self._make_current():
             ids = list({entry[role][0] for entry in self._gl_textures.values()
                         for role in ("_c", "_g", "_n", "_pick", "_h", "_bng_detail", "_vehicle_p2", "_tint_detail",
@@ -1618,6 +1619,8 @@ class ModelViewport(_TkFrame):
                               in self.HDR_FORWARD_KINDS for b in glass)
             emitters = self.BLOOM and self.BLOOM_EMITTERS and any(
                 self_lit_entry(((self._gl_textures or {}).get(b[0]) or {}), self.native_translation) for b in batches)
+            # Rift Apart's display blooms every frame (nwo/games/rcra/bloom.py), so it always takes the float target.
+            emitters = emitters or (self.BLOOM and self._lighting_state()['tonemap'] == self.RCRA_TONEMAP)
             hdr = self._hdr_begin() if level == 2 and (panes or effect_quads or hdr_forward or emitters) else None
             if hdr:   # the program in use took its tonemap uniform before the float target was bound
                 self._apply_lighting(u)
@@ -2041,13 +2044,75 @@ class ModelViewport(_TkFrame):
                 cached['images'][name] = self._bloom_image(functions, w, h)
         return cached['images']
 
-    def _bloom_release(self):
-        cached = self.__dict__.pop('_bloom', None)
+    def _rcra_bloom_images(self, size):
+        """Rift Apart's bloom images B0..B6 (nwo.games.rcra.bloom.level_sizes) for a viewport size, cached."""
+        from nwo.games.rcra import bloom
+        cached = self.__dict__.get('_rcra_bloom')
+        if cached is None or cached['size'] != size:
+            self._bloom_release('_rcra_bloom')
+            functions = self._hdr_functions()
+            cached = self._rcra_bloom = dict(size=size, images={})
+            for k, (w, h) in enumerate(bloom.level_sizes(*size)):
+                cached['images']['B%d' % k] = self._bloom_image(functions, w, h)
+        return cached['images']
+
+    def _bloom_release(self, key='_bloom'):
+        cached = self.__dict__.pop(key, None)
         if cached:
             images = list(cached['images'].values())
             self._gl.glDeleteTextures(len(images), (ctypes.c_uint * len(images))(*(i['tex'] for i in images)))
             for image in images:
                 self._hdr_fns['glDeleteFramebuffers'](1, ctypes.byref(ctypes.c_uint(image['fbo'])))
+
+    def _rcra_bloom_pass(self, p, images, scene):
+        """Draw one pass of nwo.games.rcra.bloom.passes into its image; `scene` is the float scene target's colour texture."""
+        gl, sh = self._gl, self._shading
+        dst = images[p['dst']]
+        self._hdr_fns['glBindFramebuffer'](self.GL_FRAMEBUFFER, dst['fbo'])
+        gl.glViewport(0, 0, dst['w'], dst['h'])
+        program, u = sh.bloom_program(p['kind'])
+        sh.glUseProgram(program)
+        sh.glUniform2f(u['uSize'], float(dst['w']), float(dst['h']))
+        sh.glUniform2f(u['uTexel'], *(float(x) for x in p['texel']))
+        if p['kind'] == 'rcra_down':
+            gate = p['gate'] or {}
+            sh.glUniform1i(u['uGate'], int(bool(gate)))
+            sh.glUniform1f(u['uInvLum'], float(gate.get('inverse_luminance', 0.0)))
+            sh.glUniform1f(u['uThresholdScale'], float(gate.get('threshold_scale', 0.0)))
+            sh.glUniform1f(u['uNormalise'], float(gate.get('normalise', 0.0)))
+        elif p['kind'] == 'rcra_up':
+            sh.glUniform1f(u['uScale'], float(p['scale']))
+            sh.glUniform1f(u['uAlpha'], float(p['alpha']))
+        sh.glActiveTexture(self.GL_TEXTURE0)
+        gl.glBindTexture(self.GL_TEXTURE_2D, scene if p['src'] == 'scene' else images[p['src']]['tex'])
+        sh.glUniform1i(u['uSrc'], 0)
+        if p.get('blend'):   # blend state 6: colour = src + srcAlpha x dst
+            gl.glEnable(self.GL_BLEND)
+            gl.glBlendFunc(self.GL_ONE, self.GL_SRC_ALPHA)
+        else:
+            gl.glDisable(self.GL_BLEND)
+        gl.glBegin(0x0007)   # GL_QUADS
+        for x, y in ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)):
+            gl.glVertex2f(x, y)
+        gl.glEnd()
+        gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+
+    def _rcra_bloom_texture(self, target):
+        """Run Rift Apart's bloom chain over the float scene target; the GL texture of B0, or None."""
+        from nwo.games.rcra import bloom
+        saved = self._bloom_state()
+        try:
+            self._bloom_prepare()
+            images = self._rcra_bloom_images(target['size'])
+            inverse_luminance = self._lighting_state()['exposure'] / bloom.MIDDLE_GRAY
+            for p in bloom.passes(*target['size'], inverse_luminance):
+                self._rcra_bloom_pass(p, images, target['colour'])
+            return images['B0']['tex']
+        except Exception as exc:
+            self._bloom_error = repr(exc)
+            return None
+        finally:
+            self._bloom_restore(saved)
 
     def _bloom_pass(self, p, images, source=None, source_size=None):
         """Draw one pass of bloom.passes (or a 'down13' dict) into its image; `source` is the scene colour texture of a 13-tap pass."""
@@ -2125,6 +2190,8 @@ class ModelViewport(_TkFrame):
         """Copy the float scene target (half resolution, 13 taps) before the first transparent draw of the frame."""
         if not hdr or not self.BLOOM or self.__dict__.get('_bloom_before_done') or self.__dict__.get('_bloom_error'):
             return
+        if self._lighting_state()['tonemap'] == self.RCRA_TONEMAP:
+            return   # Rift Apart's chain reads the finished scene only
         self._bloom_before_done = True
         saved = self._bloom_state()
         try:
@@ -2138,6 +2205,8 @@ class ModelViewport(_TkFrame):
 
     def _bloom_texture(self, target):
         """Run the bloom chain for this frame; the GL texture of the bloom image, or None."""
+        if self.BLOOM and not self.__dict__.get('_bloom_error') and self._lighting_state()['tonemap'] == self.RCRA_TONEMAP:
+            return self._rcra_bloom_texture(target)
         self._bloom_before(target)   # a frame without a transparent pass: 'before' is the scene at the resolve
         if not self.BLOOM or not self.__dict__.get('_bloom_before_done') or self.__dict__.get('_bloom_error'):
             return None
