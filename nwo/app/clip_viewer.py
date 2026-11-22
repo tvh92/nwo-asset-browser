@@ -39,6 +39,7 @@ class ClipViewer:
         parent.rowconfigure(0, weight=1)
         self.viewport = ModelViewport(parent, width=360, height=340)
         self.viewport.grid(row=0, column=0, sticky="nsew")
+        self.viewport.use_game_display(self.source_root)
         ttk.Label(parent, textvariable=self.title, style="Muted.TLabel", wraplength=340).grid(row=1, column=0, sticky="w",
                                                                                               pady=(8, 0))
         controls = ttk.Frame(parent)

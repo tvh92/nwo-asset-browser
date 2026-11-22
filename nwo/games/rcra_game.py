@@ -140,4 +140,5 @@ GAME = Game(id='rcra', title='Rift Apart', detect=detect, open_source=open_sourc
                        material_rules=material_rules, effect_preview=effect_preview, texture_header=texture_header,
                        texture_paths=texture_paths, load_texture=load_texture, export_textures=export_textures,
                        material_maps=material_maps, list_models=list_models, animation_library=animation_library,
-                       blender_materials=blender_materials))
+                       blender_materials=blender_materials),
+            display_tonemap='Game (Rift Apart)')

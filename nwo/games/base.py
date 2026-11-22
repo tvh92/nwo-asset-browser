@@ -75,6 +75,9 @@ class Game:
     # caches predate the seam and keep their place, so no rescan happens); None means the game id.
     cache_name: str | None = None
     output_suffix: str = 'Output'   # default output folder beside a source that is not an install
+    # The model viewer's tonemap (ModelViewport.TONEMAPS) that is this game's own display transform: the default for
+    # the browser and the gallery thumbnails.
+    display_tonemap: str = 'Game (captured)'
 
     def __post_init__(self):
         unknown = set(self.capabilities) - CAPABILITIES

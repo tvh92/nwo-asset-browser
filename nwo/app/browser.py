@@ -419,7 +419,7 @@ class AssetBrowser:
         tonemap_box.bind('<<ComboboxSelected>>',lambda _e:self.viewport.set_lighting(tonemap=self.tonemap_var.get()))
         tip('Master switch for lighting. Off shows the unlit surface colour; self-lit emission stays.',self.lighting_enabled_check)
         tip('Viewer rig: fixed key, fill and sky light that turns with the camera (what the gallery thumbnails use).\nShared HDRI: the shared review HDRI, as the Blender review render uses (the default).',lighting_box)
-        tip('Maps the lit HDR result to screen colours.\nACES fit: filmic, desaturates highlights.\nKhronos PBR Neutral: keeps base colours accurate until highlights.\nGame (captured, the default, also for gallery thumbnails): the game\'s exposure and tone curve from one Veldin frame, no level colour grade.\nThe lighting is still the viewer\'s, so overall brightness is not the game\'s.',tonemap_label,tonemap_box)
+        tip('Maps the lit HDR result to screen colours.\nACES fit: filmic, desaturates highlights.\nKhronos PBR Neutral: keeps base colours accurate until highlights.\nGame (captured, the R&C 2016 default, also for its gallery thumbnails): the game\'s exposure and tone curve from one Veldin frame, no level colour grade.\nGame (Rift Apart, its default and thumbnails): Rift Apart\'s ACES display decoded from the game, without its atmosphere colour grade, bloom or auto-exposure.\nThe lighting is still the viewer\'s, so overall brightness is not the game\'s.',tonemap_label,tonemap_box)
         self.viewport.set_lighting(self.lighting_var.get(),self.tonemap_var.get())   # the defaults or the remembered choice
         # Materials: only the toggles that change something for this model (see _update_source_controls).
         self.native_translation_var=remember_var(self.tk.BooleanVar(value=True),'model.native_translation')
@@ -1240,6 +1240,15 @@ class AssetBrowser:
         """The chosen look's index: the Look box shows 'index: name' where the model names its looks."""
         try:return int(self.native_look.get().split(':')[0] or 0)
         except ValueError:return 0
+
+    GAME_TONEMAPS=('Game (captured)','Game (Rift Apart)')   # the games' own display tonemaps (Game.display_tonemap)
+
+    def use_game_tonemap(self,tonemap):
+        """Show the open game's own display tonemap when the one shown is another game's; a tonemap the user picked
+        that belongs to no game stays."""
+        if self.tonemap_var.get() in self.GAME_TONEMAPS and self.tonemap_var.get()!=tonemap:
+            self.tonemap_var.set(tonemap)
+            self.viewport.set_lighting(tonemap=tonemap)
 
     def _update_source_controls(self,payload):
         """Show the LOD, look and material toggles only where they change something for this model."""

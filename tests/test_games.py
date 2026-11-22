@@ -414,12 +414,12 @@ class CapabilityGatingTests(unittest.TestCase):
             self.skipTest(f'Tk unavailable: {error}')
         from nwo.app.window import ASSET_TYPE_CAPABILITY, HELP, AssetBrowserApp
         self.HELP = HELP
-        shown = []
+        shown, tonemaps = [], []
         app = SimpleNamespace(tk=tk, ttk=ttk, root=self.root, game=None, game_gates=[], options_changed=0,
                               asset_type_var=tk.StringVar(master=self.root, value='Level'),
                               shading_var=tk.StringVar(master=self.root, value='Generic reading'),
                               backend_var=tk.StringVar(master=self.root, value='Transform only'),
-                              browser=SimpleNamespace(show_asset_type=shown.append))
+                              browser=SimpleNamespace(show_asset_type=shown.append, use_game_tonemap=tonemaps.append))
         for name in ('_tip', '_gate', '_game_has', '_pipeline_backend', '_apply_game'):
             setattr(app, name, getattr(AssetBrowserApp, name).__get__(app))
         app._options_changed = lambda: setattr(app, 'options_changed', app.options_changed + 1)
@@ -430,7 +430,7 @@ class CapabilityGatingTests(unittest.TestCase):
         app._gate('pipeline', HELP['backend'], self.backend, 'readonly')
         self.animation = ttk.Checkbutton(self.root)
         app._gate('animation', HELP['animations'], self.animation, None)
-        self.app, self.shown = app, shown
+        self.app, self.shown, self.tonemaps = app, shown, tonemaps
 
     def tearDown(self):
         self.root.destroy()
@@ -457,6 +457,7 @@ class CapabilityGatingTests(unittest.TestCase):
         self.assertEqual(tips[id(self.animation)], self.HELP['animations'])   # Rift Apart animates
         self.assertEqual((app.asset_type_var.get(), self.shown), ('Model', ['Model']))   # Level was showing
         self.assertEqual(app.shading_var.get(), 'All')
+        self.assertEqual(self.tonemaps, ['Game (Rift Apart)'])   # the viewer shows the game's own display
         self.assertTrue(app._pipeline_backend())   # its models come from its own index, not Transform only
         self.assertEqual(app.options_changed, 1)
 

@@ -100,7 +100,7 @@ class ShaderContractTests(unittest.TestCase):
 class ViewportTests(unittest.TestCase):
     def test_both_viewers_offer_the_game_tonemap(self):
         self.assertEqual(ModelViewport.TONEMAPS[ModelViewport.GAME_TONEMAP], 'Game (captured)')
-        self.assertEqual(ModelViewport.TONEMAPS, LevelViewport.TONEMAPS)
+        self.assertEqual(ModelViewport.TONEMAPS[:ModelViewport.RCRA_TONEMAP], LevelViewport.TONEMAPS)
         # only the level viewer keeps it to its environment lighting (Level atmosphere, with the level's grade)
         self.assertFalse(ModelViewport.GAME_TONEMAP_NEEDS_ENVIRONMENT)
         self.assertTrue(LevelViewport.GAME_TONEMAP_NEEDS_ENVIRONMENT)

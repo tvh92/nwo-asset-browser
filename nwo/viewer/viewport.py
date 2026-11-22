@@ -393,7 +393,9 @@ class ModelViewport(_TkFrame):
     ENVIRONMENT_LIGHTINGS = ("Shared HDRI",)    # the lightings that draw from lighting maps (SH, bands, sun)
     # "Game (captured)": the game's exposure and tone curve (nwo.levels.display) without a level colour grade; the level
     # viewer adds its atmosphere's grade and keeps it to the Level atmosphere lighting (GAME_TONEMAP_NEEDS_ENVIRONMENT).
-    TONEMAPS = ("ACES fit", "Khronos PBR Neutral", "Game (captured)")
+    # "Game (Rift Apart)": Rift Apart's ACES lookup decoded from its exe (nwo.games.rcra.display), no atmosphere grade.
+    # Index = the uTonemap value. Each game's own display tonemap is Game.display_tonemap.
+    TONEMAPS = ("ACES fit", "Khronos PBR Neutral", "Game (captured)", "Game (Rift Apart)")
     GAME_TONEMAP_NEEDS_ENVIRONMENT = False
     # Object space -> Blender world (None: identity); the level viewer's objects are native Y-up.
     OBJECT_TO_WORLD = None
@@ -700,6 +702,14 @@ class ModelViewport(_TkFrame):
         self.__dict__.pop('_program_memo', None)
         self._schedule_draw()
 
+    def use_game_display(self, folder):
+        """Show the tonemap of the game in ``folder`` (Game.display_tonemap); an unrecognised folder keeps the current one."""
+        from nwo.games import detect
+        try:
+            self.set_lighting(tonemap=detect(folder).display_tonemap)
+        except ValueError:
+            pass
+
     def _upload_environment(self):
         """GL texture of the prefiltered bands (RGB16F, world strength applied), or None."""
         if self._environment_texture_stale:
@@ -740,9 +750,10 @@ class ModelViewport(_TkFrame):
             gl.glGetFloatv(self.GL_MODELVIEW_MATRIX, modelview)
             view_to_world, rig = light_frames(list(modelview), self.OBJECT_TO_WORLD, self.RIG_FIXED_TO_WORLD)
             tonemap = self.TONEMAPS.index(self.tonemap)
-            wanted = tonemap == self.GAME_TONEMAP and (hdri or not self.GAME_TONEMAP_NEEDS_ENVIRONMENT)
+            wanted = (tonemap == self.GAME_TONEMAP and (hdri or not self.GAME_TONEMAP_NEEDS_ENVIRONMENT)
+                      or tonemap == self.RCRA_TONEMAP)
             grade_texture = self._display_texture_name() if wanted else 0
-            if tonemap == self.GAME_TONEMAP and not grade_texture:
+            if tonemap in (self.GAME_TONEMAP, self.RCRA_TONEMAP) and not grade_texture:
                 tonemap = 0   # the level viewer keeps the captured display transform to the Level atmosphere lighting
             state = dict(hdri=hdri, tonemap=tonemap, grade_unit=GRADE_TEXTURE_UNIT, grade_texture=grade_texture,
                          exposure=2.0 ** self._environment["exposure"] if hdri else 1.0,
@@ -760,13 +771,18 @@ class ModelViewport(_TkFrame):
         return state
 
     GAME_TONEMAP = 2   # tonemap index of the captured game display (uTonemap 2)
+    RCRA_TONEMAP = 3   # tonemap index of Rift Apart's display (uTonemap 3)
 
     def _display_table_key(self):
-        """Hashable identity of the captured display table (nwo.levels.display.display_table) in use, or None."""
-        return 'identity grade'
+        """Hashable identity of the display table in use (uGradeTex), or None."""
+        return 'rcra aces' if getattr(self, 'tonemap', None) == self.TONEMAPS[self.RCRA_TONEMAP] else 'identity grade'
 
     def _display_table_build(self):
-        """The float32 (rows, columns, 3) display table for ``_display_table_key``: a model has no level, so no grade."""
+        """The float32 (rows, columns, 3) display table for ``_display_table_key``: Rift Apart's ACES lookup, or the
+        captured 2016 chain's (nwo.levels.display.display_table) without a grade, since a model has no level."""
+        if self._display_table_key() == 'rcra aces':
+            from nwo.games.rcra.display import lookup_texture
+            return lookup_texture()
         from nwo.levels.display import display_table, identity_grade
         return display_table(identity_grade())
 
@@ -1843,9 +1859,9 @@ class ModelViewport(_TkFrame):
     # Float scene target (2026-11-07) -------------------------------------------
     # The game alpha-blends its forward draws into an HDR scene target and tonemaps once. Frames with health crate panes or
     # idle-effect quads do the same: every pass draws into an RGBA16F colour + depth texture target with display() bypassed
-    # (uTonemap 3, LINEAR_TONEMAP), and shading.HDR_RESOLVE_FRAGMENT tonemaps it over the background. Every other frame
+    # (uTonemap 4, LINEAR_TONEMAP), and shading.HDR_RESOLVE_FRAGMENT tonemaps it over the background. Every other frame
     # draws display-referred straight into the window, as before (its glass still tonemaps per fragment).
-    LINEAR_TONEMAP = 3
+    LINEAR_TONEMAP = 4
     BLOOM = True   # the decoded bloom (nwo/viewer/bloom.py) over frames that use the float scene target
     # Emission-only forward programs whose colour is far above display white at a small alpha (the turret barrier and its
     # targeting display: alpha 19/255 over HDR emission). Tonemapped per fragment they would clip to white before blending

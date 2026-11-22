@@ -31,8 +31,8 @@ GRADE_TEXTURE_UNIT = 18        # captured display table (tone curve + colour gra
 # diffuse from 9 irradiance SH coefficients of the rest, specular from GGX-prefiltered bands and
 # Karis' analytic environment BRDF. All carry the world strength. The rig's diffuse keeps its
 # historical factor 2 (diffuseScale); the HDRI's is physical (albedo x E / pi). display() applies exposure and the tonemap: 0 the ACES fit, 1 Khronos PBR
-# Neutral with the sRGB transfer function (the view transform of the Blender review renders), 2 the captured game chain;
-# 3 returns the scene-linear colour unchanged, for the model viewer's float scene target (HDR_RESOLVE_FRAGMENT tonemaps it).
+# Neutral with the sRGB transfer function (the view transform of the Blender review renders), 2 the captured game chain,
+# 3 Rift Apart's decoded ACES lookup; 4 returns the scene-linear colour unchanged, for the model viewer's float scene target (HDR_RESOLVE_FRAGMENT tonemaps it).
 LIGHTING = """
 uniform int uLighting; uniform bool uLightingEnabled; uniform mat3 uLightFrame; uniform mat3 uViewToWorld;
 uniform vec3 uSH[9]; uniform sampler2D uEnvTex; uniform vec3 uSunDir; uniform vec3 uSunColour;
@@ -149,10 +149,14 @@ vec3 gameDisplay(vec3 color) {
     vec3 t = vec3(gameCurve(color.r), gameCurve(color.g), gameCurve(color.b));
     return gameGrade(vec3(srgbEncode(t.r), srgbEncode(t.g), srgbEncode(t.b)));
 }
+// uTonemap 3, Rift Apart's display (nwo/games/rcra/display.py, decoded from RiftApart.exe): its ACES 1.0 lookup in the
+// grade table's layout, sampled at the game's log2 coordinate. No atmosphere colour-correction LUT, bloom or auto-exposure.
+vec3 riftApartDisplay(vec3 color) { return gameGrade(log2(max(color, vec3(1e-30))) * 0.0625 + 0.65625); }
 vec3 display(vec3 color) {
-    if (uTonemap == 3) return color;   // float scene target: blended in linear, tonemapped once by HDR_RESOLVE_FRAGMENT
+    if (uTonemap == 4) return color;   // float scene target: blended in linear, tonemapped once by HDR_RESOLVE_FRAGMENT
     color *= uExposure;
     if (uTonemap == 2) return gameDisplay(color);
+    if (uTonemap == 3) return riftApartDisplay(color);
     if (uTonemap == 1) {   // Khronos PBR Neutral: start compression 0.76, desaturation 0.15
         float x = min(color.r, min(color.g, color.b));
         color -= x < 0.08 ? x - 6.25 * x * x : 0.04;
@@ -2551,7 +2555,7 @@ BEAM_UNIFORMS = (*LIGHTING_UNIFORMS, "uBeamNoise", "uBeamDepth", "uBeamViewport"
 # Model-viewer idle-effect sprites (nwo/viewer/idle_effect.py): the decoded pixel programs of the health crate's
 # pup_health_crate_idle effect, drawn as view-space quads alpha-over (SRC_ALPHA / ONE_MINUS_SRC_ALPHA). As in the game they
 # blend in HDR: the viewport draws the crate, its panes and these quads into a float target with display() bypassed
-# (uTonemap 3) and HDR_RESOLVE_FRAGMENT tonemaps the result once. uEffectKind: 0 glow_simp_soft EBC94A93, 1 flare_round 5FE9EF08, 2 flare_square B1310A54,
+# (uTonemap 4) and HDR_RESOLVE_FRAGMENT tonemaps the result once. uEffectKind: 0 glow_simp_soft EBC94A93, 1 flare_round 5FE9EF08, 2 flare_square B1310A54,
 # 3 glow_spin 41E80E53, 4 shockwave 094D0CAE; and the holocon holograms (nwo/viewer/holocon_effect.py, runtime programs
 # captured on the weapon vendor): 5 icon 7628b331, 6 rays c5646808. P2 = uEffectColour, a = uEffectAlpha (with the distance fade),
 # attribute0.z = uEffectDiscard, A = uEffectAmplitude (CB0[115], a presentation value). Taken as 1 (labelled): fog

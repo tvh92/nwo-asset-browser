@@ -871,6 +871,7 @@ class AssetBrowserApp:
         if not game.has(ASSET_TYPE_CAPABILITY.get(self.asset_type_var.get(), "models")):
             self.asset_type_var.set("Model")
             self.browser.show_asset_type("Model")
+        self.browser.use_game_tonemap(game.display_tonemap)
         if not game.has("decoded_shading") and self.shading_var.get() != "All":
             self.shading_var.set("All")
         self._options_changed()

@@ -31,7 +31,7 @@ import threading
 import time
 import zlib
 
-THUMBNAIL_VERSION = 6     # bump when rendering changes: invalidates every cached thumbnail
+THUMBNAIL_VERSION = 7     # bump when rendering changes: invalidates every cached thumbnail
 DEFAULT_SIZE = 192
 SUPERSAMPLE = 2            # render at 2x and box-filter down: the legacy pipeline has no MSAA
 # Rift Apart texture reads for thumbnails: the SD chain once its top mip is at least this (else the HD stream), read at
@@ -650,6 +650,7 @@ def run(args) -> int:
     edge = size * supersample
     root.geometry(f'{edge}x{edge}+0+0')
     view = thumbnail_viewport_class()(root, edge, use_fbo=not args.no_fbo)
+    view.use_game_display(args.source)   # Rift Apart: its decoded ACES display; R&C 2016: the captured one
     view.pack(fill='both', expand=True)
     root.update()
     if view._context_error or view._hrc is None:

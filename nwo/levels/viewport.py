@@ -267,6 +267,7 @@ class LevelViewport(ModelViewport):
     # The game's captured display chain (nwo.levels.display) with the atmosphere's grade, for the Level atmosphere
     # lighting only: another lighting falls back to the ACES fit.
     GAME_TONEMAP_NEEDS_ENVIRONMENT = True
+    TONEMAPS = ModelViewport.TONEMAPS[:ModelViewport.RCRA_TONEMAP]   # levels are R&C 2016 only: no Rift Apart display
     EXT = {
         "glGenBuffers": (None, [ctypes.c_int, ctypes.c_void_p]),
         "glDeleteBuffers": (None, [ctypes.c_int, ctypes.c_void_p]),
