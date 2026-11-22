@@ -79,7 +79,7 @@ python -m ruff check nwo tests
 
 ## Git and GitHub
 
-- Remote: `https://github.com/tvh92/nwo-asset-browser` (private), branch `main`. The user leaves git management to agents. No force-pushes or history rewrites.
+- Remote: `https://github.com/tvh92/nwo-asset-browser` (public), branch `main`. The user leaves git management to agents. No force-pushes or history rewrites.
 - Check `git status` at the start of a task. Several sessions can share this checkout, so staged and modified files are often not yours: commit only your own paths (`git commit -o <paths>`, or a temporary `GIT_INDEX_FILE` when a file mixes your hunks with another session's), never a plain `git commit -a`. After a change passes its tests, commit it as a focused commit with a clear message and push.
 - `.gitattributes` stores files byte for byte (`* -text`); keep it, because `run.py` hashes its own sources.
 - Keep docs in step with behaviour: reference style, no dated change logs, no personal paths or machine-specific locations.
