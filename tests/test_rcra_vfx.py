@@ -156,12 +156,24 @@ class EffectMeshTest(unittest.TestCase):
         reflection = SimpleNamespace(constant_buffer=lambda name: layout)
         neutral = rshaders.object_words(reflection)
         self.assertEqual(neutral[4], rshaders.HALF_ONE | rshaders.HALF_ONE << 16)
-        with rshaders.object_override({'m_ColorRGFp16': (rshaders.half_pair(0.0, 6.5),)}):
+        with rshaders.draw_override({'object': {'m_ColorRGFp16': (rshaders.half_pair(0.0, 6.5),)}}):
             words = rshaders.object_words(reflection)
         self.assertEqual(words[4], rshaders.half_pair(0.0, 6.5))
         self.assertEqual(words[0], neutral[0])
         self.assertEqual(rshaders.object_words(reflection), neutral)
         self.assertEqual(rshaders.object_text('m_ColorRGFp16', (rshaders.half_pair(0.0, 6.5),)), '(0, 6.5)')
+
+    def test_particle_still_quads(self):
+        from nwo.games.rcra import effects
+        data, _ids = effect()
+        decoded = vfx.decode_effect(data)
+        node = decoded['nodes'][1]                     # MultiQuads on the emitter; its slots all name curve 1 or 0
+        still = effects.particle_still(decoded, node)  # rate = life = speed = curve 1 at r 0.5: 0.75
+        self.assertEqual(len(still['particles']), 1)
+        mesh = effects.quad_mesh(still)
+        self.assertEqual((len(mesh['positions']), len(mesh['triangles'])), (4, 2))
+        self.assertEqual(len(set(mesh['positions'][:, 2].tolist())), 1)      # flat in the local XY plane
+        self.assertEqual(sorted(effects.quad_colour(decoded, node)), ['TEXCOORD4.%s' % c for c in 'wxyz'])
 
     def test_mesh_is_placed_and_weighted_to_the_joint(self):
         from nwo.games.rcra import effects
@@ -239,8 +251,11 @@ class VendorEffectsTest(unittest.TestCase):
         key = next(k for k in self.source.resolve(path) if self.source.entries[k]['type'] == 'model')
         decoded, _data = rcra_game.decode_model(self.source, key, path, True)
         extra = [m for m in decoded['meshes'] if m['index'] >= decoded['mesh_record_count']]
-        self.assertEqual(len(extra), 1)
-        logo = extra[0]
+        self.assertEqual(len(extra), 2)
+        logo, rings = extra
+        self.assertTrue(rings['material']['path'].endswith('enm_neo_nefarious_swarmer_thrust_ring.material'))
+        self.assertEqual(len(rings['positions']), 20)                         # 5 particle quads
+        self.assertEqual(set(rings['skin_joint_array'][:, 0].tolist()), {0})   # igLoc_hover's joint
         self.assertTrue(logo['material']['path'].endswith('npc_weapon_vendor_holo_logo.material'))
         self.assertEqual(set(logo['skin_joint_array'][:, 0].tolist()), {13})   # igLoc_projection_vfx's joint
         self.assertGreater(np.asarray(logo['positions'])[:, 1].min(), 2.0)     # above the head
@@ -248,13 +263,13 @@ class VendorEffectsTest(unittest.TestCase):
             self.assertTrue(all(logo['index'] in level['meshes'] for level in look['lods'] if level['count']))
         rows = {r['effect'].rsplit('/', 1)[-1]: r for r in decoded['effects']}
         self.assertEqual(rows['npc_weapon_vendor_holo_logo.visualeffect']['drawn'], ['1 SingleModel'])
-        self.assertFalse(rows['weapons_vendor_hover_01.visualeffect']['drawn'])
+        self.assertEqual(rows['weapons_vendor_hover_01.visualeffect']['drawn'], ['0 MultiQuads'])
         entry = rmat.material_textures(self.source, [logo['material']], {})[logo['material']['index']]
         self.assertEqual(entry['forward']['kind'], rmat.TRANSLATED_KIND)
         self.assertIn('m_ColorRGFp16 (0, 6.52)', entry['forward']['limitation'])
         export, _data = rcra_game.decode_model(self.source, key, path, False)
         self.assertNotIn('effects', export)                       # the export decode leaves effects out
-        self.assertEqual(len(export['meshes']), len(decoded['meshes']) - 1)
+        self.assertEqual(len(export['meshes']), len(decoded['meshes']) - 2)
 
 
 if __name__ == '__main__':

@@ -200,17 +200,28 @@ SIZE_NOTE = ('Texture sizes the program queries (%s) are those of the full-resol
 OBJECT_NOTE = (' Per-object values are a plain object: identity transform, alpha 1, white object colour, custom values, '
                'creation time and bias 0.')
 OVERRIDE_NOTE = ' Per-object values the caller sets: %s; the rest as the plain object.'
+INTERPOLANT_NOTE = ' Interpolants the caller sets: %s.'
+
+
+def _draw_inputs(bindings, material_data):
+    """Bind the plain instance's draw alpha (material.draw_interpolants), then any interpolants of the current
+    rshaders.draw_override, on every translation of the material (surface, forward and its light splits)."""
+    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
+    bindings.interpolants.update(rshaders.override_interpolants())
 
 
 def _object_note(bindings):
-    """OBJECT_NOTE, or OVERRIDE_NOTE under rshaders.object_override, when the program reads the object record."""
-    if not bindings.object_read:
-        return ''
-    override = rshaders.OBJECT_OVERRIDE.get()
-    if not override:
-        return OBJECT_NOTE
-    return OVERRIDE_NOTE % ', '.join('%s %s' % (name, rshaders.object_text(name, value))
-                                     for name, value in sorted(override.items()))
+    """OBJECT_NOTE, or OVERRIDE_NOTE under rshaders.draw_override, when the program reads the object record; then the
+    interpolants a draw_override binds."""
+    note = ''
+    if bindings.object_read:
+        override = rshaders.override_object()
+        note = OVERRIDE_NOTE % ', '.join('%s %s' % (name, rshaders.object_text(name, value))
+                                         for name, value in sorted(override.items())) if override else OBJECT_NOTE
+    interpolants = rshaders.override_interpolants()
+    if interpolants:
+        note += INTERPOLANT_NOTE % ', '.join('%s = %.4g' % item for item in sorted(interpolants.items()))
+    return note
 ENGINE_NOTE = (' Engine textures read at the profile values: %s (stored scene depth at the far clip, so no soft depth fade; '
                'the scene G-buffer cleared to 0 at the review viewport size; light sources and probes 0).')
 SCENE_GBUFFER_NOTE = ' The scene G-buffer reads 0 (cleared: the empty scene of the far-clip depth), at the review viewport size.'
@@ -543,7 +554,7 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
     else:
         shader, cb2, units = program['shader'], program['cb2'], program['units']
     bindings = binding_class(cb2, shader.reflection, units, texture_sizes)
-    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))   # the plain instance's draw alpha
+    _draw_inputs(bindings, material_data)
     bindings.named.update(program['named'] if program else {})
     bindings.interpolants.update(program.get('interpolants', {}) if program else {})
     bindings.symbolic.update(program.get('symbolic', {}) if program else {})
@@ -1317,7 +1328,7 @@ def _engine_translation(shader, graph_data, material_data, flags, texture_sizes)
     (_EngineFreeBindings); engine(i) is true for nodes that read one."""
     bindings = _EngineFreeBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
                                    rshaders.material_units(graph_data, material_data), texture_sizes)
-    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
+    _draw_inputs(bindings, material_data)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
@@ -1472,7 +1483,7 @@ def forward(graph_data, material_data, texture_sizes=None):
     flags = draw_flags(material_data)
     bindings = _ForwardBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
                                 rshaders.material_units(graph_data, material_data), texture_sizes)
-    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))   # the plain instance's draw alpha
+    _draw_inputs(bindings, material_data)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
@@ -1566,7 +1577,7 @@ def forward_lighting(graph_data, material_data, texture_sizes=None):
     shader = rshaders.pass_shader(graph_data, rshaders.SLOT_FORWARD)
     bindings = _ForwardLitBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
                                    rshaders.material_units(graph_data, material_data), texture_sizes)
-    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
+    _draw_inputs(bindings, material_data)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
@@ -1665,7 +1676,7 @@ def forward_ambient(graph_data, material_data, texture_sizes=None):
                                        rshaders.material_units(graph_data, material_data), texture_sizes)
     if bindings.probe is None:
         raise Unsupported('The forward program has no probe list')
-    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
+    _draw_inputs(bindings, material_data)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)
@@ -1867,7 +1878,7 @@ def _split_forward(graph_data, material_data, texture_sizes):
     shader = rshaders.pass_shader(graph_data, rshaders.SLOT_FORWARD)
     bindings = _ForwardLitFreeBindings(rshaders.material_constants(graph_data, material_data), flags, shader.reflection,
                                        rshaders.material_units(graph_data, material_data), texture_sizes)
-    bindings.interpolants.update(rmaterial.draw_interpolants(material_data))
+    _draw_inputs(bindings, material_data)
     translator = sm5.Translator(shader, bindings)
     bindings.graph = translator.g
     tr = _run(translator)

@@ -78,12 +78,12 @@ def _code_sha256():
 CODE_SHA256 = _code_sha256()
 
 
-def translate(source, material_key, object_values=None):
+def translate(source, material_key, override=None):
     """(surface recipe or None, forward recipe or None, blend, limitations, textures {binding: path}), kept across sessions in
     the source's translation disk cache (keyed by the material and graph bytes and CODE_SHA256) when it has one.
 
-    ``object_values`` replaces members of the neutral per-object record (shaders.object_override); it is part of the
-    cache key."""
+    ``override`` sets per-draw values in place of the neutral draw (shaders.draw_override: object members and
+    interpolants); it is part of the cache key."""
     graph, data = _graph(source, material_key), source.asset_data(material_key)
     program = None
     if graph is None:
@@ -93,7 +93,7 @@ def translate(source, material_key, object_values=None):
         except (ValueError, OSError) as error:
             raise NotTranslated(str(error)) from error
     disk = getattr(source, 'translation_disk_cache', None)
-    key = _disk_key(disk, data, graph, program, object_values)
+    key = _disk_key(disk, data, graph, program, override)
     stored = _floats(disk.get(key), decode=True) if key else None
     if stored is not None:
         if 'error' in stored:
@@ -101,7 +101,7 @@ def translate(source, material_key, object_values=None):
         return stored['surface'], stored['forward'], stored['blend'], stored['limitations'], stored['textures']
     try:
         # the surface's forward albedo and the own specular term: one translation
-        with rshaders.object_override(object_values), rsurface.shared_forward_split():
+        with rshaders.draw_override(override), rsurface.shared_forward_split():
             out = _translate(graph, data, source, program)
     except NotTranslated as error:
         if key:
@@ -112,18 +112,18 @@ def translate(source, material_key, object_values=None):
     return out
 
 
-def _object_key(object_values):
-    """An object override as bytes for a cache key (None without one)."""
-    return json.dumps(sorted(object_values.items())).encode() if object_values else None
+def _override_key(override):
+    """A draw override as bytes for a cache key (None without one)."""
+    return json.dumps(override, sort_keys=True).encode() if override else None
 
 
-def _disk_key(disk, data, graph, program, object_values=None):
+def _disk_key(disk, data, graph, program, override=None):
     """translate's key in the translation disk cache, or None without a cache (or without the package sources)."""
     if disk is None or not CODE_SHA256:
         return None
     parts = [bytes(graph) if program is None else program['key']]
-    if object_values:
-        parts.append(_object_key(object_values))
+    if override:
+        parts.append(_override_key(override))
     return disk.key(bytes(data), parts, 'rcra-viewer:%s' % CODE_SHA256, own_code=True)
 
 
@@ -370,9 +370,9 @@ def _load_bindings(source, recipes, paths, hd, limitations):
     return layouts, textures
 
 
-def material_receipt(source, material_key, hd=False, object_values=None):
-    """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason. ``object_values``: translate."""
-    surface, forward, blend, limitations, paths = translate(source, material_key, object_values)
+def material_receipt(source, material_key, hd=False, override=None):
+    """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason. ``override``: translate."""
+    surface, forward, blend, limitations, paths = translate(source, material_key, override)
     recipes = [r for r in (surface, forward, (forward or {}).get('lit'), (forward or {}).get('ambient'),
                            (surface or {}).get('own_specular')) if r]
     layouts, textures = _load_bindings(source, recipes, paths, hd, limitations)
@@ -498,13 +498,13 @@ def cached_shell_receipt(source, material_key, hd=False):
     return memo[key]
 
 
-def cached_receipt(source, material_key, hd=False, object_values=None):
+def cached_receipt(source, material_key, hd=False, override=None):
     """material_receipt memoised on the source: (receipt, textures) or (None, reason)."""
     memo = source.__dict__.setdefault('_rcra_viewer_receipts', {})
-    key = (material_key, bool(hd), _object_key(object_values))
+    key = (material_key, bool(hd), _override_key(override))
     if key not in memo:
         try:
-            memo[key] = material_receipt(source, material_key, hd, object_values)
+            memo[key] = material_receipt(source, material_key, hd, override)
         except NotTranslated as error:
             memo[key] = (None, str(error))
     return memo[key]
