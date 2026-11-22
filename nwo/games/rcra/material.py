@@ -506,7 +506,7 @@ def material_textures(source, materials, cache, translations=None, hd=False):
                 for slot, role in PREVIEW_ROLES.items():
                     if slots.get(slot):
                         entry[role] = _load(source, slots[slot], cache, hd)
-            _translated(source, key, entry, hd)
+            _translated(source, key, entry, hd, material.get('object'))
             try:
                 entry['not_drawn'] = draw_skip_note(source.asset_data(key))   # the viewport leaves its batches out
             except (ValueError, KeyError, OSError, struct.error):
@@ -520,12 +520,14 @@ def material_textures(source, materials, cache, translations=None, hd=False):
 TRANSLATED_KIND = 'rcra_translated'
 
 
-def _translated(source, key, entry, hd):
+def _translated(source, key, entry, hd, object_values=None):
     """Attach the material's translated receipt (nwo.games.rcra.viewer_materials) as the entry's native translation; a
     blended one also becomes a forward rule (kind TRANSLATED_KIND) that keeps any decoded glass rule as its fallback for when
-    the viewer's native translation is off. Without a translation the entry keeps the preview."""
+    the viewer's native translation is off. Without a translation the entry keeps the preview. ``object_values`` (a
+    material entry's ``object``: the per-object record of a visual-effect mesh, nwo.games.rcra.effects) is bound in place
+    of the neutral object's members."""
     from nwo.games.rcra.viewer_materials import cached_receipt
-    receipt, textures = cached_receipt(source, key, hd)
+    receipt, textures = cached_receipt(source, key, hd, object_values)
     if receipt is None:
         entry['rcra_translation_error'] = textures
         return

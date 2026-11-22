@@ -37,8 +37,17 @@ def open_source(folder, output, log):
 
 
 def decode_model(source, model_id, source_path, as_arrays):
+    """decode_for_viewer; the view decode (``as_arrays``) also carries the visual effects the model's actors start
+    (rcra.effects.attach). The export decode leaves them out."""
     from nwo.games.rcra.model import decode_for_viewer
-    return decode_for_viewer(source, model_id, source_path, as_arrays)
+    decoded, data = decode_for_viewer(source, model_id, source_path, as_arrays)
+    if as_arrays:
+        from nwo.games.rcra.effects import attach
+        try:
+            attach(source, decoded, data, source_path)
+        except (ValueError, KeyError, OSError, struct.error) as error:
+            decoded.setdefault('effects', []).append(dict(error=str(error)))
+    return decoded, data
 
 
 def material_textures(source, materials, cache, translations=None, hd=False):

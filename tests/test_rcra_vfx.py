@@ -147,6 +147,43 @@ class EffectFormatTest(unittest.TestCase):
             vfx.decode_effect(bytes(64))
 
 
+class EffectMeshTest(unittest.TestCase):
+    def test_object_override_reaches_object_words(self):
+        from types import SimpleNamespace
+        from nwo.games.rcra import shaders as rshaders
+        members = [('m_Alpha', 0, None), ('m_ColorRGFp16', 4, None)]
+        layout = SimpleNamespace(size=8, variables=[SimpleNamespace(members=members)])
+        reflection = SimpleNamespace(constant_buffer=lambda name: layout)
+        neutral = rshaders.object_words(reflection)
+        self.assertEqual(neutral[4], rshaders.HALF_ONE | rshaders.HALF_ONE << 16)
+        with rshaders.object_override({'m_ColorRGFp16': (rshaders.half_pair(0.0, 6.5),)}):
+            words = rshaders.object_words(reflection)
+        self.assertEqual(words[4], rshaders.half_pair(0.0, 6.5))
+        self.assertEqual(words[0], neutral[0])
+        self.assertEqual(rshaders.object_words(reflection), neutral)
+        self.assertEqual(rshaders.object_text('m_ColorRGFp16', (rshaders.half_pair(0.0, 6.5),)), '(0, 6.5)')
+
+    def test_mesh_is_placed_and_weighted_to_the_joint(self):
+        from nwo.games.rcra import effects
+        node = dict(rotation=(1, 0, 0, 0, 1, 0, 0, 0, 1), position=(0, 0.725, 0), scale=(2, 2, 1))
+        attach = np.eye(4)
+        attach[:3, 3] = (0, 1.5, 0)
+        placement = attach @ effects.node_matrix(node)
+        plane = dict(index=0, positions=np.array([[0, 0, 0], [1, 1, 0]], float), normals=np.array([[0, 0, 1]] * 2, float),
+                     tangents=np.array([[1, 0, 0]] * 2, float), material=None, weights=[None, None])
+        material = dict(index=4, path='material/fx/logo.material')
+        mesh = effects._mesh(plane, placement, 60, material, 13, True)
+        np.testing.assert_allclose(mesh['positions'], [[0, 2.225, 0], [2, 4.225, 0]])
+        np.testing.assert_allclose(mesh['normals'], [[0, 0, 1]] * 2)
+        self.assertEqual((mesh['index'], mesh['material_index']), (60, 4))
+        self.assertEqual(mesh['skin_joint_array'][:, 0].tolist(), [13, 13])
+        self.assertEqual(mesh['skin_weight_array'][:, 0].tolist(), [1.0, 1.0])
+        self.assertEqual(list(mesh['weights'][0]), [(13, 1.0)])
+        static = effects._mesh(plane, placement, 61, material, None, True)
+        self.assertNotIn('skin_joint_array', static)
+        self.assertFalse(static['skinned'])
+
+
 @unittest.skipUnless(GAME, 'RCRA_GAME is not set')
 class VendorEffectsTest(unittest.TestCase):
     @classmethod
@@ -194,6 +231,30 @@ class VendorEffectsTest(unittest.TestCase):
                                    ('npc_weapon_vendor_holo_logo.visualeffect', 'igLoc_projection_vfx'),
                                    ('npc_weapon_vendor_holo_logo_projector.visualeffect', 'igLoc_projection_vfx')})
         self.assertTrue(any(not f['start'] for f in found if f['event'] == 'DeactivatedEvent'))
+
+    def test_vendor_view_decode_carries_the_logo(self):
+        from nwo.games import rcra_game
+        from nwo.games.rcra import material as rmat
+        path = 'characters/weapons_vendor/weapons_vendor.model'
+        key = next(k for k in self.source.resolve(path) if self.source.entries[k]['type'] == 'model')
+        decoded, _data = rcra_game.decode_model(self.source, key, path, True)
+        extra = [m for m in decoded['meshes'] if m['index'] >= decoded['mesh_record_count']]
+        self.assertEqual(len(extra), 1)
+        logo = extra[0]
+        self.assertTrue(logo['material']['path'].endswith('npc_weapon_vendor_holo_logo.material'))
+        self.assertEqual(set(logo['skin_joint_array'][:, 0].tolist()), {13})   # igLoc_projection_vfx's joint
+        self.assertGreater(np.asarray(logo['positions'])[:, 1].min(), 2.0)     # above the head
+        for look in decoded['looks']:
+            self.assertTrue(all(logo['index'] in level['meshes'] for level in look['lods'] if level['count']))
+        rows = {r['effect'].rsplit('/', 1)[-1]: r for r in decoded['effects']}
+        self.assertEqual(rows['npc_weapon_vendor_holo_logo.visualeffect']['drawn'], ['1 SingleModel'])
+        self.assertFalse(rows['weapons_vendor_hover_01.visualeffect']['drawn'])
+        entry = rmat.material_textures(self.source, [logo['material']], {})[logo['material']['index']]
+        self.assertEqual(entry['forward']['kind'], rmat.TRANSLATED_KIND)
+        self.assertIn('m_ColorRGFp16 (0, 6.52)', entry['forward']['limitation'])
+        export, _data = rcra_game.decode_model(self.source, key, path, False)
+        self.assertNotIn('effects', export)                       # the export decode leaves effects out
+        self.assertEqual(len(export['meshes']), len(decoded['meshes']) - 1)
 
 
 if __name__ == '__main__':

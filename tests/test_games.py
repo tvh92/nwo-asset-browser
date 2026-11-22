@@ -149,9 +149,15 @@ class LoaderDispatchTests(unittest.TestCase):
         self.assertEqual(entry['decoded']['_archive_path'], 'a.model')
 
     def test_rift_apart_decode_goes_to_its_model_decoder(self):
-        with patch('nwo.games.rcra.model.decode_for_viewer', return_value=('decoded', b'data')) as decode:
+        with patch('nwo.games.rcra.model.decode_for_viewer', return_value=('decoded', b'data')) as decode, \
+                patch('nwo.games.rcra.effects.attach') as attach:
             self.assertEqual(RCRA.decode_model('source', 'id', 'a.model', True), ('decoded', b'data'))
-        decode.assert_called_once_with('source', 'id', 'a.model', True)
+            attach.assert_called_once_with('source', 'decoded', b'data', 'a.model')   # the view decode carries effects
+            attach.reset_mock()
+            RCRA.decode_model('source', 'id', 'a.model', False)
+            attach.assert_not_called()                                                 # the export decode does not
+        self.assertEqual(decode.call_count, 2)
+        decode.assert_called_with('source', 'id', 'a.model', False)
 
     def test_rift_apart_animation_library_hook_reaches_its_clip_library(self):
         with patch('nwo.games.rcra.clip_library.animation_library', return_value='library') as build:

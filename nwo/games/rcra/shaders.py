@@ -16,6 +16,8 @@ graph's float defaults overwritten by the material's parameter values at the gra
 ``t(5 + u)`` (``textureUnit<5+u>``) binds the graph's slot-table row ``u``: the material's texture for that slot key, else
 the row's default texture.
 """
+import contextlib
+import contextvars
 import re
 import struct
 
@@ -117,17 +119,50 @@ NEUTRAL_OBJECT_INTERPOLANTS = {'TEXCOORD6.x': 1.0, 'TEXCOORD6.y': 0.0, 'TEXCOORD
                                'TEXCOORD7.x': 0.0, 'TEXCOORD7.y': 0.0, 'TEXCOORD7.z': 0.0, 'TEXCOORD7.w': 0.0}
 
 
+# Members of NEUTRAL_OBJECT a caller replaces for one translation (object_override): the visual-effect meshes the viewer
+# draws on a model take their node's colour (nwo.games.rcra.effects). A context variable, so concurrent translations on
+# other threads keep the neutral object.
+OBJECT_OVERRIDE = contextvars.ContextVar('rcra_object_override', default=None)
+
+
+@contextlib.contextmanager
+def object_override(values):
+    """Translate with ``values`` ({member: tuple, NEUTRAL_OBJECT's form}) over the neutral object; None keeps it."""
+    token = OBJECT_OVERRIDE.set(dict(values) if values else None)
+    try:
+        yield
+    finally:
+        OBJECT_OVERRIDE.reset(token)
+
+
+def half_pair(low, high):
+    """Two fp16 values packed in one u32, low half first (m_ColorRGFp16, m_ColorBMiscFp16)."""
+    import numpy as np
+    return int(np.float16(low).view(np.uint16)) | int(np.float16(high).view(np.uint16)) << 16
+
+
+def object_text(name, value):
+    """An object member's value for a limitation: fp16 pairs unpacked, floats as written."""
+    import numpy as np
+    if name.endswith('Fp16'):
+        halves = [float(np.uint16(w & 0xFFFF).view(np.float16)) for word in value for w in (word, word >> 16)]
+        return '(%s)' % ', '.join('%.4g' % h for h in halves)
+    return '(%s)' % ', '.join('%.4g' % v for v in value)
+
+
 def object_words(reflection):
-    """{byte offset: u32 bits} of the neutral object in the layout the program's reflection gives; None without one."""
+    """{byte offset: u32 bits} of the neutral object (with any object_override) in the layout the program's reflection
+    gives; None without one."""
     import numpy as np
     if reflection is None:
         return None
     buffer = reflection.constant_buffer(OBJECT_BUFFER)
     if buffer is None or not buffer.variables or not buffer.variables[0].members:
         return None
+    values = dict(NEUTRAL_OBJECT, **(OBJECT_OVERRIDE.get() or {}))
     words = {at: 0 for at in range(0, buffer.size, 4)}
     for name, at, _member in buffer.variables[0].members:
-        for i, value in enumerate(NEUTRAL_OBJECT.get(name, ())):
+        for i, value in enumerate(values.get(name, ())):
             words[at + 4 * i] = int(np.float32(value).view(np.uint32)) if isinstance(value, float) else value
     return words
 

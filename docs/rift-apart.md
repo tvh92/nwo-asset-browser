@@ -36,7 +36,7 @@ Rift Apart's capabilities are `models`, `textures`, `export`, `animation`, `root
   - The Textures tab.
   - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances), and blend shapes as morph targets. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
 - **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart". Rift Apart has no Flash UI to show there ([User interface](#user-interface)).
-- **Not drawn:** [visual effects](#visual-effects) that conduits attach to a model, such as holograms and thrusters. The files are decoded; the viewer and exports leave them out.
+- **Visual effects:** the model view draws the single-model nodes of the effects a model's actors start, such as the weapons vendor's holo logo ([Effects in the viewer](#effects-in-the-viewer)). Every other node type, and the exports, leave effects out.
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
 
@@ -1221,7 +1221,7 @@ Programs read the engine's per-object record, `g_SceneObjectView` (element `$Ele
 - **Values:** alpha, an fp16 object colour (`m_ColorRGFp16`, `m_ColorBMiscFp16`), custom XY, Z and random halves, creation time, LOD override.
 - **Interpolants:** the vertex program passes the custom values on as `TEXCOORD6 = (1, Misc, Rand, LOD factor)` and `TEXCOORD7 = (custom X, custom Y, custom Z, FX lighting index)`.
 
-The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain object: identity transform, alpha 1, white colour, and every custom value, time and bias 0. Both the G-buffer and the forward translations bind it, and a material that reads it says so in its limitations. Effects driven by the custom values, such as the particle quads `exp_quad` and `smk_quad`, come out at their zero state (often transparent).
+The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain object: identity transform, alpha 1, white colour, and every custom value, time and bias 0. Both the G-buffer and the forward translations bind it, and a material that reads it says so in its limitations. A visual-effect mesh replaces its colour members with the node's ([Effects in the viewer](#effects-in-the-viewer)). Effects driven by the custom values, such as the particle quads `exp_quad` and `smk_quad`, come out at their zero state (often transparent).
 
 ### Vertex programs
 
@@ -1508,7 +1508,7 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 
 ## Visual effects
 
-Holograms, thrusters, glows and other effects are not part of a model. A conduit attaches `.visualeffect` assets to a model's locators at run time. `nwo/games/rcra/vfx.py` decodes both files. Nothing draws them yet.
+Holograms, thrusters, glows and other effects are not part of a model. A conduit attaches `.visualeffect` assets to a model's locators at run time. `nwo/games/rcra/vfx.py` decodes both files; the model view draws part of them ([Effects in the viewer](#effects-in-the-viewer)).
 
 ### Attachment
 
@@ -1561,6 +1561,16 @@ The asset is the 36-byte toc header and a DAT1 whose string pool holds "VisualEf
 - **Value:** the evaluator (`0x14138D0E0`) returns base + range × one of three random vectors, selected by comparing the mode with two thresholds. The corpus uses modes 1 (constant, range 0) and 2 (random range). The thresholds and vectors are set at run time and are not read.
 - **Between keys:** `vfx.curve_value` interpolates linearly. This is a viewer choice: the game's key-to-key evaluation is not traced.
 
+### Effects in the viewer
+
+The view decode (`rcra_game.decode_model` with arrays) runs `nwo/games/rcra/effects.py`. The export decode does not.
+
+- **Which effects:** the model's actors (reverse dag), their conduits, and each conduit's `ActivatedEvent` responses that start an effect. A conduit counts only when every locator its activation responses name is a locator or joint of the model. This skips shared conduits such as the gallery's `hero_gallery_vfx`, which names the locators of many models. Identical (effect, locator) pairs from several actors attach once.
+- **What draws:** SingleModel nodes only. The node's model (highest LOD, look 0) gets the node's material as a new material entry. It is placed by the locator's rest transform (its joint's inverse bind, inverted, times the locator matrix), then the node's position, 3×3 and scale. Its vertices are weighted 1 to the locator's joint, so the mesh follows the animation. The node's rotation is applied with the nine floats as rows; that order is not traced (the vendor's plane has the identity).
+- **Object colour:** the node's colour curve times its luminance curve, at mid-life (t 0.5) with every random range at its middle, bound as the translation's per-object colour (`m_ColorRGFp16`, `m_ColorBMiscFp16`) through `shaders.object_override`. The override is part of the translation's cache keys. This follows the decoded R&C 2016 path, where a particle's colour reaches a model draw as the instance colour; the Rift Apart draw routine (`0x141377EC0`) is not traced that far. The material's limitations give the values.
+- **Example:** the weapons vendor's holo logo plane draws 0.725 above `igLoc_projection_vfx` (head joint 13), 2 × 2 units, with the logo program at object colour (0, 6.52, 10). Its projector and hover effects have no SingleModel node and do not draw.
+- **Left out:** quads, particles, lights, trails, decals, lens flares and child effects. `decoded['effects']` lists, per attached effect, the nodes drawn and the nodes left out, and the material note repeats them.
+
 ### Not decoded
 
 - **Emitters:** their spawn shapes (the reflected `kCone`, `kDisc`, `kPlane`, `kBox`), counts, lifetimes and motion.
@@ -1589,6 +1599,6 @@ python -m nwo.games.rcra.inspect --game <install> --output-root <folder> --summa
 
 `tests/test_rcra_bake.py` checks the portable export's UV0 bake. Without game files, it checks the structural test (UV1, the normal, a cube map or volume block a group; the front-face flag does not), terms at the texel centres, sRGB decoding before filtering, bilinear wrap at a scaled UV, lookup tables, and that chunks and threads give the same values. With `RCRA_GAME` it checks that Ratchet's head material bakes to the scalar evaluator's values at random texels.
 
-`tests/test_rcra_vfx.py` checks the [visual effect](#visual-effects) reader on a synthetic effect: asset, material (also inline) and emitter links, curve keys, times and values, and failures on a broken curve chain or slot. With `RCRA_GAME` it checks the vendor's holo logo, its projector's emitter links and the conduit's attachments.
+`tests/test_rcra_vfx.py` checks the [visual effect](#visual-effects) reader on a synthetic effect: asset, material (also inline) and emitter links, curve keys, times and values, and failures on a broken curve chain or slot. It also checks the per-object override and an effect mesh's placement and joint weights. With `RCRA_GAME` it checks the vendor's holo logo, its projector's emitter links, the conduit's attachments, and that the vendor's view decode carries the logo mesh (head joint, every look and LOD, the override in its translation) while the export decode does not.
 
 `tests/test_rcra_draw_skip.py` checks two things on synthetic flags blocks: the draw-skip rule (blended, additive, opaque, fur and distance-fade cases) and the packed draw alpha. It also checks the viewport and export wiring. With `RCRA_GAME` it checks that Ratchet's head lists only `compositeshell` as undrawn and that the texture entries mark its slot. It also checks that a glass of material alpha 0.3 gets forward alpha × 1228/4096. `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores, raw stores and atomics, groupshared memory, domain-program inputs). It skips without the DLL. `tests/test_rcra_lighting.py` checks the lighting classes. Without game files it covers the class bits, the extra-field layout, the emitted `rcraLight` and `rcraClassLit`, and the forward programs' own light emitted per light. With `RCRA_GAME` it finds the six apply programs, checks class 0 against GGX with α = r⁴ and that every class recipe is the light's own term. It also checks the cloth and foliage writers' extra fields against their packed word, that the fur writer is class 3, the dome's own key light, the jellyfish domain program, and engine compute programs with groupshared memory. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.

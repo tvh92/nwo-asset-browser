@@ -199,6 +199,18 @@ SIZE_NOTE = ('Texture sizes the program queries (%s) are those of the full-resol
              'array sizes and depths do not depend on streaming.')
 OBJECT_NOTE = (' Per-object values are a plain object: identity transform, alpha 1, white object colour, custom values, '
                'creation time and bias 0.')
+OVERRIDE_NOTE = ' Per-object values the caller sets: %s; the rest as the plain object.'
+
+
+def _object_note(bindings):
+    """OBJECT_NOTE, or OVERRIDE_NOTE under rshaders.object_override, when the program reads the object record."""
+    if not bindings.object_read:
+        return ''
+    override = rshaders.OBJECT_OVERRIDE.get()
+    if not override:
+        return OBJECT_NOTE
+    return OVERRIDE_NOTE % ', '.join('%s %s' % (name, rshaders.object_text(name, value))
+                                     for name, value in sorted(override.items()))
 ENGINE_NOTE = (' Engine textures read at the profile values: %s (stored scene depth at the far clip, so no soft depth fade; '
                'the scene G-buffer cleared to 0 at the review viewport size; light sources and probes 0).')
 SCENE_GBUFFER_NOTE = ' The scene G-buffer reads 0 (cleared: the empty scene of the far-clip depth), at the review viewport size.'
@@ -591,7 +603,7 @@ def _surface(graph_data, material_data, slot, texture_sizes, binding_class, prog
     terms['gloss'] = _rounded(g, g.op('sat', gloss))
     limitations = ['Per-draw values are the neutral draw: draw alpha %s (the material alpha), no dissolve, no render '
                    'flags (lighting class 0), ' % _draw_alpha_text(material_data)
-                   + 'no flag volumes, shader time 0.' + OBJECT_NOTE * bindings.object_read + RECORD_NOTE * bindings.record_read
+                   + 'no flag volumes, shader time 0.' + _object_note(bindings) + RECORD_NOTE * bindings.record_read
                    + (ENGINE_NOTE % ', '.join(sorted(bindings.engine_read)) if bindings.engine_read else ''), 'The 12-bit normal and the 8-bit albedo, occlusion and emission are used before the '
                    "G-buffer's rounding; F0 and gloss keep it."]
     limitations += program['limitations'] if program else []
@@ -1492,7 +1504,7 @@ def forward(graph_data, material_data, texture_sizes=None):
         "Draw: render flags hold only the material's lit bit (%s), draw alpha %s (the material alpha), no dissolve, "
         'no particle values, no flag volumes, '
         'shader time 0; stored scene depth at the far clip (no soft depth fade); view space with the world axes.'
-        % ('lit' if flags else 'unlit: lighting term 1', _draw_alpha_text(material_data)) + OBJECT_NOTE * bindings.object_read
+        % ('lit' if flags else 'unlit: lighting term 1', _draw_alpha_text(material_data)) + _object_note(bindings)
         + RECORD_NOTE * bindings.record_read
         + (SCENE_GBUFFER_NOTE if set(rshaders.SCENE_GBUFFER) & bindings.engine_read else '')]
     if scene:

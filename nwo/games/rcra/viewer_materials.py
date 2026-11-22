@@ -15,12 +15,13 @@ RGBA (``gl_float``) with the stored values, missing channels following D3D (blen
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections import OrderedDict
 
 import numpy as np
 
-from nwo.games.rcra import blender_export as bexp, surface as rsurface
+from nwo.games.rcra import blender_export as bexp, shaders as rshaders, surface as rsurface
 from nwo.viewer import rcra_glsl
 
 MAX_BINDINGS = 14   # nwo.viewer.native_glsl.TEXTURE_UNITS
@@ -77,9 +78,12 @@ def _code_sha256():
 CODE_SHA256 = _code_sha256()
 
 
-def translate(source, material_key):
+def translate(source, material_key, object_values=None):
     """(surface recipe or None, forward recipe or None, blend, limitations, textures {binding: path}), kept across sessions in
-    the source's translation disk cache (keyed by the material and graph bytes and CODE_SHA256) when it has one."""
+    the source's translation disk cache (keyed by the material and graph bytes and CODE_SHA256) when it has one.
+
+    ``object_values`` replaces members of the neutral per-object record (shaders.object_override); it is part of the
+    cache key."""
     graph, data = _graph(source, material_key), source.asset_data(material_key)
     program = None
     if graph is None:
@@ -89,14 +93,15 @@ def translate(source, material_key):
         except (ValueError, OSError) as error:
             raise NotTranslated(str(error)) from error
     disk = getattr(source, 'translation_disk_cache', None)
-    key = _disk_key(disk, data, graph, program)
+    key = _disk_key(disk, data, graph, program, object_values)
     stored = _floats(disk.get(key), decode=True) if key else None
     if stored is not None:
         if 'error' in stored:
             raise NotTranslated(stored['error'])
         return stored['surface'], stored['forward'], stored['blend'], stored['limitations'], stored['textures']
     try:
-        with rsurface.shared_forward_split():   # the surface's forward albedo and the own specular term: one translation
+        # the surface's forward albedo and the own specular term: one translation
+        with rshaders.object_override(object_values), rsurface.shared_forward_split():
             out = _translate(graph, data, source, program)
     except NotTranslated as error:
         if key:
@@ -107,12 +112,19 @@ def translate(source, material_key):
     return out
 
 
-def _disk_key(disk, data, graph, program):
+def _object_key(object_values):
+    """An object override as bytes for a cache key (None without one)."""
+    return json.dumps(sorted(object_values.items())).encode() if object_values else None
+
+
+def _disk_key(disk, data, graph, program, object_values=None):
     """translate's key in the translation disk cache, or None without a cache (or without the package sources)."""
     if disk is None or not CODE_SHA256:
         return None
-    return disk.key(bytes(data), [bytes(graph) if program is None else program['key']], 'rcra-viewer:%s' % CODE_SHA256,
-                    own_code=True)
+    parts = [bytes(graph) if program is None else program['key']]
+    if object_values:
+        parts.append(_object_key(object_values))
+    return disk.key(bytes(data), parts, 'rcra-viewer:%s' % CODE_SHA256, own_code=True)
 
 
 def is_cached(source, material_key):
@@ -358,9 +370,9 @@ def _load_bindings(source, recipes, paths, hd, limitations):
     return layouts, textures
 
 
-def material_receipt(source, material_key, hd=False):
-    """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason."""
-    surface, forward, blend, limitations, paths = translate(source, material_key)
+def material_receipt(source, material_key, hd=False, object_values=None):
+    """(receipt, {binding: viewer texture dict}); raises NotTranslated with the reason. ``object_values``: translate."""
+    surface, forward, blend, limitations, paths = translate(source, material_key, object_values)
     recipes = [r for r in (surface, forward, (forward or {}).get('lit'), (forward or {}).get('ambient'),
                            (surface or {}).get('own_specular')) if r]
     layouts, textures = _load_bindings(source, recipes, paths, hd, limitations)
@@ -486,13 +498,13 @@ def cached_shell_receipt(source, material_key, hd=False):
     return memo[key]
 
 
-def cached_receipt(source, material_key, hd=False):
+def cached_receipt(source, material_key, hd=False, object_values=None):
     """material_receipt memoised on the source: (receipt, textures) or (None, reason)."""
     memo = source.__dict__.setdefault('_rcra_viewer_receipts', {})
-    key = (material_key, bool(hd))
+    key = (material_key, bool(hd), _object_key(object_values))
     if key not in memo:
         try:
-            memo[key] = material_receipt(source, material_key, hd)
+            memo[key] = material_receipt(source, material_key, hd, object_values)
         except NotTranslated as error:
             memo[key] = (None, str(error))
     return memo[key]
