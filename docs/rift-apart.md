@@ -35,7 +35,7 @@ Rift Apart's capabilities are `models`, `textures`, `export`, `animation`, `root
   - The 3D model view, with skeletal [animation](#animation) playback, optionally with the clip's [root motion](#root-motion), and the voice lines' [face performances](#face-performances). The Shaded mode draws each material's own translated program where it translates ([In the viewer](#in-the-viewer)), and the labelled preview elsewhere.
   - The Textures tab.
   - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances), and blend shapes as morph targets. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
-- **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart".
+- **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart". Rift Apart has no Flash UI to show there ([User interface](#user-interface)).
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
 
@@ -80,6 +80,18 @@ The zero-weight fold accounts for 91 of the baked albedos and 7 of the F0 and gl
 Additive (427) and modulate (11) materials stay opaque, and 139 alpha-over materials have a forward alpha of 1. Each has only a forward program, and its colour and alpha both bake over UV0 for 39 additive materials and no modulate one: most read the view and the normal (rims and fades) or the vertex colour.
 
 A texture stored in a float or 16-bit data format is used as its sampled values rounded to 8 bits when they all lie in 0..1 ([Float and 16-bit textures](#float-and-16-bit-textures)), with a note. This carries the flat 4×4 `R32G32_FLOAT` `default_pink_shader_n` placeholder of 386 materials and the `R16G16` normal of the escape ship. A texture with values outside 0..1 is left out with its range. The bake samples float textures as stored.
+
+## User interface
+
+Rift Apart has no Flash (Scaleform GFX) UI. Its menus and HUD are Coherent Gameface pages: HTML, CSS and JavaScript run by V8 (`cohtml.WindowsDesktop.dll`, `RenoirCore.WindowsDesktop.dll`, `v8*.dll`), loaded from `coui://ui/loaded/...` addresses. No asset in the install carries a SWF or GFX header, and the dag names no `.gfx`, `.swf` or `.html` path.
+
+| Assets | Where |
+| --- | --- |
+| UI images | 2,099 named `ui/**.texture` assets (the Textures tab) |
+| Pages, scripts, styles, SVG art, fonts | 567 assets in `d/userinterface` that the dag does not name (`_unnamed/d_userinterface/<id>`): 461 SVG, about 60 JavaScript, 21 CSS, 11 HTML, 10 TrueType/OpenType. A path's CRC-64 is its id, so the paths the executable and the pages mention name some of them (`ui/loaded/exported/<View>/<View>.html`, `ui/loaded/authored/<View>/js|css/...`) |
+| Level maps | Flat 3D models, `models/ui/map_<location>.model` (14), drawn with `material/ui/levelmap_base`, `MapDarkBase` and `Map_01`: a backdrop, the playable area and highlighted landmarks. They open as models; map icons are separate UI images |
+
+The browser does not render these pages.
 
 ## Install layout
 
