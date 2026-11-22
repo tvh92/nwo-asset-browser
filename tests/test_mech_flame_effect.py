@@ -1,4 +1,4 @@
-"""Nefarious mech rocket flame (rc2016/viewer/mech_flame_effect.py, rc2016/pipeline/mech_flame_effect.py): the model table,
+"""Nefarious mech rocket flame (nwo/viewer/mech_flame_effect.py, nwo/pipeline/mech_flame_effect.py): the model table,
 the decoded program, the instance transforms, the viewer triangles, the shader kind, the Blender description, the decoded
 effect (game files) and the transforms against the mech capture (Research)."""
 import math
@@ -6,8 +6,8 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.viewer import mech_flame_effect as fx
-from rc2016.viewer import shading
+from nwo.viewer import mech_flame_effect as fx
+from nwo.viewer import shading
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = ROOT / 'Research/captures/2026-11-12_nefarious-mech'
@@ -103,7 +103,7 @@ class TransformTests(unittest.TestCase):
 
 class DescriptionTests(unittest.TestCase):
     def test_blender_description(self):
-        from rc2016.pipeline import mech_flame_effect as bl
+        from nwo.pipeline import mech_flame_effect as bl
         description = bl.effect_description(_preview())
         self.assertEqual(description['joint'], 2)
         self.assertEqual(len(description['flames']), 2)
@@ -119,7 +119,7 @@ class GameFileTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import tempfile
-        from rc2016.formats.archive import Archive, locate
+        from nwo.formats.archive import Archive, locate
         cls.temp = tempfile.TemporaryDirectory()
         cls.archive = Archive(locate(os.environ['RC2016_RESEARCH']), Path(cls.temp.name), lambda *a, **k: None)
         cls.archive.verify_repeats = False
@@ -140,8 +140,8 @@ class GameFileTests(unittest.TestCase):
                 self.assertAlmostEqual(got, v + fx.CAPTURED_SPREAD * s, places=3)
 
     def test_preview_on_the_mech(self):
-        from rc2016.formats.native_model import decode_locators
-        from rc2016.levels.scene import asset_bytes
+        from nwo.formats.native_model import decode_locators
+        from nwo.levels.scene import asset_bytes
         path = 'character/enemy/enm_nefarious_mech/enm_nefarious_mech.model'
         data = asset_bytes(self.archive, path)
         preview = fx.mech_flame_preview(self.archive, path, data, decode_locators(data))
@@ -163,9 +163,9 @@ class CaptureTests(unittest.TestCase):
         the mech's native space (mech instance MVP of the dome draw 8988)."""
         import tempfile
         import numpy as np
-        from rc2016.formats.archive import Archive, locate
-        from rc2016.formats.native_model import decode_locators
-        from rc2016.levels.scene import asset_bytes
+        from nwo.formats.archive import Archive, locate
+        from nwo.formats.native_model import decode_locators
+        from nwo.levels.scene import asset_bytes
         with tempfile.TemporaryDirectory() as temp:
             archive = Archive(locate(os.environ['RC2016_RESEARCH']), Path(temp), lambda *a, **k: None)
             archive.verify_repeats = False

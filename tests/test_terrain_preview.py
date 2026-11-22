@@ -5,9 +5,9 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.shaders import terrain_preview as ground
-from rc2016.viewer.native_glsl import emit_surface, evaluate_surface
-from rc2016.viewer.viewport import ModelViewport
+from nwo.shaders import terrain_preview as ground
+from nwo.viewer.native_glsl import emit_surface, evaluate_surface
+from nwo.viewer.viewport import ModelViewport
 
 
 class GroundControlTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class GroundControlTests(unittest.TestCase):
 class GroundSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         root=Path(os.environ['RC2016_RESEARCH'])
         cls.archive=open_archive(str(root.parents[1]/'Ratchet & Clank (EUR)'/'CUSA01073'))
         cls.receipt=ground.prepare_preview(cls.archive,ground.MATERIAL)
@@ -94,8 +94,8 @@ class GroundSourceTests(unittest.TestCase):
         self.assertEqual(ground.rebind_preview(saved,ground.DEFAULT_CONTROLS),self.receipt)
 
     def test_loader_adds_preview_without_changing_native_support(self):
-        from rc2016.viewer.textures import material_textures
-        from rc2016.viewer.native_glsl import prepare_material_translation
+        from nwo.viewer.textures import material_textures
+        from nwo.viewer.native_glsl import prepare_material_translation
         entry=material_textures(self.archive,[dict(index=0,path=ground.MATERIAL)],{})[0]
         self.assertEqual(entry['experimental_preview']['preview_contract'],ground.CONTRACT)
         self.assertEqual(set(entry['experimental_textures']),{6,7,8,9,12,13,14})

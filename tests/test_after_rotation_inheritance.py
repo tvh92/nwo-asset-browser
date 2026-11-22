@@ -4,8 +4,8 @@ import zlib
 
 import numpy as np
 
-from rc2016.formats.clips import worlds_batch
-from rc2016.formats.skeleton import (AFTER_ROTATION, INVERSE_BIND_TOLERANCE, check_profile_inheritance,
+from nwo.formats.clips import worlds_batch
+from nwo.formats.skeleton import (AFTER_ROTATION, INVERSE_BIND_TOLERANCE, check_profile_inheritance,
                                      inverse_bind_error, rotation, worlds)
 from tests.test_perf_wp2 import make_frames, make_rig
 

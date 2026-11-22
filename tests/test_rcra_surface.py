@@ -13,10 +13,10 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.games.rcra import blender_check, blender_export
-from rc2016.games.rcra import surface as rsurface
-from rc2016.games.rcra import texture as rtexture
-from rc2016.shaders import sm5
+from nwo.games.rcra import blender_check, blender_export
+from nwo.games.rcra import surface as rsurface
+from nwo.games.rcra import texture as rtexture
+from nwo.shaders import sm5
 
 GAME = os.environ.get('RCRA_GAME')
 FUR = 'material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material'   # no graph: the engine fur writer
@@ -47,7 +47,7 @@ class TexelTests(unittest.TestCase):
 
     def test_byte_atlas_is_the_float_atlas_rounded(self):
         """The viewer's 8-bit atlas, built in bytes, equals the float path it replaced (texel_array x 255, rounded)."""
-        from rc2016.games.rcra import viewer_materials
+        from nwo.games.rcra import viewer_materials
         rng = np.random.default_rng(1)
         for fmt, size in ((49, 2), (28, 4)):   # R8G8 (no blue stored) and R8G8B8A8
             slices = [rng.integers(0, 256, 3 * 2 * size, dtype=np.uint8).tobytes() for _ in range(3)]
@@ -58,7 +58,7 @@ class TexelTests(unittest.TestCase):
             self.assertEqual((out['width'], out['height']), (float_atlas.shape[1], float_atlas.shape[0]))
 
     def test_cached_translation_keeps_infinite_and_nan_constants(self):
-        from rc2016.games.rcra import viewer_materials
+        from nwo.games.rcra import viewer_materials
         value = dict(nodes=[dict(op='const', value=float('inf')), dict(op='const', value=float('-inf')),
                             dict(op='const', value=float('nan')), dict(op='const', value=0.5)], t=('a', 1.0))
         stored = viewer_materials._floats(value)
@@ -85,7 +85,7 @@ class TexelTests(unittest.TestCase):
 
     def test_blend_and_lit_bits(self):
         from unittest import mock
-        from rc2016.games.rcra import material as rmat
+        from nwo.games.rcra import material as rmat
         for flags, blend, lit in ((0x1810, 'opaque', 0x400), (0x1110, 'blended', 0), (0x887, 'additive', 0x400),
                                   (0x1211, 'modulate', 0), (0x918, 'opaque', 0x400), (None, 'opaque', 0)):
             with mock.patch.object(rmat, 'flags_word', return_value=flags):
@@ -96,8 +96,8 @@ class TexelTests(unittest.TestCase):
                 rmat.material_blend(b'')
 
     def test_export_wiring(self):
-        from rc2016.export.models import FORMATS
-        from rc2016.games import rcra_game
+        from nwo.export.models import FORMATS
+        from nwo.games import rcra_game
         self.assertTrue(FORMATS['blend'][2])
         self.assertIn('blender_materials', rcra_game.GAME.hooks)
 
@@ -332,7 +332,7 @@ class ConstantNormalTests(unittest.TestCase):
 class FurLayerMapTests(unittest.TestCase):
     def test_layer_map_matches_the_start_up_routine(self):
         """fur.layer_map against the start-up routine's per-texel loop (x outer, y inner), for the first columns."""
-        from rc2016.games.rcra import fur
+        from nwo.games.rcra import fur
         f, size = np.float32, fur.LAYER_SIZE
         slices = [np.frombuffer(s, np.uint8).reshape(size, size) for s in fur.layer_map()]
         self.assertEqual((len(slices), slices[0].shape), (fur.LAYER_SLICES, (size, size)))
@@ -437,7 +437,7 @@ import json, sys
 import bpy
 import numpy as np
 sys.path.insert(0, sys.argv[sys.argv.index('--') + 1])
-from rc2016.export.rcra_blender import TANGENT_ATTRIBUTE, _Emitter, store_tangent_frame
+from nwo.export.rcra_blender import TANGENT_ATTRIBUTE, _Emitter, store_tangent_frame
 bpy.ops.wm.read_factory_settings(use_empty=True)
 mesh = bpy.data.meshes.new('frame')
 mesh.from_pydata([(0, 0, 0), (1, 0, 0), (0, 1, 0), (2, 0, 0), (3, 0, 0), (2, 1, 0)], [], [(0, 1, 2), (3, 4, 5)])
@@ -525,7 +525,7 @@ def _q(x):
 class RealSurfaceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 
@@ -543,7 +543,7 @@ class RealSurfaceTests(unittest.TestCase):
     def test_g_map_layout_follows_7107A2D8(self):
         """Below 0.5 (or in a graph without the key) the _g map holds gloss² in red and a grey F0 in green; at or above it F0
         in rgb and gloss in alpha."""
-        from rc2016.games.rcra import material as rmat, shaders as rshaders
+        from nwo.games.rcra import material as rmat, shaders as rshaders
         cases = {'material/environment/sargasso/prop/uwb_prop_tube_bubbles_01/uwb_prop_tube_bubbles_01_opaque.material': False,
                  'material/characters/hero/hero_rivet_weteye/hero_rivet_weteye.material': False,   # basic_normal_gloss, key 0
                  'material/environment/underwaterbase/gameplay/uwb_gp_fuel_crate_frost_01/uwb_gp_fuel_crate_frost_01.material': True}
@@ -621,7 +621,7 @@ class RealSurfaceTests(unittest.TestCase):
                                            places=5, msg=graph_path)
 
     def test_blend_modes_and_forward_recipes(self):
-        from rc2016.games.rcra import material as rmat
+        from nwo.games.rcra import material as rmat
         for path, blend, lit in BLENDS:
             data = self.source.asset_data(self.source.resolve(path)[0])
             self.assertEqual(rmat.material_blend(data), blend, path)
@@ -644,7 +644,7 @@ class RealSurfaceTests(unittest.TestCase):
         key = self.source.resolve(path)[0]
         graph = next(r['path'] for r in self.source.asset_references(key) if r['path'].endswith('.materialgraph'))
         gkey = next(k for k in self.source.resolve(graph) if self.source.entries[k]['type'] == 'materialgraph')
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra.texture import texture_size
         return rsurface.forward(self.source.asset_data(gkey), self.source.asset_data(key),
                                 texture_sizes=lambda texture: texture_size(self.source, texture))   # as the export does
 
@@ -684,7 +684,7 @@ class RealSurfaceTests(unittest.TestCase):
             self.assertEqual(unit['background.' + c], lit['background.' + c] + lit['lit_background.' + c])
 
     def surface_of(self, path):
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra.texture import texture_size
         key = self.source.resolve(path)[0]
         graph = next(r['path'] for r in self.source.asset_references(key) if r['path'].endswith('.materialgraph'))
         gkey = next(k for k in self.source.resolve(graph) if self.source.entries[k]['type'] == 'materialgraph')
@@ -692,8 +692,8 @@ class RealSurfaceTests(unittest.TestCase):
                                 texture_sizes=lambda texture: texture_size(self.source, texture))
 
     def test_fur_material_draws_the_engine_fur_writer(self):
-        from rc2016.games.rcra import fur, material
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra import fur, material
+        from nwo.games.rcra.texture import texture_size
         key = self.source.resolve(FUR)[0]
         data = self.source.asset_data(key)
         self.assertEqual(material._graphs(self.source, key), [])
@@ -714,7 +714,7 @@ class RealSurfaceTests(unittest.TestCase):
         self.assertIn('recipe', entry)
 
     def test_missing_textures_get_the_engine_default(self):
-        from rc2016.games.rcra.texture import UNBOUND, texture_header
+        from nwo.games.rcra.texture import UNBOUND, texture_header
         with tempfile.TemporaryDirectory() as tmp:
             # The glove's _c is not installed (its graph default is); the shadow's texture and its default are not.
             glove = blender_export.material_entry(
@@ -728,7 +728,7 @@ class RealSurfaceTests(unittest.TestCase):
         self.assertEqual(texture_header(self.source, UNBOUND)['format'], 2)
 
     def test_graph_named_by_file_name(self):
-        from rc2016.games.rcra import material
+        from nwo.games.rcra import material
         key = self.source.resolve('material/environment/kalebo/ground/kal_gnd_floor_bare_01/'
                                   'meg_kalebo_float44_gnd_floor_bare_01.material')[0]
         self.assertEqual([p.rsplit('/', 1)[-1] for p in material._graphs(self.source, key)], ['basic_normal_gloss.materialgraph'])

@@ -2,8 +2,8 @@
 import unittest
 from collections import deque
 
-from rc2016.levels.viewport import LevelViewport
-from rc2016.viewer.viewport import ModelViewport
+from nwo.levels.viewport import LevelViewport
+from nwo.viewer.viewport import ModelViewport
 
 
 class FakeGL:

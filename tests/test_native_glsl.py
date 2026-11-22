@@ -5,10 +5,10 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders.ir import DAG
-from rc2016.viewer.native_glsl import emit_surface, evaluate_surface, fragment_source, selected_translation
-from rc2016.viewer import shading
-from rc2016.formats.links import rule_coverage, NATIVE
+from nwo.shaders.ir import DAG
+from nwo.viewer.native_glsl import emit_surface, evaluate_surface, fragment_source, selected_translation
+from nwo.viewer import shading
+from nwo.formats.links import rule_coverage, NATIVE
 
 
 def translation(ir, albedo, f0, gloss, emission, normal=None, bindings=()):
@@ -97,15 +97,15 @@ class PortableSurfaceTests(unittest.TestCase):
             def resolve(self,path):return [1]
             def bytes(self,i):return [b'raw']
         graphs=[dict(path='materialgraph/environment/global/gbl_color_tint_01/mo_gbl_color_tint_01.materialgraph')]
-        with patch('rc2016.formats.archive.decompress',return_value=[b'decoded']), \
-             patch('rc2016.formats.index.references',return_value=graphs), \
-             patch('rc2016.formats.materials.viewer_graph_rule',return_value=dict(applies=True,unported=[])), \
-             patch('rc2016.viewer.native_glsl.prepare_material_translation') as prepare:
+        with patch('nwo.formats.archive.decompress',return_value=[b'decoded']), \
+             patch('nwo.formats.index.references',return_value=graphs), \
+             patch('nwo.formats.materials.viewer_graph_rule',return_value=dict(applies=True,unported=[])), \
+             patch('nwo.viewer.native_glsl.prepare_material_translation') as prepare:
             self.assertIsNone(selected_translation(Archive(),'a.material',{'_c':'a.texture','tint':{}}))
             prepare.assert_not_called()
 
     def test_late_material_invalidates_every_recorded_program(self):
-        from rc2016.levels.viewport import LevelViewport
+        from nwo.levels.viewport import LevelViewport
         view=object.__new__(LevelViewport)
         view._materials={};view._texture_names={}
         view._material_ops={('a',2,1):'empty',('a',2,2):'empty',('a',1,1):'empty',('b',2,1):'keep'}
@@ -120,13 +120,13 @@ class PortableSurfaceTests(unittest.TestCase):
     def test_native_binding_hands_over_the_cached_texture_without_reloading(self):
         # A released texture is restored once per GL variant by the level loader
         # (restore_native_pixels), not decoded again for every material binding it.
-        from rc2016.viewer.textures import material_textures
+        from nwo.viewer.textures import material_textures
         cached=dict(path='a.texture',array_size=1)
         cache={'a.texture':cached}
         ready=dict(status='ready',texture_bindings=[dict(api=5,path='a.texture')])
-        with patch('rc2016.viewer.textures.material_texture_paths',return_value={}), \
-             patch('rc2016.viewer.native_glsl.selected_translation',return_value=ready), \
-             patch('rc2016.viewer.textures.load_texture') as load:
+        with patch('nwo.viewer.textures.material_texture_paths',return_value={}), \
+             patch('nwo.viewer.native_glsl.selected_translation',return_value=ready), \
+             patch('nwo.viewer.textures.load_texture') as load:
             entry=material_textures(None,[dict(index=0,path='a.material')],cache)[0]
         load.assert_not_called()
         self.assertIs(entry['native_textures'][5],cached)
@@ -134,7 +134,7 @@ class PortableSurfaceTests(unittest.TestCase):
 
     def test_coverage_and_recorder_are_material_and_program_specific(self):
         self.assertEqual(rule_coverage(['unknown.materialgraph'],dict(status='ready',translation_sha256='x')),(NATIVE,'x'))
-        from rc2016.levels.viewport import LevelViewport
+        from nwo.levels.viewport import LevelViewport
         view=object.__new__(LevelViewport)
         class Calls:
             def __init__(self):self.calls=[]
@@ -157,15 +157,15 @@ class NativeHandArchiveTests(unittest.TestCase):
         if not research:raise unittest.SkipTest('RC2016_RESEARCH is required for source controls')
         source=Path(os.environ.get('RC2016_GAME_ROOT',str(Path(research).parents[1]/'Ratchet & Clank (EUR)'/'Image0')))
         if not source.exists():raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive=open_archive(source)
 
     @classmethod
     def tearDownClass(cls):cls.archive.close()
 
     def compare(self,path):
-        from rc2016.viewer.native_glsl import prepare_material_translation
-        from rc2016.viewer.textures import material_texture_paths
+        from nwo.viewer.native_glsl import prepare_material_translation
+        from nwo.viewer.textures import material_texture_paths
         t=prepare_material_translation(self.archive,path);self.assertEqual(t['status'],'ready')
         p=material_texture_paths(self.archive,path)
         sample=dict((b['api'],(.21,.36,.59,.73)) for b in t['texture_bindings'])

@@ -1,6 +1,6 @@
-"""Rift Apart lighting classes (rc2016.games.rcra.lighting), the forward programs' own key light
-(rc2016.games.rcra.surface.forward_lighting), their viewer emission (rc2016.viewer.rcra_glsl) and the translator's
-tessellation, groupshared and atomic support (rc2016.shaders.sm5).
+"""Rift Apart lighting classes (nwo.games.rcra.lighting), the forward programs' own key light
+(nwo.games.rcra.surface.forward_lighting), their viewer emission (nwo.viewer.rcra_glsl) and the translator's
+tessellation, groupshared and atomic support (nwo.shaders.sm5).
 
 Real-install tests read RCRA_GAME (the Rift Apart install folder) and skip without it.
 """
@@ -14,8 +14,8 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.games.rcra import lighting
-from rc2016.viewer import rcra_glsl
+from nwo.games.rcra import lighting
+from nwo.viewer import rcra_glsl
 
 GAME = os.environ.get('RCRA_GAME')
 BLENDER = os.environ.get('RC2016_BLENDER') or r'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe'
@@ -103,7 +103,7 @@ class ClassTests(unittest.TestCase):
         self.assertLess(capped, 500)
 
     def test_blender_constants_follow_the_reader(self):
-        text = (Path(__file__).resolve().parents[1] / 'rc2016' / 'export' / 'rcra_blender.py').read_text()
+        text = (Path(__file__).resolve().parents[1] / 'nwo' / 'export' / 'rcra_blender.py').read_text()
         line = next(x for x in text.splitlines() if x.startswith('TANGENT_STEP, TANGENT_BIAS, ROTATION_STEP'))
         values = [eval(v) for v in line.split('=', 1)[1].split(',')]   # noqa: S307 (the module's own literal line)
         self.assertEqual(values, [lighting.TANGENT_STEP, lighting.TANGENT_BIAS, lighting.ROTATION_STEP,
@@ -135,13 +135,13 @@ class ClassTests(unittest.TestCase):
             self.assertAlmostEqual(got, want, delta=1e-4 * max(want, 1.0), msg=str(case))
 
     def test_probe_records_follow_the_tables(self):
-        from rc2016.games.rcra import probe
+        from nwo.games.rcra import probe
         r = probe.record(2, 3)
         self.assertEqual((r[0], r[4], r[8], r[12], r[16], r[48], r[52]), (0.0, 3.0, probe.RECORD_TABLES['a'][2], 0.08, 1 / 32,
                                                                          128.0, 7.0))
         faces = probe.face_directions(4)
         self.assertTrue(np.allclose(np.linalg.norm(faces, axis=-1), 1.0))
-        from rc2016.games.rcra.blender_export import cube_lookup
+        from nwo.games.rcra.blender_export import cube_lookup
         marked = np.zeros((6, 4, 4, 3))
         marked[1, 2, 3] = 1.0
         self.assertAlmostEqual(float(cube_lookup(marked, faces[1, 2, 3])[0]), 1.0)   # a texel's direction finds that texel
@@ -187,7 +187,7 @@ import bpy
 import numpy as np
 root, out_dir, cases = sys.argv[sys.argv.index('--') + 1:]
 sys.path.insert(0, root)
-from rc2016.export.rcra_blender import build_anisotropic_group
+from nwo.export.rcra_blender import build_anisotropic_group
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
 scene.render.engine = 'CYCLES'
@@ -310,7 +310,7 @@ class RealLightingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sys.setrecursionlimit(max(sys.getrecursionlimit(), 100000))
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 
@@ -375,13 +375,13 @@ class RealLightingTests(unittest.TestCase):
         names = {n['name'] for n in recipe['nodes'] if n['op'] == 'input'}
         self.assertFalse(names & set(lighting.PROFILE_INPUTS))
         self.assertIn('char-skin-profiles-srgb_1d.texture', ' '.join(recipe['limitations']))
-        from rc2016.games.rcra.texture import texture_header
+        from nwo.games.rcra.texture import texture_header
         header = texture_header(self.source, lighting.PROFILE_TEXTURE)
         self.assertEqual((header['format'], header['sd_width'], header['sd_height']), (29, 128, 1))   # RGBA8 sRGB, 1D
 
     def _furnace(self, cls, albedo, f0, gloss, extra=None, probe=(0.5, 0.7, 1.0)):
         """The class's ambient over a constant probe, with the engine's BRDF lookup (bilinear, clamped), over the probe."""
-        from rc2016.games.rcra import engine_tables, surface
+        from nwo.games.rcra import engine_tables, surface
         lut = engine_tables.brdf_lookup(GAME)[0]
 
         def bilinear(u, v):
@@ -422,7 +422,7 @@ class RealLightingTests(unittest.TestCase):
             self.assertAlmostEqual(got, 1.0, delta=0.02)
 
     def test_brdf_lookup_is_read_through_its_loader(self):
-        from rc2016.games.rcra import engine_tables
+        from nwo.games.rcra import engine_tables
         lut = engine_tables.brdf_lookup(GAME)
         self.assertEqual(lut.shape, (4, 64, 64, 4))
         self.assertFalse(lut[3].any())
@@ -440,7 +440,7 @@ class RealLightingTests(unittest.TestCase):
     def test_probe_convolution_keeps_a_constant_environment(self):
         """The engine's probe program over a constant source returns it unchanged at every output mip (energy is kept)."""
         import numpy as np
-        from rc2016.games.rcra import probe
+        from nwo.games.rcra import probe
         _offset, blob = probe.program(GAME)
         chain = probe.box_chain(np.ones((6, probe.SIZE, probe.SIZE, 3), np.float32) * np.array([0.5, 1.0, 2.0], np.float32))
         for mip in (0, 4):
@@ -453,10 +453,10 @@ class RealLightingTests(unittest.TestCase):
         iteration), its reads are the review probe, the probe array at cube 0 and the BRDF lookup, and the probe array
         looks along the same direction as the default probe's reflection (no parallax correction)."""
         from collections import defaultdict
-        from rc2016.games.rcra import surface
-        from rc2016.games.rcra.material import _graphs, _material_key
-        from rc2016.games.rcra.texture import texture_size
-        from rc2016.shaders import sm5
+        from nwo.games.rcra import surface
+        from nwo.games.rcra.material import _graphs, _material_key
+        from nwo.games.rcra.texture import texture_size
+        from nwo.shaders import sm5
         key = _material_key(self.source, DOME)
         graph = self.source.asset_data(self.key(list(_graphs(self.source, key))[0], 'materialgraph'))
         result = surface.forward_ambient(graph, self.source.asset_data(key), lambda p: texture_size(self.source, p))
@@ -494,8 +494,8 @@ class RealLightingTests(unittest.TestCase):
             self.assertEqual(lighting.evaluate(recipe, dark), [0.0, 0.0, 0.0], cls)
 
     def test_writers_store_their_class_and_extra_fields(self):
-        from rc2016.games.rcra import material as rmat, surface
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra import material as rmat, surface
+        from nwo.games.rcra.texture import texture_size
         for graph_path, cls in ((CLOTH, 2), (FOLIAGE, 5)):
             graph = self.source.asset_data(self.key(graph_path, 'materialgraph'))
             material = next(k for k in self.source.ids_of_type('material')
@@ -510,7 +510,7 @@ class RealLightingTests(unittest.TestCase):
 
             def sample(node, _args):
                 return texels.setdefault(node['binding'], [rng.random() for _ in range(4)])
-            from rc2016.shaders import sm5
+            from nwo.shaders import sm5
             names = ['extra.%d' % k for k in range(len(lighting.EXTRA_FIELDS[cls]))]
             for _ in range(10):
                 texels.clear()
@@ -522,14 +522,14 @@ class RealLightingTests(unittest.TestCase):
                     self.assertEqual(out[r['terms'][n]], (out[word] & 0xFFFFFFFF) >> offset & ((1 << width) - 1))
 
     def test_fur_writer_is_hair(self):
-        from rc2016.games.rcra import fur, surface
+        from nwo.games.rcra import fur, surface
         r = surface.surface(None, self.source.asset_data(self.key(FUR, 'material')),
                             program=fur.fur_program(self.source, self.source.asset_data(self.key(FUR, 'material'))))
         self.assertEqual(r['graph'].value(r['terms']['class']), 3.0)
 
     def test_forward_program_lights_itself_linearly(self):
-        from rc2016.games.rcra import material as rmat, surface
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra import material as rmat, surface
+        from nwo.games.rcra.texture import texture_size
         key = self.key(DOME, 'material')
         data = self.source.asset_data(key)
         graph = self.source.asset_data(self.key(rmat._graphs(self.source, key)[0], 'materialgraph'))
@@ -539,7 +539,7 @@ class RealLightingTests(unittest.TestCase):
         self.assertTrue({'L.x', 'LIGHT.r'} <= names)
 
     def test_domain_programs_translate(self):
-        from rc2016.games.rcra import shaders as rshaders
+        from nwo.games.rcra import shaders as rshaders
         data = self.source.asset_data(self.key(JELLYFISH, 'materialgraph'))
         shader = rshaders.pass_shader(data, 2)
         self.assertEqual(shader.stage, 'ds')
@@ -554,7 +554,7 @@ class RealLightingTests(unittest.TestCase):
         """Every engine compute program that declares groupshared memory runs through the translator (stores and atomics
         recorded, a value another thread wrote unknown) without a translator error."""
         import struct
-        from rc2016.shaders import dxbc, sm5
+        from nwo.shaders import dxbc, sm5
         data = (Path(GAME) / lighting.EXECUTABLE).read_bytes()
         count = 0
         for at, size in dxbc.find_containers(data):

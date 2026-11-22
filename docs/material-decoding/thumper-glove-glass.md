@@ -4,7 +4,7 @@
 
 ## Method
 
-The translator refuses the program (`Loop at 1528 not shown to end`). `rc2016/research/forward_loops.py` runs the same translator with each taken backward branch kept opaque: the first pass is used for control flow only and every register it changed becomes a named unknown (`loop-varying VGPR n`). Everything outside the loop is then the translator's own exact DAG. The loop body of `0x5226f404` is instruction-for-instruction the body of `basic_glass` `4FC5703F` (507 against 506 instructions): B lacks one accumulator multiply-add (the blue diffuse channel, whose glow-colour component is 0) and swaps VCC low/high as the sources of one multiply-add pair. So the light-loop lobe documented for `4FC5703F` (`docs/shading.md`, Forward glass writers) applies unchanged. No SPIR-V of this program exists in the shader cache; the decode is from the GCN in the archive.
+The translator refuses the program (`Loop at 1528 not shown to end`). `nwo/research/forward_loops.py` runs the same translator with each taken backward branch kept opaque: the first pass is used for control flow only and every register it changed becomes a named unknown (`loop-varying VGPR n`). Everything outside the loop is then the translator's own exact DAG. The loop body of `0x5226f404` is instruction-for-instruction the body of `basic_glass` `4FC5703F` (507 against 506 instructions): B lacks one accumulator multiply-add (the blue diffuse channel, whose glow-colour component is 0) and swaps VCC low/high as the sources of one multiply-add pair. So the light-loop lobe documented for `4FC5703F` (`docs/shading.md`, Forward glass writers) applies unchanged. No SPIR-V of this program exists in the shader cache; the decode is from the GCN in the archive.
 
 ## Verified closed forms
 

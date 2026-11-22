@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from rc2016.app import catalog
+from nwo.app import catalog
 
 
 def put_json(path: Path, value) -> None:

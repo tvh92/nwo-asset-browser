@@ -1,4 +1,4 @@
-"""Holocon device holograms (rc2016/viewer/holocon_effect.py, rc2016/pipeline/holocon_effect.py): placement, still-frame rays,
+"""Holocon device holograms (nwo/viewer/holocon_effect.py, nwo/pipeline/holocon_effect.py): placement, still-frame rays,
 the viewer quads, the shader kinds, the decoded effects (game files) and the icon equation against the vendor capture (Research)."""
 import json
 import math
@@ -6,9 +6,9 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.viewer import holocon_effect as fx
-from rc2016.viewer import shading
-from rc2016.viewer.idle_effect import GLOW_SOFT
+from nwo.viewer import holocon_effect as fx
+from nwo.viewer import shading
+from nwo.viewer.idle_effect import GLOW_SOFT
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = ROOT / 'Research/captures/2026-11-08_holocon-hologram'
@@ -128,7 +128,7 @@ class ShaderTests(unittest.TestCase):
 
 
 def _archive():
-    from rc2016.levels.scene import open_archive
+    from nwo.levels.scene import open_archive
     return open_archive(os.environ['RC2016_RESEARCH'])
 
 
@@ -171,9 +171,9 @@ class GameFileTests(unittest.TestCase):
         self.assertEqual([round(v, 3) for v in vendor['offset_r'] + vendor['offset_b'] + vendor['offset_g']], [0.01, 0.01, 0.0, 0.03, -0.01, -0.01])
 
     def test_vendor_preview_and_blender_description(self):
-        from rc2016.formats.native_model import decode_locators
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.pipeline import holocon_effect
+        from nwo.formats.native_model import decode_locators
+        from nwo.levels.scene import asset_bytes
+        from nwo.pipeline import holocon_effect
         path = 'environment/global/gameplay/gbl_gp_weapon_vendor_01/weapon_vendor_01.model'
         data = asset_bytes(self.archive, path)
         preview = fx.holocon_preview(self.archive, path, data, decode_locators(data))

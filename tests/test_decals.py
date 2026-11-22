@@ -1,12 +1,12 @@
-"""Scorch-mark decals: the merged mesh of the zone decal table (rc2016/levels/decals.py), its shader declarations and the Novalis archive."""
+"""Scorch-mark decals: the merged mesh of the zone decal table (nwo/levels/decals.py), its shader declarations and the Novalis archive."""
 import os
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from rc2016.levels import decals
-from rc2016.viewer import shading
+from nwo.levels import decals
+from nwo.viewer import shading
 
 SCORCH = 'material/visualeffect/equipment/weapon/wpn_Explosion_Scorchmark/wpn_Explosion_Scorchmark.material'
 OTHER = 'material/environment/metropolis/architecture/met_arch_decal_03/met_arch_decal_03.material'
@@ -62,7 +62,7 @@ class ScorchArchiveTests(unittest.TestCase):
         research = os.environ.get('RC2016_RESEARCH')
         if not research:
             raise unittest.SkipTest('RC2016_RESEARCH is required')
-        from rc2016.levels import scene
+        from nwo.levels import scene
         try:
             cls.archive = scene.open_archive(Path(research))
             cls.zone = 'levels/Novalis/openArea/OpenWorld/default_region/art_terrain.zone'
@@ -76,8 +76,8 @@ class ScorchArchiveTests(unittest.TestCase):
             cls.archive.close()
 
     def test_pit_decal_lies_flat_on_the_crater_patch_and_faces_up(self):
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.levels.zone_format import decode_decals
+        from nwo.levels.scene import asset_bytes
+        from nwo.levels.zone_format import decode_decals
         decal = decode_decals(asset_bytes(self.archive, self.zone), asset_bytes(self.archive, self.zone + '_static'))[1]
         positions, normals = np.asarray(decal['positions']), np.asarray(decal['normals'])
         self.assertTrue(decals.is_scorch(decal['material']))

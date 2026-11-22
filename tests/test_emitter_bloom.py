@@ -2,8 +2,8 @@
 import json
 import unittest
 
-from rc2016.pipeline.emitter_bloom import material_kind
-from rc2016.viewer.viewport import self_lit_entry
+from nwo.pipeline.emitter_bloom import material_kind
+from nwo.viewer.viewport import self_lit_entry
 
 
 def translation(emission):

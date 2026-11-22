@@ -5,8 +5,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders import bindings
-from rc2016.shaders.translator import Compiler, Registers, project_table
+from nwo.shaders import bindings
+from nwo.shaders.translator import Compiler, Registers, project_table
 
 
 def reference_projection(table, n, used):
@@ -110,7 +110,7 @@ class CompileProcessTests(unittest.TestCase):
         self.addCleanup(bindings.use_compile_processes, 0)
 
     def test_worker_processes_return_what_this_process_compiles(self):
-        from rc2016.shaders.translator import compile_graph
+        from nwo.shaders.translator import compile_graph
         bindings.use_compile_processes(2)
         self.assertEqual(bindings.compiled(empty_graph()), compile_graph(empty_graph()))
         self.assertIsNotNone(bindings._POOL)

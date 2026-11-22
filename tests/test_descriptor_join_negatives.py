@@ -1,7 +1,7 @@
 """Focused negatives for descriptor-word identity and guarded joins."""
 import unittest
 
-from rc2016.shaders.translator import Compiler
+from nwo.shaders.translator import Compiler
 
 
 def compiler():

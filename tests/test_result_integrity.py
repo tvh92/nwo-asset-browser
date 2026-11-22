@@ -2,8 +2,8 @@
 import tempfile
 import unittest
 from pathlib import Path
-from rc2016.app import catalog
-from rc2016.app.browser import normalize_details
+from nwo.app import catalog
+from nwo.app.browser import normalize_details
 from tests import test_catalog
 class ResultIntegrityTests(unittest.TestCase):
     def test_mutated_master_and_receipt_disable_review_without_rewriting_reports(self):

@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import Mock, patch
 import numpy as np
 
-from rc2016.levels import panel, scene, viewport, actors
-from rc2016.viewer.shading import INSTANCE_ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE
+from nwo.levels import panel, scene, viewport, actors
+from nwo.viewer.shading import INSTANCE_ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE
 
 
 class TransportTests(unittest.TestCase):

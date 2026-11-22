@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from rc2016.pipeline import scene_defaults
+from nwo.pipeline import scene_defaults
 
 
 class FakeSun(dict):

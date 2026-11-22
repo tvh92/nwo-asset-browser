@@ -6,9 +6,9 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
-from rc2016.app.batch import PipelineBatchRunner
-from rc2016.app.clip_picker import CLIP_PICKER_THRESHOLD, ClipPickerDialog, ClipSelection, needs_picker
-from rc2016.app.clip_viewer import ClipViewer
+from nwo.app.batch import PipelineBatchRunner
+from nwo.app.clip_picker import CLIP_PICKER_THRESHOLD, ClipPickerDialog, ClipSelection, needs_picker
+from nwo.app.clip_viewer import ClipViewer
 
 
 @dataclass
@@ -374,8 +374,8 @@ class ClipViewerPlayback(unittest.TestCase):
         self.assertIn("not offered", self.viewer.status.get())
 
     def test_the_offered_clips_drop_the_cutscene_shots_unless_the_export_is_cinematic(self):
-        from rc2016.viewer.animation import AnimationLibrary
-        from rc2016.formats.animation_sources import CINEMATIC_SOURCE
+        from nwo.viewer.animation import AnimationLibrary
+        from nwo.formats.animation_sources import CINEMATIC_SOURCE
         library = AnimationLibrary.__new__(AnimationLibrary)
         library.rows = [1]
         library.clips = [dict(animset="a.animset", offset=0, name="Hookshot_Pull"),

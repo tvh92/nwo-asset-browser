@@ -13,10 +13,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.pipeline.render_state import material_flags
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.pipeline.render_state import material_flags
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 
 GRAPH = 'materialgraph/global/water_tank/water_tank.materialgraph'
 MATERIAL = 'material/global/water_tank/hydro_water_tank.material'
@@ -94,7 +94,7 @@ class RuleBindingTests(unittest.TestCase):
             self.assertEqual(set(names) <= set(expected), True)
             self.assertEqual('VR glass rim bias' in names, with_alpha)
             self.assertEqual(roles, ['_n', '_pick'])
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_glass')[1].split('def apply_viewer_graph_rule')[0]
         for name in ('glass tint', 'glass rim bias', 'glass body', 'glass gloss', 'glass f0 base', 'glass rim exp', 'glass alpha scale',
                      'glass tank flow map P', 'glass tank flow map Q', 'glass tank cma S5', 'glass tank cma S6', 'VR glass lit'):
@@ -109,8 +109,8 @@ class ArchiveProgramTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders import translator
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders import translator
         cls.archive = open_archive(root)
         cls.graph = asset_bytes(cls.archive, GRAPH)
         cls.programs = {p['shader_id']: p for p in translator.pixel_programs(cls.graph)}
@@ -126,7 +126,7 @@ class ArchiveProgramTests(unittest.TestCase):
             self.assertEqual(self.programs[shader_id]['code_sha256'], digest)
 
     def test_material_only_terms_match_the_program_numerically(self):
-        from rc2016.research import forward_loops as loops
+        from nwo.research import forward_loops as loops
         compiler = loops.compile_opaque(self.programs['0x7eb73491'])
         roots, subs = loops.bind_frozen(compiler, flags=0x261, pass_word=0x2)
         head = loops.loop_head(compiler, subs)
@@ -149,7 +149,7 @@ class ArchiveProgramTests(unittest.TestCase):
             self.assertLess(error, 5e-6, key)
 
     def test_viewer_rule_from_the_archive(self):
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         paths = tp.material_texture_paths(self.archive, MATERIAL)
         forward = paths['forward']
         p = forward['params']

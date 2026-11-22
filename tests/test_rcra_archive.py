@@ -12,10 +12,10 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.games.rcra import toc as toc_module
-from rc2016.games.rcra.dsar import BLOCK_DTYPE, MODE_GDEFLATE, MODE_LZ4, ArchiveFile, BlockReader
-from rc2016.games.rcra.source import RcraSource, is_game_root, locate
-from rc2016.levels.zone_format import path_crc64
+from nwo.games.rcra import toc as toc_module
+from nwo.games.rcra.dsar import BLOCK_DTYPE, MODE_GDEFLATE, MODE_LZ4, ArchiveFile, BlockReader
+from nwo.games.rcra.source import RcraSource, is_game_root, locate
+from nwo.levels.zone_format import path_crc64
 
 try:
     import lz4.block as lz4block

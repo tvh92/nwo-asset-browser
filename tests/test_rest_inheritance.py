@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from rc2016.formats.skeleton import AFTER_ROTATION, SSC0, check_profile_rules, inverse_bind_error, worlds
+from nwo.formats.skeleton import AFTER_ROTATION, SSC0, check_profile_rules, inverse_bind_error, worlds
 from tests.test_after_rotation_inheritance import arm
 
 

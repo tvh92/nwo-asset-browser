@@ -1,12 +1,12 @@
-"""Archive-wide links table queries (rc2016/formats/links.py) and the details-tab lines (rc2016/app/links.py)."""
+"""Archive-wide links table queries (nwo/formats/links.py) and the details-tab lines (nwo/app/links.py)."""
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from rc2016.app.links import placement_lines
-from rc2016.formats import links
-from rc2016.formats.links import AssetLinks
+from nwo.app.links import placement_lines
+from nwo.formats import links
+from nwo.formats.links import AssetLinks
 
 
 class RuleCoverageTests(unittest.TestCase):
@@ -116,12 +116,12 @@ class LinkServiceGameTests(unittest.TestCase):
     def test_game_without_levels_answers_at_once_without_a_worker(self):
         from types import SimpleNamespace
         from unittest import mock
-        from rc2016.app.links import LinkService
+        from nwo.app.links import LinkService
         app = SimpleNamespace(source_var=SimpleNamespace(get=lambda: 'C:/rcra'))
         service = LinkService(app)
         game = SimpleNamespace(title='Rift Apart', has=lambda capability: False)
         answers = []
-        with mock.patch('rc2016.games.detect', return_value=game), mock.patch('threading.Thread') as thread:
+        with mock.patch('nwo.games.detect', return_value=game), mock.patch('threading.Thread') as thread:
             service.request(answers.append)
         self.assertEqual(answers, [None])
         thread.assert_not_called()

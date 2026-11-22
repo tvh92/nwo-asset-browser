@@ -3,16 +3,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.viewer import textures as tp
-from rc2016.formats.materials import viewer_graph_rule
+from nwo.viewer import textures as tp
+from nwo.formats.materials import viewer_graph_rule
 
 
 class LeafPaletteTests(unittest.TestCase):
     def test_model_and_level_uniform_transport_reset_and_supported_api(self):
         from types import SimpleNamespace
-        from rc2016.levels.viewport import _Recorder
-        from rc2016.viewer.viewport import ModelViewport
-        from rc2016.viewer.shading import OPAQUE_UNIFORMS, Shading
+        from nwo.levels.viewport import _Recorder
+        from nwo.viewer.viewport import ModelViewport
+        from nwo.viewer.shading import OPAQUE_UNIFORMS, Shading
         recorder = _Recorder(object(),object())
         view = SimpleNamespace(_gl=recorder.gl,_shading=recorder.shading,native_translation=False,
                                GL_TEXTURE0=0x84C0,GL_TEXTURE_2D=0x0DE1)
@@ -49,7 +49,7 @@ class LeafPaletteTests(unittest.TestCase):
 class LeafSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(str(Path(os.environ['RC2016_RESEARCH']).parents[1] / 'Ratchet & Clank (EUR)/CUSA01073'))
 
     def test_material_constants_and_blender_binding_gate(self):

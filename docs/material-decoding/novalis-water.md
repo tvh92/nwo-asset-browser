@@ -2,7 +2,7 @@
 
 The Novalis river and sea are `environment/pokitaru/natural/rp_pok_ocean_water_plane` placements (a 600 x 600 unit quad, 200 triangles) whose slot 0 the zone replaces with `pok_uniq_water.material`. The material names `pok_uniq_water.materialgraph` (SHA-256 `0cdcf946a6d628509191df6768257f9da0bdb785b9e9d7f0511c60432509ba11`); its flags word `0x0000000A` is alpha-over and one-sided. Pass 0's colour writer is `F4D47ECE` (code SHA-256 `89b494be6b573eb0f5e7ed2af9385498eb8eff08c1fc017edb07007930d72d20`); `5476807B` is the same closure without the near-camera refraction term, under the pass-1 constant layout.
 
-This page decodes the output colour and alpha of `F4D47ECE`, including the two loops the static translator keeps opaque, and checks every term numerically against one captured Novalis frame. The viewer and Blender rule built from it is described under "Viewer rule" (see also [liquids](../liquids.md) and [viewer](../viewer.md)). `rc2016/shaders/water.py` implements the closed forms; `tests/test_water_surface.py` checks them.
+This page decodes the output colour and alpha of `F4D47ECE`, including the two loops the static translator keeps opaque, and checks every term numerically against one captured Novalis frame. The viewer and Blender rule built from it is described under "Viewer rule" (see also [liquids](../liquids.md) and [viewer](../viewer.md)). `nwo/shaders/water.py` implements the closed forms; `tests/test_water_surface.py` checks them.
 
 Labels: **decoded** means read from the program, the material or the capture, with the evidence given; **inferred** means a reading the evidence does not fix.
 

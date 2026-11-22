@@ -4,7 +4,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders.nodes import (
+from nwo.shaders.nodes import (
     STATIC_VECTOR_ATTRIBUTE,
     _validate_static_vector_mesh_attribute,
 )

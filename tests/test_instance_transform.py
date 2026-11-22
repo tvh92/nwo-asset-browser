@@ -2,7 +2,7 @@
 import math
 import unittest
 
-from rc2016.shaders.instance_transform import instance_vector_matrix
+from nwo.shaders.instance_transform import instance_vector_matrix
 
 
 def matrix(axes):

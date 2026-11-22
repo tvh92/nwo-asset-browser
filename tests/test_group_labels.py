@@ -1,6 +1,6 @@
 import unittest
 
-from rc2016.pipeline.run import attach_owners, group_member_labels
+from nwo.pipeline.run import attach_owners, group_member_labels
 
 
 class GroupMemberLabelTests(unittest.TestCase):

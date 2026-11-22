@@ -7,12 +7,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rc2016.formats import animation_sources as S
-from rc2016.formats.animation_samples import decode_clip
-from rc2016.formats.animation_transforms import model_skeleton, sample_transforms
-from rc2016.formats.clips import extract_set
-from rc2016.formats.container import game_crc32
-from rc2016.viewer.animation import AnimationLibrary
+from nwo.formats import animation_sources as S
+from nwo.formats.animation_samples import decode_clip
+from nwo.formats.animation_transforms import model_skeleton, sample_transforms
+from nwo.formats.clips import extract_set
+from nwo.formats.container import game_crc32
+from nwo.viewer.animation import AnimationLibrary
 
 BUILT, JOINTS, BASE = 0x9DF23F77, 0xA3B26640, 0x2BB5BC8F
 LOOKUP, DATA = 0xB79CF1D7, 0x9FD19C20
@@ -175,7 +175,7 @@ class PerformerTests(unittest.TestCase):
         self.assertEqual(library.clip_frames(0)[1], 'absolute skeletal')
 
     def test_only_a_cutscene_clip_without_translation_evidence_is_absolute(self):
-        from rc2016.formats.clips import CUTSCENE_BASIS, classify
+        from nwo.formats.clips import CUTSCENE_BASIS, classify
         frames = sample_transforms(decode_clip(clip('x', ['a_body'], [(3, 0, 0)]), 0, {}))
         self.assertEqual(classify(rig(self.body), frames)[0], 'unsupported')
         kind, evidence = classify(rig(self.body), frames, cutscene=True)
@@ -250,7 +250,7 @@ class AnimsetClipNaming(unittest.TestCase):
         rows = rig(self.joints)
         inspected = dict(skeleton=rows, inverse_bind_matrices=[[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]] * 2,
                          profile=dict(inheritance='full', inheritance_candidates=['full']))
-        with mock.patch('rc2016.viewer.animation.inspect_model', return_value=inspected),                 mock.patch('rc2016.viewer.animation._blob', return_value=self.blob()):
+        with mock.patch('nwo.viewer.animation.inspect_model', return_value=inspected),                 mock.patch('nwo.viewer.animation._blob', return_value=self.blob()):
             library = AnimationLibrary(None, b'', ['a.animset'])
         self.assertEqual([c['name'] for c in library.clips], ['Engaged_Idle'])
 
@@ -312,7 +312,7 @@ class RetargetTests(unittest.TestCase):
         archive = FakeArchive([('m1', 'model', 'character/test/source.model', model(self.source))])
         inspected = dict(skeleton=rig(self.small), inverse_bind_matrices=[[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]] * 3,
                          profile=dict(inheritance='full', inheritance_candidates=['full']))
-        with mock.patch('rc2016.viewer.animation.inspect_model', return_value=inspected),                 mock.patch('rc2016.viewer.animation._blob', return_value=blob):
+        with mock.patch('nwo.viewer.animation.inspect_model', return_value=inspected),                 mock.patch('nwo.viewer.animation._blob', return_value=blob):
             library = AnimationLibrary(archive, b'small', ['a.animset'])
         self.assertEqual(library.retarget['a.animset']['model'], 'character/test/source.model')
         for index in range(2):
@@ -322,7 +322,7 @@ class RetargetTests(unittest.TestCase):
                              [list(map(float, t)) for _n, _p, t in self.small])
 
     def test_pipeline_retargets_only_from_another_model(self):
-        from rc2016.pipeline.run import animset_translation_retarget
+        from nwo.pipeline.run import animset_translation_retarget
         archive = FakeArchive([('m1', 'model', 'character/test/source.model', model(self.source)),
                                ('m2', 'model', 'character/test/small.model', model(self.small))])
         blob = animset([('Idle', clip('Idle', ['root'], [(0, 0, 0)]))], strings=['Anim Set Built File', 'character/test/source.model'])

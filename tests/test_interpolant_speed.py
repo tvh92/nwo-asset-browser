@@ -3,9 +3,9 @@ import random
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders import interpolants
-from rc2016.shaders.interpolants import FLAG, _flag_mul, _stream_terms, linear_form
-from rc2016.shaders.ir import DAG
+from nwo.shaders import interpolants
+from nwo.shaders.interpolants import FLAG, _flag_mul, _stream_terms, linear_form
+from nwo.shaders.ir import DAG
 
 
 def reference_flag_mul(p, q, limit=None, over_limit_none=False):
@@ -115,7 +115,7 @@ class SharedFormTests(unittest.TestCase):
 
 class GraphStreamEvidenceTests(unittest.TestCase):
     def setUp(self):
-        from rc2016.shaders import bindings
+        from nwo.shaders import bindings
         self.bindings = bindings
         bindings._stream_evidence.cache_clear()
         self.addCleanup(bindings._stream_evidence.cache_clear)

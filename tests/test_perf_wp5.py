@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from rc2016.levels import scene
-from rc2016.levels.zone_format import decode_zone, decode_zone_arrays, name_crc32, path_crc64
+from nwo.levels import scene
+from nwo.levels.zone_format import decode_zone, decode_zone_arrays, name_crc32, path_crc64
 from tests.test_level_material_overrides import RED, record, zone
 
 
@@ -109,7 +109,7 @@ class ZoneArraysTests(unittest.TestCase):
 
     def test_full_decoder_fallback_preserves_raw_instance_flags(self):
         data = zone([record(0, 1)])
-        from rc2016.levels.zone_format import _arrays_from_full
+        from nwo.levels.zone_format import _arrays_from_full
         arrays = _arrays_from_full(data)
         self.assertEqual(arrays['instance_flags'].dtype, np.dtype(np.uint32))
         self.assertEqual(arrays['instance_flags'].tolist(), [0x440000])
@@ -216,7 +216,7 @@ class GeometryCacheTests(unittest.TestCase):
 # Culling ---------------------------------------------------------------------------------------
 import ctypes   # noqa: E402
 
-from rc2016.levels import viewport as lv   # noqa: E402
+from nwo.levels import viewport as lv   # noqa: E402
 
 
 def clip_inside(projection, modelview, points):
@@ -437,7 +437,7 @@ import queue   # noqa: E402
 import threading   # noqa: E402
 from concurrent.futures import ThreadPoolExecutor   # noqa: E402
 
-from rc2016.levels import panel   # noqa: E402
+from nwo.levels import panel   # noqa: E402
 
 
 class LoaderTests(unittest.TestCase):
@@ -490,7 +490,7 @@ class LoaderTests(unittest.TestCase):
                 loaded.extend(m['path'] for m in todo)
             return {m['path']: dict(path=m['path']) for m in todo}
         out = queue.Queue()
-        from rc2016.levels import actors as actor_module, spawn_format
+        from nwo.levels import actors as actor_module, spawn_format
         with patch.object(actor_module, 'ActorCatalog', Catalog), \
                 patch.object(spawn_format, 'preview_placements', return_value=([], [])), \
                 patch.object(spawn_format, 'preview_summary', return_value=dict(reasons={})), \
@@ -523,7 +523,7 @@ class LoaderTests(unittest.TestCase):
 
 
 # Shader program binaries ------------------------------------------------------------------------
-from rc2016.viewer import shading   # noqa: E402
+from nwo.viewer import shading   # noqa: E402
 
 
 class FakeShading:
@@ -624,7 +624,7 @@ class ProgramCacheTests(unittest.TestCase):
 
 
 # Model viewport: mipmaps, lighting per frame, program memo ----------------------------------------
-from rc2016.viewer.viewport import MIPMAP_ROLES, ModelViewport   # noqa: E402
+from nwo.viewer.viewport import MIPMAP_ROLES, ModelViewport   # noqa: E402
 
 
 class FakeGL:

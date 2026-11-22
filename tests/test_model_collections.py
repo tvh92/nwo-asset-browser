@@ -1,6 +1,6 @@
 import unittest
 
-from rc2016.export.model_collections import assign_models
+from nwo.export.model_collections import assign_models
 
 
 def record(name, tag=None, parent=None, children=(), armatures=()):

@@ -1,6 +1,6 @@
 # Deplanetizer exterior: dome glass, dwarf star and hangar glow
 
-The Deplanetizer exterior model (`environment/global/prop/gbl_prop_uiobject_deplanetizer_01/gbl_prop_uiobject_deplanetizer_01.model`) has three forward materials that the generic reading drew wrongly: the dome glass (opaque dark grey), the dwarf star inside it and the hangar glow strips. Each is now an exact-graph rule (`GRAPH_RULES` in `rc2016/viewer/textures.py`, bound to the graph path and SHA-256) drawn by `GLASS_FRAGMENT`:
+The Deplanetizer exterior model (`environment/global/prop/gbl_prop_uiobject_deplanetizer_01/gbl_prop_uiobject_deplanetizer_01.model`) has three forward materials that the generic reading drew wrongly: the dome glass (opaque dark grey), the dwarf star inside it and the hangar glow strips. Each is now an exact-graph rule (`GRAPH_RULES` in `nwo/viewer/textures.py`, bound to the graph path and SHA-256) drawn by `GLASS_FRAGMENT`:
 
 | Material | Graph (SHA-256) | Forward program | Rule | `uKind` | Draw state (flags word) |
 |---|---|---|---|---|---|
@@ -8,7 +8,7 @@ The Deplanetizer exterior model (`environment/global/prop/gbl_prop_uiobject_depl
 | `dep_gp_dwarf_star_surface_calm_01` | `dep_gp_dwarf_star_surface_calm_01` (`5e0fcc30…9091f`) | `05C96D48` (passes 0 and 3) | `dwarf_star` | 22 | `0x20C`: opaque, two-sided |
 | `dep_arch_hangar_glow` | `basic_flat_color_incandescent` (`960498e0…f74a4`) | `FDF7FDFB` (pass 3), `E16F8FC0` (pass 0) | `flat_incandescent` | 23 | `0x239`: additive (`SRC_ALPHA`, `ONE`), back faces culled |
 
-No draw of these programs is in a capture; the glow's colour and strength are checked against the space-battle frames ([Station parts in the space battle](#station-parts-in-the-space-battle)). The equations below were read from the shadPS4 IR dumps of the programs (compiled in game, so the programs did run), the native code through `rc2016.shaders.translator` (sample order, channels) and the graph pass contracts. The dome glass terms were checked numerically against its IR (maximum error 4e-9 over 300 random inputs). Every rule is a labelled preview (`game_equivalence` False).
+No draw of these programs is in a capture; the glow's colour and strength are checked against the space-battle frames ([Station parts in the space battle](#station-parts-in-the-space-battle)). The equations below were read from the shadPS4 IR dumps of the programs (compiled in game, so the programs did run), the native code through `nwo.shaders.translator` (sample order, channels) and the graph pass contracts. The dome glass terms were checked numerically against its IR (maximum error 4e-9 over 300 random inputs). Every rule is a labelled preview (`game_equivalence` False).
 
 ## Level model and captured frames
 
@@ -148,7 +148,7 @@ Engine terms the viewer does not reproduce: the light list, sun with its cascade
 
 ## Blender
 
-`game_shader._viewer_rule_glass` builds the three rules (mirrored by `materials.viewer_graph_rule`, checked by `rc2016/shaders/validation.py`):
+`game_shader._viewer_rule_glass` builds the three rules (mirrored by `materials.viewer_graph_rule`, checked by `nwo/shaders/validation.py`):
 - dome glass: `N'` from `_n` with the Blender UV tangent, alpha with its cut, `E`, gloss and F0 from `_g` at `UV0 s`, the lobe with `T` on F0 and on the Principled specular tint, no diffuse, alpha-over;
 - star: emission only (`VR glass emission`), opaque, two-sided, five image nodes at the frozen `t` (`VR glass time` drives the scrolls), the record colour and amplitude as named constants;
 - glow: emission `C (K3 C.r + K5)` plus the lobe, additive, back faces culled.

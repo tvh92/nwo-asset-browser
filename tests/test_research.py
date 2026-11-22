@@ -12,13 +12,13 @@ import unittest
 
 import numpy as np
 
-from rc2016.research.source import Asset, Corpus, level_name
-from rc2016.research.cross_reference import CrossReference, HashIndex, StringContext
-from rc2016.research.census import Census
-from rc2016.research.fields import Layout, select_sources
-from rc2016.research.correlate import Correlations, zone_features
-from rc2016.research.hypothesis import Claim, RecordSource, run
-from rc2016.research.report import build, write
+from nwo.research.source import Asset, Corpus, level_name
+from nwo.research.cross_reference import CrossReference, HashIndex, StringContext
+from nwo.research.census import Census
+from nwo.research.fields import Layout, select_sources
+from nwo.research.correlate import Correlations, zone_features
+from nwo.research.hypothesis import Claim, RecordSource, run
+from nwo.research.report import build, write
 
 
 def dat1(items, strings=()):
@@ -269,7 +269,7 @@ class ReportTests(unittest.TestCase):
                 second = build(corpus)
                 self.assertEqual(first, second)
                 write(first, out)
-            result = subprocess.run([sys.executable, '-m', 'rc2016.research', str(root), '--out', str(out)],
+            result = subprocess.run([sys.executable, '-m', 'nwo.research', str(root), '--out', str(out)],
                                     capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1])
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads((out / 'report.json').read_text()), first)
@@ -277,7 +277,7 @@ class ReportTests(unittest.TestCase):
             self.assertFalse((root / '.cache').exists())
             self.assertTrue((out / '.cache').is_dir())
             claims_out = Path(directory) / 'claims'
-            result = subprocess.run([sys.executable, '-m', 'rc2016.research', 'hypothesis', str(root),
+            result = subprocess.run([sys.executable, '-m', 'nwo.research', 'hypothesis', str(root),
                                      '--out', str(claims_out), '--section', '0x7777', '--stride', '8',
                                      '--claim', json.dumps(dict(name='zero', offset=0, kind='range', maximum=0))],
                                     capture_output=True, text=True)
@@ -286,13 +286,13 @@ class ReportTests(unittest.TestCase):
 
 
     def test_headless_import(self):
-        code = "import rc2016.research.report,sys; assert not any(x.startswith(('PySide','PyQt','OpenGL','bpy')) for x in sys.modules)"
+        code = "import nwo.research.report,sys; assert not any(x.startswith(('PySide','PyQt','OpenGL','bpy')) for x in sys.modules)"
         result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(os.environ.get('RC2016_RESEARCH'), 'RC2016_RESEARCH is not set')
     def test_real_archive_opt_in(self):
-        from rc2016.formats.archive import locate
+        from nwo.formats.archive import locate
         try:
             root = locate(os.environ['RC2016_RESEARCH'])
         except ValueError:

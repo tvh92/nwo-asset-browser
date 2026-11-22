@@ -1,8 +1,8 @@
-"""Which atmosphere and reflection capture a level uses (rc2016.levels.sky; synthetic zones, no game data, no GL)."""
+"""Which atmosphere and reflection capture a level uses (nwo.levels.sky; synthetic zones, no game data, no GL)."""
 import unittest
 from unittest import mock
 
-from rc2016.levels import sky
+from nwo.levels import sky
 from tests.test_level_volumes import record, zone
 
 DAY_ZONE = 'levels/Veldin/atm_lgt.zone'

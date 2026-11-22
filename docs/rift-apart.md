@@ -1,6 +1,6 @@
 # Rift Apart (PC)
 
-The Rift Apart reader lives in `rc2016/games/rcra/`. Rift Apart is a PS5 game; the reader takes its Steam PC release, not a PS5 dump, and reads the install directly: nothing is extracted, and nothing is written to the game folder. This page covers the archive layer, model geometry, textures, the material texture slots behind the viewer's labelled preview, and the translation of the games' own shader programs.
+The Rift Apart reader lives in `nwo/games/rcra/`. Rift Apart is a PS5 game; the reader takes its Steam PC release, not a PS5 dump, and reads the install directly: nothing is extracted, and nothing is written to the game folder. This page covers the archive layer, model geometry, textures, the material texture slots behind the viewer's labelled preview, and the translation of the games' own shader programs.
 
 The layouts below were taken from two references and then checked against the installed files:
 
@@ -9,7 +9,7 @@ The layouts below were taken from two references and then checked against the in
 
 ## How the browser picks the game
 
-The folder chosen as the game folder picks the game, and the browser shows only that game's assets. `rc2016/games/` holds one `Game` record per game. `games.detect(folder)` tries them in this order:
+The folder chosen as the game folder picks the game, and the browser shows only that game's assets. `nwo/games/` holds one `Game` record per game. `games.detect(folder)` tries them in this order:
 
 | Game | Recognised by |
 | --- | --- |
@@ -20,9 +20,9 @@ A folder that matches neither gets an error naming both games. With the Transfor
 
 Once the scan recognises the game:
 
-- The window title becomes "R&C Asset Browser — <game>".
+- The window title becomes "NWO Asset Browser — <game>".
 - Settings keep a folder and an output root per game (`game.<id>.source`, `game.<id>.output`) beside the last-used `source` and `output`.
-- An installed game, under Program Files or in a Steam library, never receives output. Its default output root is `Documents\R&C Asset Browser\<game> Output`.
+- An installed game, under Program Files or in a Steam library, never receives output. Its default output root is `Documents\NWO Asset Browser\<game> Output`.
 
 Each `Game` record declares its capabilities and supplies hooks: model decode, material textures and rules, texture header, texture listing, loading and export, export material maps and shadow-only flags. Dispatch happens once per source open and once per model decode or export, so no hot loop sees the seam. R&C 2016's record names the functions it used before the seam, and its caches stay directly in `.cache/`. Other games cache under `.cache/<game id>/`.
 
@@ -39,9 +39,9 @@ Rift Apart's capabilities are `models`, `textures`, `export`, `animation`, `root
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
 
-The portable export (GLB, glTF, OBJ) writes only what is decoded, through `rc2016/games/rcra_export.py`. Blender formats replace these materials with the translated ones ([Blender materials](#blender-materials)). Each material gets its normal map at full resolution. Its other maps come from its own translated programs, per group of terms: albedo; F0 and gloss; occlusion; emission; and, for an alpha-over material, the forward alpha. Each group is taken from the first of these that applies:
+The portable export (GLB, glTF, OBJ) writes only what is decoded, through `nwo/games/rcra_export.py`. Blender formats replace these materials with the translated ones ([Blender materials](#blender-materials)). Each material gets its normal map at full resolution. Its other maps come from its own translated programs, per group of terms: albedo; F0 and gloss; occlusion; emission; and, for an alpha-over material, the forward alpha. Each group is taken from the first of these that applies:
 
-1. **Baked over UV0** (`rc2016/games/rcra/bake.py`):
+1. **Baked over UV0** (`nwo/games/rcra/bake.py`):
    - **When:** every operation of the group's terms reaches no input but UV0 (`TEXCOORD.xy`) and the front-face flag, and samples only 1D or 2D textures or one array slice per texel (`bake.blocker`; the test is structural).
    - **Zero weights:** branches the program weights by a constant 0 are taken out first (`bake.fold`): x × 0 becomes 0 where x reaches no operation that can make NaN or infinity from finite values, and x + 0 becomes x. Many enemy writers mix a UV1 damage mask in at weight 0, and the mask then no longer blocks the bake. On 40 freed materials the folded bake equals the unfolded program at random UV1 and other inputs.
    - **How:** the terms are evaluated at the texel centres of a grid in UV0 space, with every tint, palette, mask, detail map and blend the program applies there. The grid is the largest texture they sample (at most 4096 per side); a texture read at a scaled UV is resampled at that grid.
@@ -172,7 +172,7 @@ The browser does not render these pages.
 
 ## Models
 
-`rc2016/games/rcra/model.py` decodes a `.model` asset into the same dict schema as `formats.native_model.decode_model` (`schema='rcra-pc-model-v1'`). Because the schema matches, `viewer.loader.mesh_payload`, `_selected_meshes` and the glTF exporter use the result unchanged. `decode_for_viewer` is the `Game.decode_model` hook.
+`nwo/games/rcra/model.py` decodes a `.model` asset into the same dict schema as `formats.native_model.decode_model` (`schema='rcra-pc-model-v1'`). Because the schema matches, `viewer.loader.mesh_payload`, `_selected_meshes` and the glTF exporter use the result unchanged. `decode_for_viewer` is the `Game.decode_model` hook.
 
 ### Asset and DAT1 layout
 
@@ -312,7 +312,7 @@ Their 36-byte header names no streamed sections: its streamed size is 0. In the 
 ## Animation
 
 Rift Apart clips play in the 3D view and export with the model, like R&C 2016 clips. The decoder is
-`rc2016/games/rcra/animation.py`; `rc2016/games/rcra/clip_library.py` finds a model's clips and is the
+`nwo/games/rcra/animation.py`; `nwo/games/rcra/clip_library.py` finds a model's clips and is the
 `Game.animation_library` hook.
 
 ### Clip assets
@@ -508,7 +508,7 @@ joints, so the lips move with the jaw ([Blend shapes](#blend-shapes)).
 
 ### Blend shapes
 
-`rc2016/games/rcra/morph.py` reads the face shapes of 19 models (Ratchet has 294) and the shape weights of 2,821
+`nwo/games/rcra/morph.py` reads the face shapes of 19 models (Ratchet has 294) and the shape weights of 2,821
 clips: the face pose clips, cutscene shots and some animset clips. Section names follow ALERT `dat1lib`; the layout
 is in the module docstring.
 
@@ -602,7 +602,7 @@ Grunthor's eye-look weight of 0.5.
 
 ## Textures
 
-`rc2016/games/rcra/texture.py` reads `.texture` assets. It returns the same dicts as the 2016 viewer's texture functions:
+`nwo/games/rcra/texture.py` reads `.texture` assets. It returns the same dicts as the 2016 viewer's texture functions:
 
 - `load_texture`, `load_texture_full` and `read_top_mip` return the loaded top mip.
 - `texture_header` returns the header facts.
@@ -643,7 +643,7 @@ Grunthor's eye-look weight of 0.5.
 
 ### Float and 16-bit textures
 
-`rc2016/games/rcra/unit_texture.py` turns these formats into image values. D3D samples a UNORM16 texel as its integer / 65535 and a float texel as the float itself, with 0 for a missing green or blue and 1 for a missing alpha. An 8-bit UNORM image stores the same values rounded to 1/255, so a texture whose values all lie in 0..1 converts by rounding alone.
+`nwo/games/rcra/unit_texture.py` turns these formats into image values. D3D samples a UNORM16 texel as its integer / 65535 and a float texel as the float itself, with 0 for a missing green or blue and 1 for a missing alpha. An 8-bit UNORM image stores the same values rounded to 1/255, so a texture whose values all lie in 0..1 converts by rounding alone.
 
 - **Converted:** 6 of the 156 listed float and 16-bit textures (three `R16G16` ones: the escape-ship and eye-remap normals and a flowmap; the foam and wetness lookups; the coretest copy of the pink normal), and the unlisted `default_pink_shader_n` placeholder.
 - **Kept out:** the other 150. 140 vertex-animation tables hold non-finite values, because their floats are packed bits. Ten others, including two HDR skies, hold values outside 0..1. No 0..1 image holds them without a remap the files do not define. The error gives the range or the non-finite count.
@@ -652,7 +652,7 @@ Grunthor's eye-look weight of 0.5.
 
 ## Materials and the viewer preview
 
-`rc2016/games/rcra/material.py` reads the texture slots of a `.material`. It also provides the `Game` hooks `material_textures`, `model_texture_list`, `material_rules` and `effect_preview`.
+`nwo/games/rcra/material.py` reads the texture slots of a `.material`. It also provides the `Game` hooks `material_textures`, `model_texture_list`, `material_rules` and `effect_preview`.
 
 ### Layout
 
@@ -780,7 +780,7 @@ The viewer draws a labelled **Rift Apart preview** (`rule_kind 'rift apart previ
 
 ### Architecture glass (`gbl_arch_glass`)
 
-The one decoded graph. 44 materials use it, among them the Nefarious trooper and swarmer domes. Every graph embeds its shaders (about 15 DXBC containers each, SM5 and DXIL, with named reflection), so the rule is traced to the graph's forward pixel shader (SM5 `ps_5_0`, disassembled with `D3DDisassemble`), not to a capture. The viewer draws these materials alpha-over through the forward glass program (`uKind 26`; GLSL comment in `rc2016/viewer/shading.py`), with `rule_kind 'rift apart glass'`.
+The one decoded graph. 44 materials use it, among them the Nefarious trooper and swarmer domes. Every graph embeds its shaders (about 15 DXBC containers each, SM5 and DXIL, with named reflection), so the rule is traced to the graph's forward pixel shader (SM5 `ps_5_0`, disassembled with `D3DDisassemble`), not to a capture. The viewer draws these materials alpha-over through the forward glass program (`uKind 26`; GLSL comment in `nwo/viewer/shading.py`), with `rule_kind 'rift apart glass'`.
 
 **Graph layout** (`graph_layout`). Three sections of the graph, then the material's own values (`material_parameters`):
 
@@ -846,12 +846,12 @@ Every `.materialgraph` carries its compiled programs, and the engine's own passe
 
 | Module | Role |
 | --- | --- |
-| `rc2016/shaders/dxbc.py` | DXBC container: chunks, RDEF reflection (constant buffers with struct members, bindings), signatures, and the SM4/SM5 token stream. DXIL containers are identified only. |
-| `rc2016/shaders/sm5.py` | SM5 program to a typed expression DAG, with a numeric evaluator. |
-| `rc2016/games/rcra/shaders.py` | Pass table, pass programs, the generic material binding and the neutral engine profile. |
-| `rc2016/games/rcra/lighting.py` | The engine's per-class deferred apply programs, found in the exe and translated into one direct-light recipe and one ambient-light recipe per class ([Lighting classes](#lighting-classes), [Ambient light](#ambient-light)). |
-| `rc2016/games/rcra/engine_tables.py` | The BRDF lookup the engine builds from tables in the exe ([Engine lookup tables](#engine-lookup-tables)). |
-| `rc2016/games/rcra/probe.py` | The review probe: the review environment prefiltered by the engine's probe convolution program ([Ambient light](#ambient-light)). |
+| `nwo/shaders/dxbc.py` | DXBC container: chunks, RDEF reflection (constant buffers with struct members, bindings), signatures, and the SM4/SM5 token stream. DXIL containers are identified only. |
+| `nwo/shaders/sm5.py` | SM5 program to a typed expression DAG, with a numeric evaluator. |
+| `nwo/games/rcra/shaders.py` | Pass table, pass programs, the generic material binding and the neutral engine profile. |
+| `nwo/games/rcra/lighting.py` | The engine's per-class deferred apply programs, found in the exe and translated into one direct-light recipe and one ambient-light recipe per class ([Lighting classes](#lighting-classes), [Ambient light](#ambient-light)). |
+| `nwo/games/rcra/engine_tables.py` | The BRDF lookup the engine builds from tables in the exe ([Engine lookup tables](#engine-lookup-tables)). |
+| `nwo/games/rcra/probe.py` | The review probe: the review environment prefiltered by the engine's probe convolution program ([Ambient light](#ambient-light)). |
 
 ### Programs in a graph
 
@@ -1072,7 +1072,7 @@ All six classes translate. Each recipe reads the G-buffer terms, the view, three
 
 ### Forward profile
 
-Blended materials are drawn by their forward program (slot 1), which lights itself. For export, `rc2016/games/rcra/shaders.py` defines one labelled set of engine inputs. Its rule is that every light source is zero, and the renderer lights the material's G-buffer surface instead:
+Blended materials are drawn by their forward program (slot 1), which lights itself. For export, `nwo/games/rcra/shaders.py` defines one labelled set of engine inputs. Its rule is that every light source is zero, and the renderer lights the material's G-buffer surface instead:
 - **Lights:** key light, light grid and lists, shadow atlas, ray-traced shadows, gobos, probes, GI, SSR, AO and the BRDF lookup read 0 (`FORWARD_LIGHTING`).
 - **Draw flags:** only the material's lit bit (`material.draw_flags`).
 - **Draw alpha:** `TEXCOORD.w` is the material alpha as the plain instance draw packs it ([Material alpha](#material-alpha)); `TEXCOORD.z` is 0.
@@ -1191,7 +1191,7 @@ The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain 
 
 ### Vertex programs
 
-208 graphs (583 material uses) replace the engine model vertex program with their own, in pass slots 3, 7, 10, 13 and 17: vertex-animation textures (crowds, prison-cell idles, the Zurkon pub band, swarmer eyes and dials), wind sway, flags, beams and shockwaves, rotating debris, and offsets along the normal. `rc2016/games/rcra/vertex.py` translates them with the SM5 translator and places each mesh's vertices where its material's program puts them at rest.
+208 graphs (583 material uses) replace the engine model vertex program with their own, in pass slots 3, 7, 10, 13 and 17: vertex-animation textures (crowds, prison-cell idles, the Zurkon pub band, swarmer eyes and dials), wind sway, flags, beams and shockwaves, rotating debris, and offsets along the normal. `nwo/games/rcra/vertex.py` translates them with the SM5 translator and places each mesh's vertices where its material's program puts them at rest.
 
 **Vertex pulling.** The programs read the vertex themselves from `SV_VertexID`. The streams are typed views, and each read lands on the vertex's own element of the 16-byte vertex ([Vertex decoding](#vertex-decoding)), which the translation checks for every stream:
 
@@ -1296,13 +1296,13 @@ What is not decoded, and labelled (`fur.FUR_NOTE`, `fur.SHELL_NOTE`, `fur.SHELL_
 
 ## Blender materials
 
-A Blender export (`.blend`, FBX or USD, through `rc2016/export/blender_convert.py`) replaces each imported glTF material with the game's own material. The work splits into three modules:
+A Blender export (`.blend`, FBX or USD, through `nwo/export/blender_convert.py`) replaces each imported glTF material with the game's own material. The work splits into three modules:
 
 | Module | Role |
 | --- | --- |
-| `rc2016/games/rcra/surface.py` | Translates the G-buffer writer (slot 4) and unpacks the engine's packing into surface terms: a recipe. For blended materials it also translates the forward program (slot 1) into colour and alpha. |
-| `rc2016/games/rcra/blender_export.py` | The `Game.blender_materials` hook: recipes and unit textures, written as `rcra_materials.json` beside the export |
-| `rc2016/export/rcra_blender.py` | Runs in Blender: the "RC RA Deferred BRDF" group, and one Math node per recipe operation. A division by a constant 0 (a neutral profile value) is x × Exponent(10000), which is x × inf as in D3D; Blender's Divide alone returns 0. A `lookup` (below) is a one-row float32 image read with Closest. Saturate is Maximum then Minimum, which drop NaN as D3D does |
+| `nwo/games/rcra/surface.py` | Translates the G-buffer writer (slot 4) and unpacks the engine's packing into surface terms: a recipe. For blended materials it also translates the forward program (slot 1) into colour and alpha. |
+| `nwo/games/rcra/blender_export.py` | The `Game.blender_materials` hook: recipes and unit textures, written as `rcra_materials.json` beside the export |
+| `nwo/export/rcra_blender.py` | Runs in Blender: the "RC RA Deferred BRDF" group, and one Math node per recipe operation. A division by a constant 0 (a neutral profile value) is x × Exponent(10000), which is x × inf as in D3D; Blender's Divide alone returns 0. A `lookup` (below) is a one-row float32 image read with Closest. Saturate is Maximum then Minimum, which drop NaN as D3D does |
 
 ### Surface terms
 
@@ -1415,7 +1415,7 @@ A blended material whose alpha makes the plain instance draw skip it ([Material 
 
 Export check: each export builds the `.blend` as a candidate, reopens it in a second Blender (`blender_convert.py --validate`), then moves it into place.
 
-`python -m rc2016.games.rcra.blender_check --game <install> --blender <blender.exe> --output-root <folder> <material> ...` bakes every surface output of the emitted node tree in Cycles. It compares the bake, texel by texel, with the recipe evaluated by the translator on the same textures:
+`python -m nwo.games.rcra.blender_check --game <install> --blender <blender.exe> --output-root <folder> <material> ...` bakes every surface output of the emitted node tree in Cycles. It compares the bake, texel by texel, with the recipe evaluated by the translator on the same textures:
 - **Window:** a UV window small enough that the bake's sub-pixel jitter stays below a 32nd of a texel, so a material can tile its UV up to 8 times. With the old quarter-texel window, a triplanar rock that tiles ×2 differed by 0.11 at sharp texels.
 - **Undefined pixels:** a pixel whose recipe samples a texture at a non-finite coordinate is left out and counted as `undefined`. This happens when a neutral profile value ends up as a divisor, such as a custom object value of 0 dividing a distortion offset in the waterspray material. Neither renderer defines that lookup.
 - **Results:** on one material from each of the ten most-used graphs, F0 and alpha are exact. Albedo agrees within 1.1 × 10⁻⁶ and the normal within 3 × 10⁻⁵, and gloss, occlusion and emission within 8-bit rounding ties. The snow writer, a triplanar rock and a layered robot material agree within 3 × 10⁻⁵ too. Before the sRGB units were stored linear, they differed by up to 0.11, all from filtering between contrasting sRGB texels.
@@ -1423,7 +1423,7 @@ Export check: each export builds the `.blend` as a candidate, reopens it in a se
 
 ### In the viewer
 
-The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra/viewer_materials.py` builds each material's receipt; `rc2016/viewer/rcra_glsl.py` emits its GLSL, one statement per recipe node). The receipt follows the export's choices: the G-buffer surface for opaque materials; the forward program, plus the lit surface for blended ones. The viewer's native translation toggle switches back to the preview.
+The model viewer's Shaded mode draws the translated programs (`nwo/games/rcra/viewer_materials.py` builds each material's receipt; `nwo/viewer/rcra_glsl.py` emits its GLSL, one statement per recipe node). The receipt follows the export's choices: the G-buffer surface for opaque materials; the forward program, plus the lit surface for blended ones. The viewer's native translation toggle switches back to the preview.
 
 | Part | Viewer |
 | --- | --- |
@@ -1437,7 +1437,7 @@ The model viewer's Shaded mode draws the translated programs (`rc2016/games/rcra
 | Caching | The translation (`viewer_materials.translate`: recipes, blend, limitations, bindings, or the reason it fails) is kept across sessions in the source's translation disk cache, keyed by the material and graph bytes and `CODE_SHA256`: a hash of `CODE_FILES`, the modules a translation runs or reads constants from (the translator side of `games/rcra`, `sm5`, `dxbc`, `formats/texture`, `common` and `rcra_glsl`), so editing the model decoder, blend shapes or the browser keeps the cache. The asset readers are left out, since the key holds the bytes they return. `tests/test_translation_cache.py` traces a few translations and checks that every function that runs is keyed, and that every package module the keyed files import is keyed or listed in `NOT_TRANSLATION`. Within one translation the forward albedo and the own specular term share one forward split (`surface.shared_forward_split`), which dominates both: the stadium crowd's eyeball program takes about 10 s to split. Infinite and NaN constants are stored tagged. Atlases are kept per source (least recently used out past 256 MB), since materials share their texture arrays, and 8-bit atlases are built in bytes. |
 | Non-finite constants | Receipts resolve constant NaN by D3D rules (`surface.fold_nan`, as the Blender export does), since GLSL leaves min, max and clamp of NaN undefined. The inf and NaN constants that remain (a division by a zero profile value, a NaN in a select arm) are made at run time from a uniform that is never set, `rcraInf = 1 / uRcraZero` and `rcraNan = uRcraZero / uRcraZero`: GLSL 1.20 has no literal for them, and the compiler cannot fold a uniform. |
 
-**Viewer check.** `python -m rc2016.viewer.rcra_check --game <install> --output-root <folder> <material> ...` is the viewer's counterpart of `blender_check`. It emits a material's receipt with `rcra_glsl`'s own term emitter into a check program that draws the same UV window and inputs on a float target, four terms per pass, and compares each term with the recipe evaluated on the viewer's uploads (the driver's decoded top mip, read back with `glGetTexImage`; the unpadded tiles of an atlas; the D3D lookup of a cube's faces). `over` counts pixels whose difference exceeds 0.01, relative above 1. On 57 materials (one from each top-level folder, twelve forward materials, fur, a cube map, the lit background, a volume, the dome, NaN writers and the god-ray lookup tables), 54 have none and one has three, a threshold the GPU's rounding crosses; the Blender check of the same set has 53 within 0.01, the rest being the laser tube's resampled cube (0.058), the shield below, and the crowd. Otherwise terms agree within 8-bit steps, and a fresnel shield whose colour reaches 8 × 10⁵ under the neutral values agrees within 4 × 10⁻⁴ relative (GPU `exp2` and `log2`). The stadium crowd's two writers are undefined everywhere (their 0/0 frame). Screen derivatives are the quad's in GL and 0 in the reference.
+**Viewer check.** `python -m nwo.viewer.rcra_check --game <install> --output-root <folder> <material> ...` is the viewer's counterpart of `blender_check`. It emits a material's receipt with `rcra_glsl`'s own term emitter into a check program that draws the same UV window and inputs on a float target, four terms per pass, and compares each term with the recipe evaluated on the viewer's uploads (the driver's decoded top mip, read back with `glGetTexImage`; the unpadded tiles of an atlas; the D3D lookup of a cube's faces). `over` counts pixels whose difference exceeds 0.01, relative above 1. On 57 materials (one from each top-level folder, twelve forward materials, fur, a cube map, the lit background, a volume, the dome, NaN writers and the god-ray lookup tables), 54 have none and one has three, a threshold the GPU's rounding crosses; the Blender check of the same set has 53 within 0.01, the rest being the laser tube's resampled cube (0.058), the shield below, and the crowd. Otherwise terms agree within 8-bit steps, and a fresnel shield whose colour reaches 8 × 10⁵ under the neutral values agrees within 4 × 10⁻⁴ relative (GPU `exp2` and `log2`). The stadium crowd's two writers are undefined everywhere (their 0/0 frame). Screen derivatives are the quad's in GL and 0 in the reference.
 
 **Vertex colour.** The engine model vertex program loads a colour, squares it channel by channel and passes the square on as `TEXCOORD4`, so the square is interpolated. Which colour it loads depends on the draw:
 - **Model colour:** when the subset's colour index (`g_ModelSubsetView.m_VertexColorIndex`) is not negative, `g_MainPaintVBView` at that index plus the vertex index: the model's colour section, for a plain instance. With render flag 0x8000 (a kind-10 geometry override), `g_MainColorVBView`, an 8-byte view, at half the index.
@@ -1475,7 +1475,7 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 ## Evidence tool
 
 ```bash
-python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --summary --list model --verify
+python -m nwo.games.rcra.inspect --game <install> --output-root <folder> --summary --list model --verify
 ```
 
 `--verify` decompresses every block of every installed archive once, and checks that every toc row lies inside its archive. `--extract <asset path>` writes an asset's raw bytes, plus a `.stream` file for a streamed texture.

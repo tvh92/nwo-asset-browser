@@ -2,8 +2,8 @@
 import unittest
 from unittest import mock
 
-from rc2016.shaders import bindings
-from rc2016.shaders.ir import DAG
+from nwo.shaders import bindings
+from nwo.shaders.ir import DAG
 
 
 def _lowered(*, albedo_attributes=(0, 1, 3), normal_attributes=()):
@@ -25,9 +25,9 @@ def _lowered(*, albedo_attributes=(0, 1, 3), normal_attributes=()):
 def _bind(stream_channels, *, adapted, albedo_attributes=(0, 1, 3), normal_attributes=()):
     ir, lowered = _lowered(albedo_attributes=albedo_attributes,
                            normal_attributes=(2,) if normal_attributes else ())
-    with mock.patch('rc2016.formats.materials.texture_slot_records', return_value=[]), \
+    with mock.patch('nwo.formats.materials.texture_slot_records', return_value=[]), \
          mock.patch.object(bindings, '_parameter_values', return_value=({}, [])), \
-         mock.patch('rc2016.shaders.engine_inputs.reconstruct_world_position',
+         mock.patch('nwo.shaders.engine_inputs.reconstruct_world_position',
                     side_effect=lambda _ir, roots: (roots, adapted)):
         contract = {'resources': [dict(flag=0, slot_key=1, type_hash=2, path='normal.texture')], 'index': 0}
         return bindings._bind({'_lowered': lowered}, contract, b'', {},
@@ -79,7 +79,7 @@ class PaintOnlyFrontendContractTests(unittest.TestCase):
         paint_contract = getattr(bindings, 'PAINT_STREAM_CONTRACT', None)
         self.assertIsNotNone(paint_contract, 'translator should expose a distinct paint-only preview contract')
         self.assertNotEqual(paint_contract, bindings.WORLD_POSITION_CONTRACT)
-        from rc2016.viewer.experimental_materials import valid_contract
+        from nwo.viewer.experimental_materials import valid_contract
         self.assertTrue(valid_contract(_receipt(paint_contract)))
         self.assertTrue(valid_contract(_receipt(bindings.WORLD_POSITION_CONTRACT)))
         for invalid in (_receipt(paint_contract, automatic_ready=True),
@@ -88,9 +88,9 @@ class PaintOnlyFrontendContractTests(unittest.TestCase):
             self.assertFalse(valid_contract(invalid))
 
     def test_attribute_only_engine_diagnostic_reaches_generic_paint_translation(self):
-        from rc2016.viewer import experimental_materials
+        from nwo.viewer import experimental_materials
         receipt = _receipt(bindings.PAINT_STREAM_CONTRACT)
-        with mock.patch('rc2016.viewer.native_glsl.prepare_material_translation',
+        with mock.patch('nwo.viewer.native_glsl.prepare_material_translation',
                         return_value=dict(status='unsupported', diagnostics=[
                             dict(reason='Unbound engine/interpolant input attribute4.0')])) as native, \
              mock.patch.object(experimental_materials, 'world_position_translation',

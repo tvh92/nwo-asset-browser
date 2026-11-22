@@ -6,8 +6,8 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT
 from tests.test_oneoff_materials import extract, row
 
 GRAPH = 'required/materials/colored_basic_normal_colored_gloss_detail.materialgraph'
@@ -48,7 +48,7 @@ class RuleTests(unittest.TestCase):
 @unittest.skipUnless(RESEARCH, 'RC2016_RESEARCH is not set')
 class ArchiveTests(unittest.TestCase):
     def test_blarg_transport_glass(self):
-        from rc2016.formats.archive import Archive
+        from nwo.formats.archive import Archive
         import tempfile
         with tempfile.TemporaryDirectory() as out:
             archive = Archive(Path(RESEARCH) / 'asset_archive', out, lambda *a, **k: None)

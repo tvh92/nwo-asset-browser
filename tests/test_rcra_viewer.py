@@ -1,5 +1,5 @@
-"""Rift Apart translated materials in the viewer: the GLSL emitter (rc2016.viewer.rcra_glsl), the receipts
-(rc2016.games.rcra.viewer_materials), the forward rule toggle, and (Windows, real install) a draw through the model viewport.
+"""Rift Apart translated materials in the viewer: the GLSL emitter (nwo.viewer.rcra_glsl), the receipts
+(nwo.games.rcra.viewer_materials), the forward rule toggle, and (Windows, real install) a draw through the model viewport.
 
 Real-install tests read RCRA_GAME and skip without it; the viewport test also needs Windows OpenGL and uses a temporary APPDATA.
 """
@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from rc2016.viewer import rcra_glsl
-from rc2016.viewer.viewport import forward_rule, split_forward, TRANSLATED_FORWARD
+from nwo.viewer import rcra_glsl
+from nwo.viewer.viewport import forward_rule, split_forward, TRANSLATED_FORWARD
 
 GAME = os.environ.get('RCRA_GAME')
 DOME = 'characters/enemy/enm_neo_nefarious_trooper/materials/enm_neo_nefarious_trooper_dome.material'
@@ -129,7 +129,7 @@ class EmitterTests(unittest.TestCase):
         self.assertNotIn('uRcraZero', rcra_glsl.fragment_source(_receipt('blended'))['source'])
 
     def test_check_program_writes_each_term_group(self):
-        from rc2016.viewer import rcra_check
+        from nwo.viewer import rcra_check
         source, passes = rcra_check.fragment_source(_receipt('blended'), dict.fromkeys(
             ('VIEW.x', 'VIEW.y', 'VIEW.z', 'CAMERA.x', 'CAMERA.y', 'CAMERA.z'), 0.5))
         self.assertEqual([g for g, _t in passes], ['albedo', 'f0', 'scalars', 'normal', 'clip', 'forward_colour',
@@ -138,12 +138,12 @@ class EmitterTests(unittest.TestCase):
         self.assertNotIn('rcraDiffuse', source)
 
     def test_array_index_clamps_to_the_slices(self):
-        from rc2016.games.rcra import blender_export
+        from nwo.games.rcra import blender_export
         texture = dict(pixels=b'a', slices=[b'a', b'b'])
         self.assertEqual([blender_export.slice_index(texture, k) for k in (-1, 0, 1, 5)], [0, 0, 1, 1])
 
     def test_nan_slice_index_reads_slice_zero(self):
-        from rc2016.games.rcra import blender_export
+        from nwo.games.rcra import blender_export
         self.assertEqual(blender_export._slice_index(float('nan')), 0)
         self.assertEqual(blender_export._slice_index(2.4), 2)
         self.assertEqual(blender_export._slice_index(float('inf')), blender_export.ALL_SLICES)
@@ -199,8 +199,8 @@ class TangentPayloadTests(unittest.TestCase):
 
     def test_tangent_w_reaches_the_attribute(self):
         import numpy as np
-        from rc2016.games.rcra import model as rm
-        from rc2016.viewer.loader import mesh_payload
+        from nwo.games.rcra import model as rm
+        from nwo.viewer.loader import mesh_payload
         from tests.test_rcra_model import build_model
         for arrays in (True, False):
             decoded = rm.decode_model('t', data=build_model(), as_arrays=arrays)
@@ -218,8 +218,8 @@ class VertexColourPayloadTests(unittest.TestCase):
     """The loader passes a Rift Apart model's colour bytes on (loader._vertex_colours); R&C 2016 payloads do not change."""
 
     def test_colour_bytes_follow_the_drawn_meshes(self):
-        from rc2016.games.rcra import model as rm
-        from rc2016.viewer.loader import mesh_payload
+        from nwo.games.rcra import model as rm
+        from nwo.viewer.loader import mesh_payload
         from tests.test_rcra_model import build_model
         for arrays in (True, False):
             decoded = rm.decode_model('t', data=build_model(), as_arrays=arrays)
@@ -248,7 +248,7 @@ class ForwardRuleTests(unittest.TestCase):
 class RealReceiptTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, os.path.join(cls.temp.name, 'out'))
 
@@ -258,8 +258,8 @@ class RealReceiptTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def receipt(self, path):
-        from rc2016.games.rcra.material import _material_key
-        from rc2016.games.rcra.viewer_materials import material_receipt
+        from nwo.games.rcra.material import _material_key
+        from nwo.games.rcra.viewer_materials import material_receipt
         return material_receipt(self.source, _material_key(self.source, path))
 
     def test_dome_is_blended_with_its_lit_surface(self):
@@ -308,8 +308,8 @@ class ViewportDrawTests(unittest.TestCase):
     def test_swarmer_draws_translated_materials(self):
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             import tkinter as tk
-            from rc2016.viewer.loader import SourcePreviewLoader
-            from rc2016.viewer.viewport import ModelViewport
+            from nwo.viewer.loader import SourcePreviewLoader
+            from nwo.viewer.viewport import ModelViewport
             loader = SourcePreviewLoader()
             archive = loader._ensure_archive(GAME)
             key = next(k for k in archive.resolve(SWARMER) if archive.entries[k]['type'] == 'model')
@@ -341,8 +341,8 @@ class ViewportDrawTests(unittest.TestCase):
         camera."""
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             import tkinter as tk
-            from rc2016.viewer.loader import SourcePreviewLoader
-            from rc2016.viewer.viewport import ModelViewport
+            from nwo.viewer.loader import SourcePreviewLoader
+            from nwo.viewer.viewport import ModelViewport
             loader = SourcePreviewLoader()
             archive = loader._ensure_archive(GAME)
             key = next(k for k in archive.resolve(SWARMER) if archive.entries[k]['type'] == 'model')
@@ -379,10 +379,10 @@ class ViewportDrawTests(unittest.TestCase):
         """Link the translated program of material ``path`` in a viewport, then ``check(view, receipt, textures)``."""
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             import tkinter as tk
-            from rc2016.games.rcra.material import _material_key
-            from rc2016.games.rcra.source import RcraSource
-            from rc2016.games.rcra.viewer_materials import material_receipt
-            from rc2016.viewer.viewport import ModelViewport
+            from nwo.games.rcra.material import _material_key
+            from nwo.games.rcra.source import RcraSource
+            from nwo.games.rcra.viewer_materials import material_receipt
+            from nwo.viewer.viewport import ModelViewport
             source = RcraSource(GAME, os.path.join(appdata, 'out'))
             try:
                 receipt, textures = material_receipt(source, _material_key(source, path))
@@ -438,9 +438,9 @@ class ViewportDrawTests(unittest.TestCase):
     def test_scene_reading_material_draws_from_a_frame_copy(self):
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             import tkinter as tk
-            from rc2016.games.rcra.material import _translated
-            from rc2016.viewer.loader import SourcePreviewLoader
-            from rc2016.viewer.viewport import ModelViewport
+            from nwo.games.rcra.material import _translated
+            from nwo.viewer.loader import SourcePreviewLoader
+            from nwo.viewer.viewport import ModelViewport
             loader = SourcePreviewLoader()
             archive = loader._ensure_archive(GAME)
             key = next(k for k in archive.resolve(PANE) if archive.entries[k]['type'] == 'model')
@@ -470,14 +470,14 @@ class ViewportDrawTests(unittest.TestCase):
 
     def test_non_finite_material_links(self):
         def check(_view, receipt, _textures):
-            from rc2016.viewer import rcra_glsl
+            from nwo.viewer import rcra_glsl
             self.assertIn('uRcraZero', rcra_glsl.fragment_source(receipt)['source'])
         self._link('characters/npc/npc_civ_average/animations/vertex_animations/cheer_stadium_suite/materials/'
                    'cheer_stadium_npc_civ_average_01/cheer_stadium_npc_civ_average_01_arm_a.material', check)
 
     def test_forward_technique_eye_links_with_its_albedo(self):
         def check(_view, receipt, _textures):
-            from rc2016.games.rcra import surface as rsurface
+            from nwo.games.rcra import surface as rsurface
             self.assertEqual(receipt['blend'], 'opaque')
             self.assertIn(rsurface.FORWARD_ALBEDO_NOTE, receipt['limitations'])
             self.assertIn(rsurface.FORWARD_SPECULAR_NOTE, receipt['limitations'])
@@ -493,9 +493,9 @@ class ViewportDrawTests(unittest.TestCase):
 
     def test_fur_shell_program_links(self):
         """The fur material's shell receipt (viewer_materials.shell_receipt) links with the shell vertex program."""
-        from rc2016.games.rcra.material import _material_key
-        from rc2016.games.rcra.source import RcraSource
-        from rc2016.games.rcra.viewer_materials import SHELL_BLEND, shell_receipt
+        from nwo.games.rcra.material import _material_key
+        from nwo.games.rcra.source import RcraSource
+        from nwo.games.rcra.viewer_materials import SHELL_BLEND, shell_receipt
         path = 'material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material'
 
         def check(view, _receipt, _textures):
@@ -516,8 +516,8 @@ class ViewportDrawTests(unittest.TestCase):
     def test_viewer_program_matches_its_recipe(self):
         """rcra_check: jn_glass_01_opaque (parallax loop) and the laser tube (cube map) drawn by the viewer's emitted terms
         match the recipes evaluated on the uploaded texels."""
-        from rc2016.games.rcra.source import RcraSource
-        from rc2016.viewer import rcra_check
+        from nwo.games.rcra.source import RcraSource
+        from nwo.viewer import rcra_check
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             source = RcraSource(GAME, os.path.join(appdata, 'out'))
             try:
@@ -542,11 +542,11 @@ class ViewportDrawTests(unittest.TestCase):
     def test_button_reads_its_vertex_colour(self):
         """The pressure button's base material (sav_gp_templegate_start_base_button) takes albedo and emission from
         TEXCOORD4.x; its model carries a colour section. The frame changes when the colour is replaced by the constant 1."""
-        from rc2016.viewer.shading import RCRA_COLOUR_ATTRIBUTE
+        from nwo.viewer.shading import RCRA_COLOUR_ATTRIBUTE
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             import tkinter as tk
-            from rc2016.viewer.loader import SourcePreviewLoader
-            from rc2016.viewer.viewport import ModelViewport
+            from nwo.viewer.loader import SourcePreviewLoader
+            from nwo.viewer.viewport import ModelViewport
             loader = SourcePreviewLoader()
             archive = loader._ensure_archive(GAME)
             key = next(k for k in archive.resolve(BUTTON) if archive.entries[k]['type'] == 'model')
@@ -584,11 +584,11 @@ class ViewportDrawTests(unittest.TestCase):
         uploaded as the tangent attribute, and the frame changes when the tangent is turned a quarter turn about the
         normal."""
         import numpy as np
-        from rc2016.viewer.shading import TANGENT_ATTRIBUTE
+        from nwo.viewer.shading import TANGENT_ATTRIBUTE
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             import tkinter as tk
-            from rc2016.viewer.loader import SourcePreviewLoader
-            from rc2016.viewer.viewport import ModelViewport
+            from nwo.viewer.loader import SourcePreviewLoader
+            from nwo.viewer.viewport import ModelViewport
             loader = SourcePreviewLoader()
             archive = loader._ensure_archive(GAME)
             key = next(k for k in archive.resolve(SWARMER) if archive.entries[k]['type'] == 'model')
@@ -617,7 +617,7 @@ class ViewportDrawTests(unittest.TestCase):
                 decoded = _frame(view)
                 self.assertIsNone(view.shading_error)
                 self.assertIn((TANGENT_ATTRIBUTE, 4), pointers)
-                from rc2016.viewer.viewport import prepare_viewport
+                from nwo.viewer.viewport import prepare_viewport
                 turned = tangents.copy()
                 turned[:, :3] = np.cross(np.asarray(payload['normals'], np.float64), tangents[:, :3])
                 variant = {k: v for k, v in payload.items() if k != '_prepared_viewport'}

@@ -7,11 +7,11 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.formats.links import EXACT, rule_coverage
-from rc2016.formats.materials import final_shader_status, viewer_graph_rule
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.formats.links import EXACT, rule_coverage
+from nwo.formats.materials import final_shader_status, viewer_graph_rule
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 from tests.test_viewer_textures import FakeArchive, dat1, flags
 
 GRAPH = ('materialgraph/character/hero/hero_bright_center_light_glow/'
@@ -35,8 +35,8 @@ def extract(material_rows, flag_word=0x200039):
     mat = dat1([GRAPH], lambda at: [(tp.MATERIAL_FLAGS_SECTION, flags(flag_word))])
     archive = FakeArchive({'m/glow.material': ('material', mat), GRAPH: ('materialgraph', dat1([], lambda at: []))})
     params = dict(parameters=[], unsupported_parameters=material_rows)
-    with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+    with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
+          patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
         return archive, tp.material_texture_paths(archive, 'm/glow.material')
 
 
@@ -123,8 +123,8 @@ class BrightGlowRuleTests(unittest.TestCase):
     def test_viewer_graph_rule_and_shader_status(self):
         archive, _ = extract([row(k, v) for k, v in QWARK.items()])
         rows = dict(parameters=[], unsupported_parameters=[row(k, v) for k, v in QWARK.items()])
-        with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=rows)):
+        with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=rows)):
             rule = viewer_graph_rule(archive, 'm/glow.material', set())
         self.assertTrue(rule['applies'])
         self.assertEqual((rule['ported'], rule['unported']), (['bright_glow'], []))
@@ -159,7 +159,7 @@ class BrightGlowValidationTests(unittest.TestCase):
 
     def test_blender_front_end_builds_the_nodes_the_validator_requires(self):
         import pathlib
-        text = (pathlib.Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (pathlib.Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_bright_glow')[1].split('def apply_viewer_graph_rule')[0]
         names = validation._viewer_required(self.rule(), False)[0]
         for name in names:

@@ -9,7 +9,7 @@ import random
 import unittest
 from pathlib import Path
 
-from rc2016.viewer import textures as tp
+from nwo.viewer import textures as tp
 
 GAS_GRAPH = 'materialgraph/environment/gaspar/rock/gas_rock_sediment_01/gas_rock_sediment_01.materialgraph'
 GBL_GRAPH = 'materialgraph/environment/global/rock/gbl_rock_ds_sediment_01/gbl_rock_ds_sediment_01.materialgraph'
@@ -31,15 +31,15 @@ class SedimentRuleTests(unittest.TestCase):
             self.assertEqual(tp._graph_rule([graph], {graph: '0' * 64}), {})
 
     def test_exact_rules_replace_the_grey_g_family_entries(self):
-        from rc2016.formats.links import EXACT, rule_coverage
-        from rc2016.viewer.grey_g_graphs import GREY_G_GRAPHS
+        from nwo.formats.links import EXACT, rule_coverage
+        from nwo.viewer.grey_g_graphs import GREY_G_GRAPHS
         self.assertNotIn(GAS_GRAPH, GREY_G_GRAPHS)
         self.assertNotIn(GBL_GRAPH, GREY_G_GRAPHS)
         self.assertEqual(rule_coverage([GAS_GRAPH])[0], EXACT)
         self.assertEqual(rule_coverage([GBL_GRAPH])[0], EXACT)
 
     def test_term_is_registered_for_the_blender_front_end(self):
-        from rc2016.formats import materials
+        from nwo.formats import materials
         self.assertIn('sediment_blend', materials.VIEWER_RULE_EXTRAS)
         self.assertIn('sediment_blend', materials.VIEWER_RULE_BUILT)
         self.assertIn('sediment_blend', materials.VIEWER_LINEAR_Z_TERMS)
@@ -166,8 +166,8 @@ class SedimentArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders.translator import compile_graph
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders.translator import compile_graph
         cls.archive = open_archive(root)
         cls.programs = {}
         for graph, code in ((GAS_GRAPH, GAS_CODE), (GBL_GRAPH, GBL_CODE)):
@@ -181,7 +181,7 @@ class SedimentArchiveTests(unittest.TestCase):
 
     def test_graph_hashes(self):
         import hashlib
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         self.assertEqual(hashlib.sha256(bytes(asset_bytes(self.archive, GAS_GRAPH))).hexdigest(), tp.GAS_SEDIMENT_GRAPH_SHA256)
         self.assertEqual(hashlib.sha256(bytes(asset_bytes(self.archive, GBL_GRAPH))).hexdigest(), tp.GBL_SEDIMENT_GRAPH_SHA256)
 
@@ -208,8 +208,8 @@ class SedimentArchiveTests(unittest.TestCase):
         self.assertTrue(gbl['_sed_sediment'].endswith('gas_rock_cave_wall_sediment.texture'))
 
     def _compare(self, graph, cb2, kernel, paint):
-        from rc2016.shaders.ir import DAG
-        from rc2016.shaders.translator import lower_deferred
+        from nwo.shaders.ir import DAG
+        from nwo.shaders.translator import lower_deferred
         program = self.programs[graph]
         lowered = lower_deferred(program['ir'])
         ir = DAG(lowered['nodes'])

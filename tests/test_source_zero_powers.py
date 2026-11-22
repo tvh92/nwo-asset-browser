@@ -1,9 +1,9 @@
 """Source singularities and boundaries of the finite portable power guard."""
 import math
 import unittest
-from rc2016.shaders.ir import DAG
-from rc2016.shaders.bindings import guard_source_zero_powers
-from rc2016.viewer.native_glsl import evaluate_surface,emit_surface
+from nwo.shaders.ir import DAG
+from nwo.shaders.bindings import guard_source_zero_powers
+from nwo.viewer.native_glsl import evaluate_surface,emit_surface
 
 
 class SourceZeroPowerTests(unittest.TestCase):

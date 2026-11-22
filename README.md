@@ -1,6 +1,6 @@
-# R&C 2016 Asset Browser
+# NWO Asset Browser
 
-A Windows desktop tool for browsing, viewing and exporting the assets of **Ratchet & Clank (PS4, 2016)** straight from the game's own archive. It also reads **Ratchet & Clank: Rift Apart** (the PS5 game, from its PC release) for models, textures, animation and model export; see [Rift Apart](#rift-apart).
+A Windows desktop tool for browsing, viewing, rendering and exporting game assets, made by New Wiki Order (NWO) for wiki renders. It reads **Ratchet & Clank (PS4, 2016)** straight from the game's own archive, and **Ratchet & Clank: Rift Apart** (the PS5 game, from its PC release) for models, textures, animation and model export; see [Rift Apart](#rift-apart).
 
 The features below are for R&C 2016, which is now in maintenance only; active development is on Rift Apart.
 
@@ -35,7 +35,7 @@ py -m pip install pillow numpy lz4
 ## Getting the code
 
 ```bash
-git clone https://github.com/tvh92/rc2016-asset-browser.git C:/rc2016-asset-browser
+git clone https://github.com/tvh92/nwo-asset-browser.git C:/nwo-asset-browser
 ```
 
 Clone into a short path. Some file names are 64-character hashes, so a deep folder can exceed Windows' 260-character path limit.
@@ -45,7 +45,7 @@ Clone into a short path. Some file names are 64-character hashes, so a deep fold
 From the repository folder:
 
 ```bash
-py -m rc2016
+py -m nwo
 ```
 
 1. Set **Source** to the extracted R&C 2016 game folder or the Rift Apart install, and **Output** to an empty folder for exports and the asset index. The folder decides the game, and each game remembers its own Source and Output.
@@ -58,32 +58,32 @@ Viewer controls: left-drag orbits, right-drag pans, the mouse wheel zooms, and d
 Other entry points:
 
 ```bash
-py -m rc2016.levels.viewer
+py -m nwo.levels.viewer
 ```
 
 ```bash
-py -m rc2016.flash.planet_maps "<extracted game folder>" "<output folder>"
+py -m nwo.flash.planet_maps "<extracted game folder>" "<output folder>"
 ```
 
 ```bash
-py rc2016/pipeline/run.py --help
+py nwo/pipeline/run.py --help
 ```
 
-Use `pyw` instead of `py` to launch the windows without a console. Settings are saved in `%APPDATA%\RC2016 Asset Browser`.
+Use `pyw` instead of `py` to launch the windows without a console. Settings are saved in `%APPDATA%\NWO Asset Browser`.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
-| `rc2016/app/` | Main window, browser UI, scan and export batch runners |
-| `rc2016/viewer/` | 3D viewport, GLSL shading, textures and material rules, animation playback |
-| `rc2016/levels/` | Level viewer and the `.level`/`.zone` decoders |
-| `rc2016/flash/` | Flash UI renderer and planet-map export |
-| `rc2016/export/` | glTF/GLB/OBJ export and Blender conversion |
-| `rc2016/formats/` | Decoders for the archive, asset index, models, skeletons, textures, materials and animation |
-| `rc2016/games/` | Game detection and per-game support, including the Rift Apart reader (`rcra/`) |
-| `rc2016/shaders/` | Materialgraph shader analysis (GCN decoding, translation, shader families) |
-| `rc2016/pipeline/` | Research Blender pipeline, the game's deferred BRDF for Blender, scene defaults, per-weapon assemblies |
+| `nwo/app/` | Main window, browser UI, scan and export batch runners |
+| `nwo/viewer/` | 3D viewport, GLSL shading, textures and material rules, animation playback |
+| `nwo/levels/` | Level viewer and the `.level`/`.zone` decoders |
+| `nwo/flash/` | Flash UI renderer and planet-map export |
+| `nwo/export/` | glTF/GLB/OBJ export and Blender conversion |
+| `nwo/formats/` | Decoders for the archive, asset index, models, skeletons, textures, materials and animation |
+| `nwo/games/` | Game detection and per-game support, including the Rift Apart reader (`rcra/`) |
+| `nwo/shaders/` | Materialgraph shader analysis (GCN decoding, translation, shader families) |
+| `nwo/pipeline/` | Research Blender pipeline, the game's deferred BRDF for Blender, scene defaults, per-weapon assemblies |
 | `assets/` | Shared review lighting (settings and HDRI) and the captured game-view tables |
 | `docs/` | Reference documentation |
 | `tests/` | Unit tests |
@@ -117,7 +117,7 @@ This project is licensed under the GNU General Public License v3.0; see [`LICENS
 
 ## Third-party code and assets
 
-- `third_party/ALERT/` (the `dat1lib` package only): [ALERT](https://github.com/Tkachov/ALERT) by Tkachov, GPL-3.0. See its `LICENSE.txt`. Used to read weapon config files for the research pipeline's V1/V5 weapon assemblies, and by `rc2016/research/` for section-reader cross-checks and CRC hashing.
+- `third_party/ALERT/` (the `dat1lib` package only): [ALERT](https://github.com/Tkachov/ALERT) by Tkachov, GPL-3.0. See its `LICENSE.txt`. Used to read weapon config files for the research pipeline's V1/V5 weapon assemblies, and by `nwo/research/` for section-reader cross-checks and CRC hashing.
 - Rift Apart layouts follow ALERT's `dat1lib` and [RCRA-Forge](https://github.com/ROStudios25/RCRA-Forge) (GPL-3.0), as credited in [docs/rift-apart.md](docs/rift-apart.md); no RCRA-Forge code is included.
 - `third_party/opengnm/gcn_types.h`: opengnm, MIT. See its `LICENSE`. Provides the GCN opcode tables for the shader decoder.
 - `assets/lighting/golden_gate_hills_1k.exr`: a downscaled copy of *Golden Gate Hills* from [Poly Haven](https://polyhaven.com/a/golden_gate_hills), CC0.

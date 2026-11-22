@@ -1,8 +1,8 @@
-# R&C 2016 Asset Browser — agent guide
+# NWO Asset Browser — agent guide
 
-A Windows desktop tool that reads Ratchet & Clank game files directly: an asset browser with an interactive 3D model, level and Flash UI viewer, plus exporters (glTF/GLB/OBJ, FBX/USD/.blend through Blender, and a validated research Blender pipeline). The code is the Python package `rc2016/`.
+A Windows desktop tool, made for New Wiki Order (NWO) wiki renders, that reads game files directly (Ratchet & Clank games now; more games later): an asset browser with an interactive 3D model, level and Flash UI viewer, plus exporters (glTF/GLB/OBJ, FBX/USD/.blend through Blender, and a validated research Blender pipeline). The code is the Python package `nwo/`.
 
-It reads two games. The folder picked as the source decides which one (`rc2016/games/`, [docs](docs/rift-apart.md#how-the-browser-picks-the-game)):
+It reads two games. The folder picked as the source decides which one (`nwo/games/`, [docs](docs/rift-apart.md#how-the-browser-picks-the-game)):
 
 - **Ratchet & Clank: Rift Apart (active):** the PS5 game, read from its Steam PC install (`toc`, `dag`, `d/`). Models, textures, skeletal animation and model export. The viewer and Blender exports draw the game's own translated material programs ([docs](docs/rift-apart.md#in-the-viewer)), with a labelled preview where a program does not translate; everything else is greyed out ([docs](docs/rift-apart.md)).
 - **Ratchet & Clank (PS4, 2016) (maintained, no active work):** the extracted `CUSA01073` archive. It has every feature, including levels, Flash UI, animation and the research pipeline. The local archive is deleted, so its game-file tests cannot run (see Testing). Do not start new 2016 decode, capture or shader work unless asked.
@@ -13,16 +13,16 @@ It reads two games. The folder picked as the source decides which one (`rc2016/g
 
 | Path | Contents |
 | --- | --- |
-| `rc2016/app/` | Entry point, main window, batch runners, theme and settings, browser UI, background workers, saved-result catalog |
-| `rc2016/viewer/` | OpenGL viewport, GLSL shading, textures and per-graph material rules, animation playback, model loader |
-| `rc2016/levels/` | `.level`/`.zone` decoders and the level viewer |
-| `rc2016/research/` | Read-only corpus structural hypotheses and [research reports](docs/research.md) |
-| `rc2016/flash/` | Scaleform GFX renderer, Flash UI tab, planet-map export |
-| `rc2016/export/` | Portable model export and the Blender conversion script |
-| `rc2016/formats/` | Archive, index, model, skeleton, texture, material and animation decoders |
-| `rc2016/games/` | The game seam: folder detection, per-game capabilities and hooks, the R&C 2016 adapter, and the Rift Apart PC reader (`rcra/`, [docs](docs/rift-apart.md)) |
-| `rc2016/shaders/` | Materialgraph shader analysis: GCN decoder, translation, families, Blender node emission and validation; the DXBC reader and SM5 translator for Rift Apart programs (`dxbc.py`, `sm5.py`) |
-| `rc2016/pipeline/` | Research Blender pipeline (`run.py` CLI, `builder.py` in Blender), deferred BRDF (`game_shader.py`), scene defaults, lighting, profiles, weapon profile data (`weapons/`) |
+| `nwo/app/` | Entry point, main window, batch runners, theme and settings, browser UI, background workers, saved-result catalog |
+| `nwo/viewer/` | OpenGL viewport, GLSL shading, textures and per-graph material rules, animation playback, model loader |
+| `nwo/levels/` | `.level`/`.zone` decoders and the level viewer |
+| `nwo/research/` | Read-only corpus structural hypotheses and [research reports](docs/research.md) |
+| `nwo/flash/` | Scaleform GFX renderer, Flash UI tab, planet-map export |
+| `nwo/export/` | Portable model export and the Blender conversion script |
+| `nwo/formats/` | Archive, index, model, skeleton, texture, material and animation decoders |
+| `nwo/games/` | The game seam: folder detection, per-game capabilities and hooks, the R&C 2016 adapter, and the Rift Apart PC reader (`rcra/`, [docs](docs/rift-apart.md)) |
+| `nwo/shaders/` | Materialgraph shader analysis: GCN decoder, translation, families, Blender node emission and validation; the DXBC reader and SM5 translator for Rift Apart programs (`dxbc.py`, `sm5.py`) |
+| `nwo/pipeline/` | Research Blender pipeline (`run.py` CLI, `builder.py` in Blender), deferred BRDF (`game_shader.py`), scene defaults, lighting, profiles, weapon profile data (`weapons/`) |
 | `assets/` | Shared review lighting (JSON + CC0 HDRI) and the captured game-view tables |
 | `third_party/` | ALERT `dat1lib` (GPL-3.0, weapon config links) and opengnm `gcn_types.h` (MIT) |
 
@@ -32,7 +32,7 @@ Before changing a subsystem, read the section of its doc that covers the code yo
 
 - Diagnose a failure from its log before retrying; prefer targeted inspection and deterministic checks over long trial loops, and reuse validated mappings and scripts.
 - Never add game data to the repository: no extracted assets, `.model`/`.texture`/`.material` files, DDS or PNG exports, renders, `.blend` outputs, reports or logs. It holds code, small configuration/profile data, docs and the CC0 HDRI.
-- Nothing writes into the tracked repository or the source folders. Runtime output goes to the user's output root, caches to `.cache/` (ignored), settings to `%APPDATA%/RC2016 Asset Browser/`. Scripts, smoke tests and manual runs must pass an explicit `--output-root` (or `APPDATA`), never the default: a folder under `Research/<category>/<YYYY-MM-DD>_<topic>/` (categories in [Research/research.md](Research/research.md)); Rift Apart research goes under `Research/rift-apart/<category>/<YYYY-MM-DD>_<topic>/`. The session scratchpad is too long a path for `run.py`.
+- Nothing writes into the tracked repository or the source folders. Runtime output goes to the user's output root, caches to `.cache/` (ignored), settings to `%APPDATA%/NWO Asset Browser/`. Scripts, smoke tests and manual runs must pass an explicit `--output-root` (or `APPDATA`), never the default: a folder under `Research/<category>/<YYYY-MM-DD>_<topic>/` (categories in [Research/research.md](Research/research.md)); Rift Apart research goes under `Research/rift-apart/<category>/<YYYY-MM-DD>_<topic>/`. The session scratchpad is too long a path for `run.py`.
 - Paths such as `Research/.../`, `decodes/...` or `*_DECODE.md` in code comments and evidence strings cite notes in the local `Research/` folder. They are provenance, not files in git; do not link them from tracked docs.
 - Never present an inferred shader or lighting value as decoded game data. Keep unknown parameters, runtime tints, time-driven terms and VFX as visible limitations.
 - Many tracked files are CRLF. Keep each file's line endings (check and write with Python, never `sed`); `git diff --stat` must show only the lines you meant to change. Count `b'\r\n'` against lone `b'\n'` in bytes (`grep -c` is unreliable here), open files for writing with `newline=''` or in binary mode, and write patch scripts with the Write tool rather than Bash heredocs (backslashes get mangled).
@@ -44,10 +44,10 @@ Equations, slot meanings and graph families are in [shading](docs/shading.md); t
 
 - Texture colourspace follows the native DXGI format, not the filename; normals are always Non-Color; alpha is linear data.
 - `_c` alpha is a self-lit mask, never transparency. `_n` is a DirectX tangent normal at strength 1.0 without a green flip.
-- Opaque surfaces use the game's deferred BRDF (`rc2016/pipeline/game_shader.py`, the viewer's `rc2016/viewer/shading.py`) with metallic 0. Never tune shading by eye: every term must trace to decoded data or be labelled as a preview.
-- Blend and cull come from the `.material` flags word (`rc2016/pipeline/render_state.py`). Glass, energy and VFX forward materials only have the specific decoded rules in the docs.
-- Rift Apart materials come from their own translated programs ([docs](docs/rift-apart.md#material-graph-shaders)), never from per-material hand decoding; engine inputs a material does not own are bound in one labelled profile (`rc2016/games/rcra/shaders.py`). Never apply 2016 material rules, graph translations, slot meanings or the 2016 BRDF to Rift Apart.
-- New viewer material rules must be mirrored in the Blender front-end (`materials.viewer_graph_rule`, `game_shader.apply_viewer_graph_rule`) and checked by `rc2016/shaders/validation.py`.
+- Opaque surfaces use the game's deferred BRDF (`nwo/pipeline/game_shader.py`, the viewer's `nwo/viewer/shading.py`) with metallic 0. Never tune shading by eye: every term must trace to decoded data or be labelled as a preview.
+- Blend and cull come from the `.material` flags word (`nwo/pipeline/render_state.py`). Glass, energy and VFX forward materials only have the specific decoded rules in the docs.
+- Rift Apart materials come from their own translated programs ([docs](docs/rift-apart.md#material-graph-shaders)), never from per-material hand decoding; engine inputs a material does not own are bound in one labelled profile (`nwo/games/rcra/shaders.py`). Never apply 2016 material rules, graph translations, slot meanings or the 2016 BRDF to Rift Apart.
+- New viewer material rules must be mirrored in the Blender front-end (`materials.viewer_graph_rule`, `game_shader.apply_viewer_graph_rule`) and checked by `nwo/shaders/validation.py`.
 
 ## Pipeline
 
@@ -68,18 +68,18 @@ Run from the repository root (`python -m pip install ruff` once). Scale the chec
 
 ```bash
 python -m unittest discover -s tests -t .
-python -m ruff check rc2016 tests
+python -m ruff check nwo tests
 ```
 
 - Headless GUI smoke tests (Tkinter, background workers) run under a timeout, must not set the `'source'` setting (it starts a scan that can stall the run), and use a temporary `APPDATA`.
 - Tests that need game files read `RC2016_RESEARCH` (the R&C 2016 archive folder, `CUSA01073`) or `RCRA_GAME` (the Rift Apart install folder) and skip without them; tests that need saved evidence read `Research/` and skip when it is absent.
 - **The R&C 2016 archive is deleted.** Do not look for it or ask for it. When a change needs a real-archive 2016 check (the one-asset check, the scan, the pipeline build), append one line (date | commits | command | why) to `Research/rc2016-pending-tests.txt` and commit without that check. Read that file only to append. The `source` setting may still point at the old path.
-- Changes to the archive, index or model-listing code also need a scan (`python rc2016/pipeline/run.py --extracted-root <game> --output-root <folder> --blender <blender.exe> --list-models-json <file>`). Changes to the Rift Apart reader need `python -m rc2016.games.rcra.inspect --game <install> --output-root <folder> --summary --verify`.
+- Changes to the archive, index or model-listing code also need a scan (`python nwo/pipeline/run.py --extracted-root <game> --output-root <folder> --blender <blender.exe> --list-models-json <file>`). Changes to the Rift Apart reader need `python -m nwo.games.rcra.inspect --game <install> --output-root <folder> --summary --verify`.
 - Changes to shared code reached through the game seam (`viewer/loader.py`, `export/models.py`, `app/window.py`) need the tests for both games (`tests/test_games.py` and the `test_rcra_*` modules). Blender-side modules (`builder.py`, `game_shader.py`, weapon merges) only import inside Blender.
 
 ## Git and GitHub
 
-- Remote: `https://github.com/tvh92/rc2016-asset-browser` (private), branch `main`. The user leaves git management to agents. No force-pushes or history rewrites.
+- Remote: `https://github.com/tvh92/nwo-asset-browser` (private), branch `main`. The user leaves git management to agents. No force-pushes or history rewrites.
 - Check `git status` at the start of a task. Several sessions can share this checkout, so staged and modified files are often not yours: commit only your own paths (`git commit -o <paths>`, or a temporary `GIT_INDEX_FILE` when a file mixes your hunks with another session's), never a plain `git commit -a`. After a change passes its tests, commit it as a focused commit with a clear message and push.
 - `.gitattributes` stores files byte for byte (`* -text`); keep it, because `run.py` hashes its own sources.
 - Keep docs in step with behaviour: reference style, no dated change logs, no personal paths or machine-specific locations.

@@ -7,10 +7,10 @@ from unittest.mock import Mock
 
 import numpy as np
 
-from rc2016.levels import scene, viewport
-from rc2016.levels.zone_format import name_crc32, path_crc64
+from nwo.levels import scene, viewport
+from nwo.levels.zone_format import name_crc32, path_crc64
 from tests.test_level_material_overrides import record, zone
-from rc2016.viewer.shading import INSTANCE_ATTRIBUTES
+from nwo.viewer.shading import INSTANCE_ATTRIBUTES
 
 
 def _key(x, y, z):

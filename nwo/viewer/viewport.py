@@ -1,0 +1,2850 @@
+"""Small Tk-hosted Windows WGL mesh preview; no external graphics packages."""
+from __future__ import annotations
+
+import ctypes
+import math
+import os
+try:
+    import tkinter as tk
+except ImportError:  # Blender's bundled Python may omit Tk; keep pure math importable.
+    tk = None
+from ctypes import wintypes
+
+from nwo.app.theme import gl_color, listen, track
+
+_TkFrame = tk.Frame if tk is not None else object
+
+
+class MeshPayloadError(ValueError):
+    pass
+
+
+# Viewer rig space -> Blender world (Z up) when the rig is fixed to the world: rig x (right) stays
+# +X, rig y (up) is +Z and rig z (towards the viewer) is -Y, as seen from a camera looking along +Y.
+RIG_TO_WORLD = ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0))
+
+# texture_preview entry roles uploaded as 2D GL textures, deduplicated by texture path. Other textures
+# in an entry (tint palette, screen timeline, puddle and RockBlend sources) are only sampled on the CPU.
+GL_TEXTURE_ROLES = ("_water_height_a", "_water_height_b", "_water_foam_a", "_water_foam_b", "_c", "_g", "_n", "_pick", "_h", "_sequence", "_tint_detail", "_bng_detail", "_vehicle_p2",
+                    "_glow_parallax", "_puddle_atlas", "_parallax_height", "_cma", "_reticle",
+                    "_window_mask", "_window_n1", "_window_n2", "_window_c", "_window_g")
+
+
+# GL_TEXTURE_ROLES sampled as ordinary surface textures by UV. Palettes and sequences (_pick,
+# _vehicle_p2, _sequence) are lookup tables, and the puddle atlas is sampled through fract(), so those
+# keep their top mip only.
+MIPMAP_ROLES = frozenset(("_water_height_a", "_water_height_b", "_water_foam_a", "_water_foam_b", "_c", "_g", "_n", "_h", "_tint_detail", "_bng_detail", "_glow_parallax",
+                          "_parallax_height", "_cma", "_window_mask", "_window_n1", "_window_n2", "_window_c", "_window_g"))
+
+
+def _mat3_mul(a, b):
+    return tuple(tuple(sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)) for i in range(3))
+
+
+def light_frames(modelview, object_to_world=None, rig_fixed_to_world=False):
+    """(view -> Blender world, rig -> view) as row-major 3x3 tuples.
+
+    ``modelview`` is GL's column-major modelview matrix (object -> view); ``object_to_world`` maps
+    object space to Blender world space (None: the object space is Blender's Z-up world, as the
+    model viewer's presentation-basis vertices). Uniform scale in the modelview is removed."""
+    rotation = [[modelview[j * 4 + i] for j in range(3)] for i in range(3)]   # object -> view, rows
+    scale = math.sqrt(sum(x * x for x in rotation[0])) or 1.0
+    view_to_object = tuple(tuple(rotation[j][i] / scale for j in range(3)) for i in range(3))   # transpose / s
+    view_to_world = _mat3_mul(object_to_world, view_to_object) if object_to_world else view_to_object
+    if not rig_fixed_to_world:
+        return view_to_world, ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    world_to_view = tuple(tuple(view_to_world[j][i] for j in range(3)) for i in range(3))
+    return view_to_world, _mat3_mul(world_to_view, RIG_TO_WORLD)
+
+
+def column_major3(matrix):
+    """Row-major 3x3 -> the 9 floats glUniformMatrix3fv reads without transposing."""
+    return [matrix[i][j] for j in range(3) for i in range(3)]
+
+
+def parallax_preview_parameters_valid(params):
+    """Explicit preview policy for parameters whose native execution is undefined/uncontrolled."""
+    values = [float(params.get(k, d)) for k, d in
+              (('height_scale', 0.), ('steps_front', 16.), ('steps_grazing', 64.), ('fade', 1.))]
+    return all(math.isfinite(v) for v in values) and all(0. < v < 2147483647. for v in values[1:3])
+
+
+def _triples(values, label, *, allow_flat=False):
+    """Normalize a sequence/array into finite 3-tuples without a NumPy dependency."""
+    try:
+        rows = values.tolist() if hasattr(values, "tolist") else values
+        if allow_flat and rows and not isinstance(rows[0], (list, tuple)):
+            if len(rows) % 3:
+                raise MeshPayloadError(f"{label} must contain triples")
+            rows = [rows[i:i + 3] for i in range(0, len(rows), 3)]
+        result = tuple(tuple(float(x) for x in row) for row in rows)
+    except MeshPayloadError:
+        raise
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise MeshPayloadError(f"{label} must be an array of 3D triples") from exc
+    if any(len(row) != 3 for row in result):
+        raise MeshPayloadError(f"{label} must contain 3D triples")
+    if any(not math.isfinite(x) for row in result for x in row):
+        raise MeshPayloadError(f"{label} contains non-finite coordinates")
+    return result
+
+
+def validate_mesh(payload):
+    """Return immutable vertices, triangle indices, and normalized vertex normals."""
+    if not isinstance(payload, dict):
+        raise MeshPayloadError("Preview unavailable: expected a mesh payload")
+    try:
+        vertices = _triples(payload["vertices"], "vertices", allow_flat=True)
+        raw_triangles = payload["triangles"]
+    except KeyError as exc:
+        raise MeshPayloadError(f"Preview unavailable: missing {exc.args[0]}") from exc
+    except TypeError as exc:
+        raise MeshPayloadError("Preview unavailable: expected a mesh payload") from exc
+    if not vertices:
+        raise MeshPayloadError("Preview unavailable: mesh has no vertices")
+    try:
+        triangles = raw_triangles.tolist() if hasattr(raw_triangles, "tolist") else raw_triangles
+        converted = []
+        for tri in triangles:
+            row = []
+            for index in tri:
+                value = int(index)
+                if value != index:
+                    raise ValueError("non-integral index")
+                row.append(value)
+            converted.append(tuple(row))
+        triangles = tuple(converted)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise MeshPayloadError(f"triangles must contain integer index triples: {exc}") from exc
+    if not triangles or any(len(tri) != 3 for tri in triangles):
+        raise MeshPayloadError("Preview unavailable: mesh has no triangle faces")
+    if any(i < 0 or i >= len(vertices) for tri in triangles for i in tri):
+        raise MeshPayloadError("triangle index is outside the vertex array")
+    supplied = payload.get("normals")
+    if supplied is not None:
+        normals = _triples(supplied, "normals", allow_flat=True)
+        if len(normals) != len(vertices):
+            raise MeshPayloadError("normals must match the vertex count")
+        normalized = []
+        for normal in normals:
+            length = math.sqrt(sum(v * v for v in normal))
+            normalized.append(tuple(v / length for v in normal) if length > 1e-20 else (0.0, 0.0, 1.0))
+        normals = tuple(normalized)
+    else:
+        accum = [[0.0, 0.0, 0.0] for _ in vertices]
+        for a, b, c in triangles:
+            va, vb, vc = vertices[a], vertices[b], vertices[c]
+            ab = tuple(vb[k] - va[k] for k in range(3))
+            ac = tuple(vc[k] - va[k] for k in range(3))
+            n = (ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0])
+            for index in (a, b, c):
+                for axis in range(3):
+                    accum[index][axis] += n[axis]
+        normals = tuple(
+            tuple(value / math.sqrt(sum(x * x for x in normal)) for value in normal)
+            if sum(x * x for x in normal) > 1e-40 else (0.0, 0.0, 1.0)
+            for normal in accum
+        )
+    return vertices, triangles, normals
+
+
+def mesh_bounds(vertices):
+    """Return ((center xyz), bounding radius), including a safe radius for points."""
+    if not vertices:
+        raise MeshPayloadError("Preview unavailable: mesh has no vertices")
+    low = tuple(min(v[i] for v in vertices) for i in range(3))
+    high = tuple(max(v[i] for v in vertices) for i in range(3))
+    center = tuple((low[i] + high[i]) * 0.5 for i in range(3))
+    radius = max(math.sqrt(sum((v[i] - center[i]) ** 2 for i in range(3))) for v in vertices)
+    return center, max(radius, 1e-5)
+
+
+def camera_fit(vertices, aspect=1.0, zoom=1.0, fov_degrees=45.0, bounds=None):
+    """Camera values that contain the full bounds and valid perspective clip planes."""
+    if not math.isfinite(aspect) or aspect <= 0:
+        raise ValueError("aspect must be positive and finite")
+    if not math.isfinite(zoom) or zoom <= 0:
+        raise ValueError("zoom must be positive and finite")
+    if not 1.0 < fov_degrees < 179.0:
+        raise ValueError("field of view must be between 1 and 179 degrees")
+    center, radius = bounds or mesh_bounds(vertices)
+    half_angle = math.radians(fov_degrees) * 0.5
+    limiting_angle = min(half_angle, math.atan(math.tan(half_angle) * aspect))
+    distance = radius * 1.1 / math.sin(limiting_angle) / zoom
+    near = max(radius * 0.01, distance - radius * 1.5)
+    far = max(near * 2.0, distance + radius * 1.5)
+    half_height = near * math.tan(half_angle)
+    half_width = half_height * aspect
+    return {"center": center, "radius": radius, "distance": distance,
+            "near": near, "far": far, "left": -half_width, "right": half_width,
+            "bottom": -half_height, "top": half_height}
+
+
+def perspective_matrix(camera):
+    """Return a row-major OpenGL perspective matrix for camera_fit output."""
+    left, right = camera["left"], camera["right"]
+    bottom, top = camera["bottom"], camera["top"]
+    near, far = camera["near"], camera["far"]
+    if right <= left or top <= bottom or near <= 0 or far <= near:
+        raise ValueError("invalid perspective frustum")
+    return (
+        (2 * near / (right - left), 0.0, (right + left) / (right - left), 0.0),
+        (0.0, 2 * near / (top - bottom), (top + bottom) / (top - bottom), 0.0),
+        (0.0, 0.0, -(far + near) / (far - near), -(2 * far * near) / (far - near)),
+        (0.0, 0.0, -1.0, 0.0),
+    )
+
+
+
+TRANSLATED_FORWARD = 'rcra_translated'   # nwo.games.rcra.material.TRANSLATED_KIND
+
+
+def forward_rule(entry, native=True):
+    """A material's forward rule as drawn: a translated Rift Apart forward rule (TRANSLATED_FORWARD) stands only while the
+    native translation is on, otherwise its decoded fallback rule (or none) does."""
+    rule = entry.get("forward") or {}
+    if rule.get('kind') == TRANSLATED_FORWARD and not native:
+        return rule.get('fallback') or {}
+    return rule
+
+
+def split_forward(batches, textures, native=True):
+    """(opaque, forward) batch lists; forward batches have a texture_preview 'forward' entry (glass)."""
+    opaque, forward = [], []
+    for batch in batches:
+        entry = (textures or {}).get(batch[0]) or {}
+        rule = forward_rule(entry, native)
+        (forward if rule and not rule.get('deferred_material') else opaque).append(batch)
+    return opaque, forward
+
+
+def self_lit_entry(entry, native_translation=True):
+    """True when a material emits light of its own (nwo.viewer.bloom.self_lit, shared with the Blender front-end)."""
+    from nwo.viewer.bloom import self_lit
+    return self_lit(entry.get('k'), bool(entry.get('bright_center')), (entry.get('forward') or {}).get('kind') == 'bright_glow',
+                    entry.get('native_translation') if native_translation else None)
+
+
+def batch_centres(vertices, triangles, batches):
+    """{(first, count): centroid} of each batch's triangle vertices (rest pose)."""
+    centres = {}
+    if hasattr(vertices, "shape") and hasattr(triangles, "shape"):   # NumPy arrays from prepare_viewport
+        for _slot, first, count in batches:
+            points = vertices[triangles[first:first + count].reshape(-1)]
+            if len(points):
+                centres[(first, count)] = tuple(float(x) for x in points.sum(axis=0) / len(points))
+        return centres
+    for _slot, first, count in batches:
+        points = [vertices[i] for tri in triangles[first:first + count] for i in tri]
+        if points:
+            centres[(first, count)] = tuple(sum(p[k] for p in points) / len(points) for k in range(3))
+    return centres
+
+
+def back_to_front(batches, centres, modelview):
+    """Batches sorted farthest first by view-space depth; ``modelview`` is GL's column-major 4x4."""
+    m = modelview
+    def depth(batch):
+        x, y, z = centres.get((batch[1], batch[2]), (0.0, 0.0, 0.0))
+        return m[2] * x + m[6] * y + m[10] * z + m[14]   # view z: more negative is farther
+    return sorted(batches, key=depth)
+
+
+def forward_order(batches, centres, modelview, is_opaque):
+    """Forward draw order: opaque batches first (they write depth, so drawn later they would paint over a blended
+    batch whose centre is nearer), then the blended ones farthest first. ``is_opaque`` maps a batch's material slot to a bool."""
+    return sorted(back_to_front(batches, centres, modelview), key=lambda batch: not is_opaque(batch[0]))
+
+
+def _prepare_viewport_numpy(payload, np):
+    """prepare_viewport with NumPy arrays: the same checks and GL arrays as validate_mesh,
+    ~20x faster on large meshes. None means "use the reference path" (which also raises
+    validate_mesh's exact error for an invalid payload)."""
+    try:
+        vertices = np.asarray(payload["vertices"], dtype=np.float64)
+        triangles = np.asarray(payload["triangles"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if vertices.ndim == 1 and vertices.size and vertices.size % 3 == 0:
+        vertices = vertices.reshape(-1, 3)
+    if (vertices.ndim != 2 or vertices.shape[1] != 3 or not len(vertices) or not np.isfinite(vertices).all()
+            or triangles.ndim != 2 or triangles.shape[1] != 3 or not len(triangles)):
+        return None
+    if triangles.dtype.kind == "f":
+        if not np.isfinite(triangles).all() or (triangles != np.round(triangles)).any():
+            return None
+    elif triangles.dtype.kind not in "iu":
+        return None
+    triangles = triangles.astype(np.int64)
+    if triangles.min() < 0 or triangles.max() >= len(vertices):
+        return None
+    supplied = payload.get("normals")
+    if supplied is not None:
+        try:
+            normals = np.asarray(supplied, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if normals.ndim == 1 and normals.size % 3 == 0:
+            normals = normals.reshape(-1, 3)
+        if normals.shape != vertices.shape or not np.isfinite(normals).all():
+            return None
+        length = np.sqrt(normals[:, 0] ** 2 + normals[:, 1] ** 2 + normals[:, 2] ** 2)
+        keep = length > 1e-20
+        normals = np.where(keep[:, None], normals / np.where(keep, length, 1.0)[:, None], (0.0, 0.0, 1.0))
+    else:
+        a, b, c = (vertices[triangles[:, k]] for k in range(3))
+        face = np.cross(b - a, c - a)
+        accum = np.zeros_like(vertices)
+        for k in range(3):
+            np.add.at(accum, triangles[:, k], face)
+        square = accum[:, 0] ** 2 + accum[:, 1] ** 2 + accum[:, 2] ** 2
+        keep = square > 1e-40
+        normals = np.where(keep[:, None], accum / np.sqrt(np.where(keep, square, 1.0))[:, None], (0.0, 0.0, 1.0))
+    floats = lambda values: (ctypes.c_float * values.size).from_buffer_copy(np.ascontiguousarray(values, dtype=np.float32))
+    uvs = payload.get("uvs")   # lists or arrays (loader._mesh_payload_arrays): tested with len, not for truth
+    uv_array = floats(np.asarray(uvs, dtype=np.float64)) if uvs is not None and len(uvs) == len(vertices) else None
+    joints, weights = payload.get("skin_joints"), payload.get("skin_weights")
+    joints, weights = (np.asarray(values if values is not None else (), dtype=np.float64).ravel() for values in (joints, weights))
+    skinned = len(joints) == len(weights) == 8 * len(vertices) and bool(weights.any())
+    raw_values = payload.get("raw_vectors")
+    raw_array = None
+    if payload.get("static_vector_eligible") and raw_values is not None:
+        try:
+            raw_values = np.asarray(raw_values, dtype=np.float64).reshape(-1, 3)
+            if raw_values.shape == vertices.shape and np.isfinite(raw_values).all():
+                raw_array = floats(raw_values)
+        except (TypeError, ValueError):
+            raw_array = None
+    tangent_values = payload.get("tangents")
+    tangent_array = None
+    if tangent_values is not None:
+        # xyz tangent and w the stored bitangent sign (native_model tangent_signs).
+        tangent_values = np.asarray(tangent_values, dtype=np.float64).reshape(-1, 4)
+        if len(tangent_values) == len(vertices) and np.isfinite(tangent_values).all():
+            tangent_array = floats(tangent_values)
+    arrays = (floats(vertices), floats(normals),
+              (ctypes.c_uint * triangles.size).from_buffer_copy(np.ascontiguousarray(triangles, dtype=np.uint32)),
+              uv_array,
+              floats(joints) if skinned else None,
+              floats(weights) if skinned else None,
+              raw_array, tangent_array)
+    low, high = vertices.min(axis=0), vertices.max(axis=0)
+    center = (low + high) * 0.5
+    offset = vertices - center
+    radius = float(np.sqrt(offset[:, 0] ** 2 + offset[:, 1] ** 2 + offset[:, 2] ** 2).max())
+    bounds = (tuple(float(x) for x in center), max(radius, 1e-5))
+    return (vertices, triangles, normals), arrays, bounds
+
+
+def prepare_viewport(payload):
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    if np is not None and isinstance(payload, dict):
+        prepared = _prepare_viewport_numpy(payload, np)
+        if prepared is not None:
+            return prepared
+    mesh=validate_mesh(payload)
+    vertices,triangles,normals=mesh
+    flat_vertices=[x for row in vertices for x in row]
+    flat_normals=[x for row in normals for x in row]
+    flat_indices=[i for tri in triangles for i in tri]
+    uvs=payload.get("uvs")
+    flat_uvs=[float(x) for row in uvs for x in row] if uvs is not None and len(uvs)==len(vertices) else []
+    joints,weights=[[float(x) for x in payload.get(key)] if payload.get(key) is not None else []
+                    for key in ("skin_joints","skin_weights")]
+    skinned=len(joints)==len(weights)==8*len(vertices) and any(weights)
+    raw_array = None
+    raw_values = payload.get("raw_vectors")
+    if payload.get("static_vector_eligible") and raw_values is not None:
+        raw_rows = _triples(raw_values, "raw_vectors", allow_flat=True)
+        if len(raw_rows) == len(vertices):
+            raw_flat = [x for row in raw_rows for x in row]
+            raw_array = (ctypes.c_float*len(raw_flat))(*raw_flat)
+    arrays=((ctypes.c_float*len(flat_vertices))(*flat_vertices),
+            (ctypes.c_float*len(flat_normals))(*flat_normals),
+            (ctypes.c_uint*len(flat_indices))(*flat_indices),
+            (ctypes.c_float*len(flat_uvs))(*flat_uvs) if flat_uvs else None,
+            (ctypes.c_float*len(joints))(*joints) if skinned else None,
+            (ctypes.c_float*len(weights))(*weights) if skinned else None,
+            raw_array)
+    return mesh,arrays,mesh_bounds(vertices)
+
+class _PIXELFORMATDESCRIPTOR(ctypes.Structure):
+    _fields_ = [("nSize", wintypes.WORD), ("nVersion", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD), ("iPixelType", ctypes.c_ubyte),
+                ("cColorBits", ctypes.c_ubyte), ("cRedBits", ctypes.c_ubyte),
+                ("cRedShift", ctypes.c_ubyte), ("cGreenBits", ctypes.c_ubyte),
+                ("cGreenShift", ctypes.c_ubyte), ("cBlueBits", ctypes.c_ubyte),
+                ("cBlueShift", ctypes.c_ubyte), ("cAlphaBits", ctypes.c_ubyte),
+                ("cAlphaShift", ctypes.c_ubyte), ("cAccumBits", ctypes.c_ubyte),
+                ("cAccumRedBits", ctypes.c_ubyte), ("cAccumGreenBits", ctypes.c_ubyte),
+                ("cAccumBlueBits", ctypes.c_ubyte), ("cAccumAlphaBits", ctypes.c_ubyte),
+                ("cDepthBits", ctypes.c_ubyte), ("cStencilBits", ctypes.c_ubyte),
+                ("cAuxBuffers", ctypes.c_ubyte), ("iLayerType", ctypes.c_ubyte),
+                ("bReserved", ctypes.c_ubyte), ("dwLayerMask", wintypes.DWORD),
+                ("dwVisibleMask", wintypes.DWORD), ("dwDamageMask", wintypes.DWORD)]
+
+
+class ModelViewport(_TkFrame):
+    """Interactive fixed-pipeline preview for decoded source triangles."""
+    LIGHTINGS = ("Viewer rig", "Shared HDRI")   # nwo.viewer.environment.LIGHTINGS
+    ENVIRONMENT_LIGHTINGS = ("Shared HDRI",)    # the lightings that draw from lighting maps (SH, bands, sun)
+    # "Game (captured)": the game's exposure and tone curve (nwo.levels.display) without a level colour grade; the level
+    # viewer adds its atmosphere's grade and keeps it to the Level atmosphere lighting (GAME_TONEMAP_NEEDS_ENVIRONMENT).
+    TONEMAPS = ("ACES fit", "Khronos PBR Neutral", "Game (captured)")
+    GAME_TONEMAP_NEEDS_ENVIRONMENT = False
+    # Object space -> Blender world (None: identity); the level viewer's objects are native Y-up.
+    OBJECT_TO_WORLD = None
+    RIG_FIXED_TO_WORLD = False   # the model viewer's rig turns with the camera
+    GL_COLOR_BUFFER_BIT = 0x00004000
+    GL_DEPTH_BUFFER_BIT = 0x00000100
+    GL_DEPTH_TEST = 0x0B71
+    GL_LIGHTING = 0x0B50
+    GL_LIGHT0 = 0x4000
+    GL_NORMALIZE = 0x0BA1
+    GL_COLOR_MATERIAL = 0x0B57
+    GL_FRONT_AND_BACK = 0x0408
+    GL_AMBIENT_AND_DIFFUSE = 0x1602
+    GL_PROJECTION = 0x1701
+    GL_MODELVIEW = 0x1700
+    GL_FLOAT = 0x1406
+    GL_TRIANGLES = 0x0004
+    GL_UNSIGNED_INT = 0x1405
+    GL_VERTEX_ARRAY = 0x8074
+    GL_NORMAL_ARRAY = 0x8075
+    GL_POSITION = 0x1203
+    GL_AMBIENT = 0x1200
+    GL_DIFFUSE = 0x1201
+    GL_LINE = 0x1B01
+    GL_FILL = 0x1B02
+    GL_POLYGON_OFFSET_FILL = 0x8037
+    GL_TEXTURE_2D = 0x0DE1
+    GL_TEXTURE_COORD_ARRAY = 0x8078
+    GL_TEXTURE_MIN_FILTER = 0x2801
+    GL_TEXTURE_MAG_FILTER = 0x2800
+    GL_TEXTURE_WRAP_S = 0x2802
+    GL_TEXTURE_WRAP_T = 0x2803
+    GL_LINEAR = 0x2601
+    GL_REPEAT = 0x2901
+    GL_UNSIGNED_BYTE = 0x1401
+    GL_UNPACK_ALIGNMENT = 0x0CF5
+    MODES = ("Shaded", "Textured", "Solid", "Wireframe", "Solid + wireframe")
+    GL_TEXTURE0 = 0x84C0
+
+    def __init__(self, parent, **kwargs):
+        if tk is None:
+            raise RuntimeError("Tkinter is unavailable in this Python runtime")
+        # No Tk background: Tk would otherwise erase the OpenGL frame on every repaint.
+        kwargs.setdefault("background", "")
+        super().__init__(parent, **kwargs)
+        self._payload = None
+        self._redraw_pending = False
+        self._mode = "Shaded"
+        self.native_translation = True
+        self.lighting_enabled = True
+        self.experimental_materials = False
+        self.animate_effects = False   # True while the browser plays a clip; the rest pose and offscreen renders keep the rules' static time
+        self._effects_job = None
+        self._effect_origin = None
+        self._effect_held = None       # clock value kept while a clip is paused; None at the rest pose
+        self.native_program_switches = 0
+        self._gl_textures = None   # material slot -> {role: (GL id, sRGB)} + 'k', built lazily
+        self._compressed_upload = None
+        self._shading = None       # gl_shading.Shading once the context exists
+        self.shading_error = None
+        self._shading_draw_failed = False   # shading_error came from one mesh's draw, not from the context
+        self.shading_warning = None
+        self._bones = None         # current frame: ctypes float array, joints x 16 (row-major)
+        self._bone_count = 0
+        self._bones_dirty = False
+        self._bone_texture = None  # GL texture holding self._bones
+        self._mesh = None
+        self._error = "Select a model with decoded mesh geometry to preview it."
+        self._context_error = None
+        self._hdc = self._hrc = None
+        self._gl = None
+        self._arrays = None
+        self._vbos = {}            # id(ctypes array) -> (GL buffer, array) for the current mesh
+        self._vbo_owner = None     # the self._arrays tuple those buffers belong to
+        self._stale = set()        # id(ctypes array) whose contents changed since their buffer was filled
+        self._morphs = None        # payload blend shapes: [(vertex indices, position deltas, normal deltas)]
+        self._morphed = False      # the vertex and normal arrays hold a blend of shapes, not the rest mesh
+        self._morph_weights = None  # the blend-shape weights set_morph last set
+        self._motion = None        # vertex-program motion: (vertex indices, positions, normals) replacing the rest ones
+        self._buffer_ext = None    # GL buffer entry points, False when unavailable
+        self._camera = None
+        self._bounds = None
+        self._yaw, self._pitch, self._zoom = 0.0, -65.0, 1.0
+        self._pan = [0.0, 0.0]
+        self._drag = None
+        self.lighting, self.tonemap = self.LIGHTINGS[0], self.TONEMAPS[self.GAME_TONEMAP]   # the captured game display by default
+        self.lighting_note = None   # why the shared HDRI is not shown yet, if it is not
+        self._environment = None   # lighting maps of `_environment_lighting` once read (False: unavailable)
+        self._environment_lighting = None
+        self._environment_texture = None
+        self._environment_texture_stale = False
+        self._environment_loading = False
+        self._label = tk.Label(self, text=self._error, justify="center", anchor="center", wraplength=440)
+        track(self._label, background="viewport", foreground="fg")
+        listen(self._schedule_draw)   # the clear colour follows the theme
+        self._label.place(relx=0.5, rely=0.5, anchor="center", relwidth=1.0, relheight=1.0)
+        self.bind("<Configure>", self._on_configure)
+        self.bind("<Expose>", lambda _e: self._schedule_draw())
+        self.bind("<Map>", lambda _e: self._schedule_draw())
+        self.bind("<Destroy>", self._on_destroy, add="+")
+        self.bind("<ButtonPress-1>", self._begin_orbit)
+        self.bind("<B1-Motion>", self._orbit)
+        self.bind("<ButtonPress-3>", self._begin_pan)
+        self.bind("<B3-Motion>", self._pan_drag)
+        # Windows sends the wheel to the focused widget, not the one under the
+        # pointer, so listen application-wide and zoom when hovering this view.
+        self.bind_all("<MouseWheel>", self._wheel_anywhere, add="+")
+        self.bind("<Button-4>", lambda _e: self._zoom_by(1.12))
+        self.bind("<Button-5>", lambda _e: self._zoom_by(1 / 1.12))
+        self.bind("<Double-Button-1>", self._reset_camera)
+
+    def set_mesh(self, payload):
+        """Install a decoded mesh mapping: vertices, triangles, and optional normals."""
+        self._release_textures()
+        self._payload = payload
+        self._morphs, self._morphed = (payload.get('morphs') or {}).get('targets'), False
+        self._morph_weights = self._motion = None
+        if self._shading_draw_failed:   # a failed draw belongs to the previous model; the next one tries the shaded path again
+            self._shading_draw_failed, self.shading_error = False, None
+        alpha = payload.get('rock_alpha')   # a list or an array (loader._mesh_payload_arrays)
+        self._rock_alpha = None
+        if alpha is not None and len(alpha) == len(payload.get('vertices', [])):
+            import numpy as np
+            self._rock_alpha = (ctypes.c_float * len(alpha)).from_buffer_copy(np.ascontiguousarray(alpha, dtype=np.float32))
+        self._uv1 = None   # the second UV pair (window glass rule), (u, v) per vertex
+        uv1 = payload.get('uv1s')
+        if uv1 is not None and len(uv1) == len(payload.get('vertices', [])):
+            import numpy as np
+            self._uv1 = (ctypes.c_float * (2 * len(uv1))).from_buffer_copy(np.ascontiguousarray(uv1, dtype=np.float32))
+        self._rcra_colour = None   # Rift Apart vertex colour bytes, RGBA per vertex (loader._vertex_colours)
+        colours = payload.get('vertex_colours')
+        if colours is not None and len(colours) == len(payload.get('vertices', [])):
+            import numpy as np
+            self._rcra_colour = (ctypes.c_ubyte * (4 * len(colours))).from_buffer_copy(np.ascontiguousarray(colours, dtype=np.uint8))
+        self._bones, self._bone_count = None, 0
+        try:
+            prepared=payload.get("_prepared_viewport")
+            if prepared:
+                self._mesh,self._arrays,self._bounds=prepared
+            else:
+                self._mesh = validate_mesh(payload)
+                self._arrays=None
+                self._bounds=mesh_bounds(self._mesh[0])
+            self._error = None
+            self._reset_camera()
+            self._show_error(self._context_error)
+            self._draw()
+            return True
+        except (MeshPayloadError, TypeError, ValueError) as exc:
+            self._mesh, self._arrays = None, None
+            self._error = str(exc)
+            self._show_error(self._error)
+            self._draw()
+            return False
+
+    MATERIAL_KEYS = ('textures', 'texture_list', 'effect_preview', 'materials')
+
+    def set_materials(self, materials):
+        """The materials of the mesh shown (loader.load_materials, after a load with ``materials_pending``): its textures,
+        texture list, effect preview and material rows replace the neutral preview, keeping the camera, pose and clip."""
+        if self._payload is None:
+            return
+        self._release_textures()
+        self._payload = dict(self._payload, materials_pending=False,
+                             **{key: materials[key] for key in self.MATERIAL_KEYS if key in materials})
+        if hasattr(self, '_draw_list'): self._draw_list = None
+        if hasattr(self, '_material_ops'): self._material_ops.clear()
+        self.__dict__.pop('_program_memo', None)
+        self._draw()
+
+    @property
+    def can_animate(self):
+        """Skinned playback needs the GLSL path."""
+        return self._shading is not None and not self.shading_error
+
+    def set_pose(self, matrices):
+        """Skin matrices for the current frame: (joints, 4, 4) row-major, preview basis."""
+        flat = matrices.reshape(-1)
+        if self._bones is None or len(self._bones) != len(flat):
+            self._bones = (ctypes.c_float * len(flat))()
+        ctypes.memmove(self._bones, flat.ctypes.data, flat.nbytes)
+        self._bone_count = len(flat) // 16
+        self._bones_dirty = True
+        self._draw()
+
+    def clear_pose(self):
+        """Back to the bind/rest pose."""
+        self._bones, self._bone_count = None, 0
+        self.set_morph(None)
+        self._draw()
+
+    @property
+    def shape_count(self):
+        """Blend shapes of the shown mesh (payload ``morphs``), 0 without."""
+        return len(self._morphs or ())
+
+    def set_morph(self, weights):
+        """Blend-shape weights for the next frame, one per payload shape (None or all zero: the rest mesh). The rest
+        vertices and normals plus the weighted deltas (normals renormalised) replace the mesh arrays, whose GPU buffers
+        are refilled on the next draw. Does not draw; ``set_pose`` does."""
+        if not self._morphs or self._mesh is None or self._arrays is None:
+            return
+        self._morph_weights = weights
+        self._refresh_vertices()
+
+    def set_vertex_motion(self, frame):
+        """Vertices a material's vertex program moves over time (the payload's ``vertex_motion`` at some shader time):
+        (vertex indices, positions, normals) that replace the rest ones before blend shapes are added, or None for the
+        rest mesh. Draws."""
+        if self._mesh is None or self._arrays is None or (frame is None and self._motion is None):
+            return
+        self._motion = frame
+        self._refresh_vertices()
+        self._draw()
+
+    def _refresh_vertices(self):
+        """The mesh arrays from the rest mesh, the vertex motion and the blend-shape weights."""
+        import numpy as np
+        weights, targets = self._morph_weights, self._morphs or ()
+        active = [] if weights is None else [(float(w), t) for w, t in zip(weights, targets) if w and len(t[0])]
+        if not active and self._motion is None and not self._morphed:
+            return
+        vertices, normals = np.array(self._mesh[0], dtype=np.float64), np.array(self._mesh[2], dtype=np.float64)
+        if self._motion is not None:
+            index, positions, motion_normals = self._motion
+            vertices[index], normals[index] = positions, motion_normals
+        for weight, (index, positions, normal_deltas) in active:
+            np.add.at(vertices, index, weight * positions)
+            np.add.at(normals, index, weight * normal_deltas)
+        if active:
+            length = np.linalg.norm(normals, axis=1, keepdims=True)
+            normals = np.where(length > 1e-12, normals / np.maximum(length, 1e-12), self._mesh[2])
+        for array, values in ((self._arrays[0], vertices), (self._arrays[1], normals)):
+            np.frombuffer(array, dtype=np.float32)[:] = values.astype(np.float32).ravel()
+            self._stale.add(id(array))
+        self._morphed = bool(active) or self._motion is not None
+
+    def set_lighting(self, lighting=None, tonemap=None):
+        """Choose the lighting (LIGHTINGS) and tonemap (TONEMAPS). The shared HDRI's lighting maps are
+        read on a worker thread the first time; until then the view keeps the viewer rig."""
+        if lighting is not None:
+            if lighting not in self.LIGHTINGS:
+                raise ValueError(f"unknown lighting {lighting!r}")
+            self.lighting = lighting
+        if tonemap is not None:
+            if tonemap not in self.TONEMAPS:
+                raise ValueError(f"unknown tonemap {tonemap!r}")
+            self.tonemap = tonemap
+        wanted = self.lighting if self.lighting in self.ENVIRONMENT_LIGHTINGS else None
+        if wanted and self._environment_lighting != wanted and not self._environment_loading:
+            if self._environment is not None:   # maps of another lighting: drop them and their GL texture
+                self._environment, self._environment_texture_stale = None, self._environment_texture is not None
+            self._environment_lighting = None
+        if wanted and self._environment is None and not self._environment_loading:
+            self._environment_loading = True
+            self.lighting_note = f"Reading {wanted}…"
+            import threading
+            result = {}
+            loader = self._environment_loader(wanted)
+
+            def work():
+                try:
+                    result["maps"] = loader()
+                except Exception as exc:   # missing NumPy, an unreadable HDRI or probe: say so, keep the rig
+                    result["error"] = f"{wanted} unavailable: {type(exc).__name__}: {exc}"
+
+            def poll():
+                if "maps" not in result and "error" not in result:
+                    self.after(100, poll)
+                    return
+                self._environment_loading = False
+                self._environment = result.get("maps") or False
+                self._environment_lighting = wanted
+                self.lighting_note = result.get("error") or (self._environment_note(wanted, result["maps"]))
+                self._schedule_draw()
+                if self.on_lighting_changed:
+                    self.on_lighting_changed()
+                if self.lighting in self.ENVIRONMENT_LIGHTINGS and self.lighting != wanted:
+                    self.set_lighting()   # the selection moved on while this one was loading
+            threading.Thread(target=work, daemon=True).start()
+            self.after(100, poll)
+        elif not wanted:
+            self.lighting_note = None
+        self._schedule_draw()
+        if self.on_lighting_changed:
+            self.on_lighting_changed()
+
+    on_lighting_changed = None   # called after the lighting or its HDRI maps change
+
+    def _environment_loader(self, lighting):
+        """Callable (run on a worker thread) returning the lighting maps of an ENVIRONMENT_LIGHTINGS entry."""
+        from nwo.viewer.environment import environment_maps
+        return environment_maps
+
+    def _environment_note(self, lighting, maps):
+        """Status text shown with the lighting once its maps are ready, or None."""
+        return None
+
+    def set_lighting_enabled(self, enabled):
+        """Gate lighting and scene effects without discarding their chosen settings."""
+        self.lighting_enabled = bool(enabled)
+        self._frame_lighting = None
+        if hasattr(self, '_material_ops'): self._material_ops.clear()
+        self.__dict__.pop('_program_memo', None)
+        self._schedule_draw()
+
+    def _upload_environment(self):
+        """GL texture of the prefiltered bands (RGB16F, world strength applied), or None."""
+        if self._environment_texture_stale:
+            if self._environment_texture is not None:
+                gl_name = ctypes.c_uint(self._environment_texture)
+                self._gl.glDeleteTextures(1, ctypes.byref(gl_name))
+            self._environment_texture, self._environment_texture_stale = None, False
+        if self._environment_texture is None and self._environment:
+            import numpy as np
+            gl = self._gl
+            bands = np.ascontiguousarray(self._environment["bands"] * self._environment["strength"], np.float32)
+            name = ctypes.c_uint(0)
+            gl.glGenTextures(1, ctypes.byref(name))
+            gl.glBindTexture(self.GL_TEXTURE_2D, name.value)
+            gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
+            gl.glTexImage2D(self.GL_TEXTURE_2D, 0, 0x881B, bands.shape[1], bands.shape[0], 0, 0x1907, self.GL_FLOAT,
+                            bands.ctypes.data_as(ctypes.c_void_p))   # GL_RGB16F from GL_RGB float
+            for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                     (self.GL_TEXTURE_WRAP_S, self.GL_REPEAT), (self.GL_TEXTURE_WRAP_T, 0x812F)):   # CLAMP_TO_EDGE
+                gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
+            gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+            self._environment_texture = name.value
+        return self._environment_texture
+
+    _frame_lighting = None   # _lighting_state() of the current frame; reset when the camera is set
+
+    def _lighting_state(self):
+        """Lighting and tonemap values for the current frame, read once (one modelview readback and
+        the ctypes conversions) and reused by every program the frame uses."""
+        state = self._frame_lighting
+        if state is None:
+            from nwo.viewer.shading import ENVIRONMENT_TEXTURE_UNIT, GRADE_TEXTURE_UNIT
+            gl = self._gl
+            hdri = (self.lighting in self.ENVIRONMENT_LIGHTINGS and self._environment_lighting == self.lighting
+                    and bool(self._environment) and bool(self._upload_environment()))
+            modelview = (ctypes.c_float * 16)()
+            gl.glGetFloatv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+            gl.glGetFloatv(self.GL_MODELVIEW_MATRIX, modelview)
+            view_to_world, rig = light_frames(list(modelview), self.OBJECT_TO_WORLD, self.RIG_FIXED_TO_WORLD)
+            tonemap = self.TONEMAPS.index(self.tonemap)
+            wanted = tonemap == self.GAME_TONEMAP and (hdri or not self.GAME_TONEMAP_NEEDS_ENVIRONMENT)
+            grade_texture = self._display_texture_name() if wanted else 0
+            if tonemap == self.GAME_TONEMAP and not grade_texture:
+                tonemap = 0   # the level viewer keeps the captured display transform to the Level atmosphere lighting
+            state = dict(hdri=hdri, tonemap=tonemap, grade_unit=GRADE_TEXTURE_UNIT, grade_texture=grade_texture,
+                         exposure=2.0 ** self._environment["exposure"] if hdri else 1.0,
+                         view_to_world=(ctypes.c_float * 9)(*column_major3(view_to_world)),
+                         rig=(ctypes.c_float * 9)(*column_major3(rig)), unit=ENVIRONMENT_TEXTURE_UNIT,
+                         texture=self._environment_texture if hdri else 0)
+            state['fog'] = self._fog_values()
+            if hdri:
+                strength = self._environment["strength"]
+                coefficients = [float(x) * strength for x in self._environment["sh"].reshape(-1)]
+                state.update(sh=(ctypes.c_float * 27)(*coefficients),
+                             sun_direction=tuple(float(x) for x in self._environment["sun_direction"]),
+                             sun_colour=tuple(float(x) * strength for x in self._environment["sun"]))
+            self._frame_lighting = state
+        return state
+
+    GAME_TONEMAP = 2   # tonemap index of the captured game display (uTonemap 2)
+
+    def _display_table_key(self):
+        """Hashable identity of the captured display table (nwo.levels.display.display_table) in use, or None."""
+        return 'identity grade'
+
+    def _display_table_build(self):
+        """The float32 (rows, columns, 3) display table for ``_display_table_key``: a model has no level, so no grade."""
+        from nwo.levels.display import display_table, identity_grade
+        return display_table(identity_grade())
+
+    def _display_texture_name(self):
+        """GL texture (RGB16F) of the captured display table, or 0 when there is none; rebuilt when its key changes."""
+        key = self._display_table_key()
+        cached = self.__dict__.get('_display_texture')
+        gl = self._gl
+        if cached is not None and cached[0] != key:
+            gl.glDeleteTextures(1, ctypes.byref(ctypes.c_uint(cached[1])))
+            cached = self._display_texture = None
+        if key is None:
+            return 0
+        if cached is None:
+            import numpy as np
+            table = np.ascontiguousarray(self._display_table_build(), np.float32)
+            name = ctypes.c_uint(0)
+            gl.glGenTextures(1, ctypes.byref(name))
+            gl.glBindTexture(self.GL_TEXTURE_2D, name.value)
+            gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
+            gl.glTexImage2D(self.GL_TEXTURE_2D, 0, 0x881B, table.shape[1], table.shape[0], 0, 0x1907, self.GL_FLOAT,
+                            table.ctypes.data_as(ctypes.c_void_p))
+            for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                     (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F)):
+                gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
+            gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+            cached = self._display_texture = (key, name.value)
+        return cached[1]
+
+    def _fog_values(self):
+        """nwo.levels.fog.uniform_values of the height fog: none in the model viewer (the level viewer overrides this)."""
+        return 0, (0.0, 0.0, 0.0), (0.0,) * 4, (0.0,) * 4, (0.0,) * 4, (0.0,) * 4, (0.0, 0.0, 1.0, 0.0)
+
+    def _apply_lighting(self, u):
+        """Lighting and tonemap uniforms for the program in use (every opaque and glass program)."""
+        gl, sh = self._gl, self._shading
+        if getattr(self, 'scene_effects_active', lambda: False)():
+            for name in ('uSceneEnabled','uSceneAOEnabled','uSceneShadowEnabled','uSceneGeometry','uSceneLightCount'):
+                sh.glUniform1i(u.get(name,-1),0)
+            sh.glUniform1i(u.get('uSceneAO',-1),16);sh.glUniform1i(u.get('uSceneShadow',-1),17)
+        state = self._lighting_state()
+        sh.glUniform1i(u['uLightingEnabled'], int(getattr(self,'lighting_enabled',True)))
+        sh.glUniform1i(u["uLighting"], 1 if state["hdri"] else 0)
+        sh.glUniform1i(u["uTonemap"], self.LINEAR_TONEMAP if getattr(self, '_linear_output', False) else state["tonemap"])
+        sh.glUniform1f(u["uExposure"], state["exposure"])
+        on, colour, ramp_a, ramp_b, alpha, beta, misc = state["fog"]
+        sh.glUniform1i(u["uFogOn"], on)
+        sh.glUniform3f(u["uFogColour"], *colour)
+        for name, values in (("uFogA", ramp_a), ("uFogB", ramp_b), ("uFogAlpha", alpha), ("uFogBeta", beta), ("uFogMisc", misc)):
+            sh.glUniform4f(u[name], *values)
+        sh.glUniformMatrix3fv(u["uViewToWorld"], 1, 0, state["view_to_world"])
+        sh.glUniformMatrix3fv(u["uLightFrame"], 1, 0, state["rig"])
+        sh.glUniform1i(u["uEnvTex"], state["unit"])
+        sh.glActiveTexture(self.GL_TEXTURE0 + state["unit"])
+        gl.glBindTexture(self.GL_TEXTURE_2D, state["texture"])
+        sh.glUniform1i(u["uGradeTex"], state["grade_unit"])
+        sh.glActiveTexture(self.GL_TEXTURE0 + state["grade_unit"])
+        gl.glBindTexture(self.GL_TEXTURE_2D, state["grade_texture"])
+        sh.glActiveTexture(self.GL_TEXTURE0)
+        if state["hdri"]:
+            sh.glUniform3fv(u["uSH"], 9, state["sh"])
+            sh.glUniform3f(u["uSunDir"], *state["sun_direction"])
+            sh.glUniform3f(u["uSunColour"], *state["sun_colour"])
+        # Idle-effect light (idle_effect.billboards): view-space position, w = 1 / radius; off (zero colour) otherwise.
+        light = getattr(self, '_preview_light', None)
+        if u.get("uPreviewLightPos", -1) != -1:
+            sh.glUniform4f(u["uPreviewLightPos"], *((*light[0], 1.0 / light[2]) if light else (0.0, 0.0, 0.0, 0.0)))
+            sh.glUniform3f(u["uPreviewLightColour"], *(light[1] if light else (0.0, 0.0, 0.0)))
+
+    def set_native_translation(self, enabled):
+        self.native_translation = bool(enabled)
+        if hasattr(self, '_draw_list'): self._draw_list = None
+        if hasattr(self, '_material_ops'): self._material_ops.clear()
+        self.__dict__.pop('_program_memo', None)
+        self._schedule_draw()
+
+    def set_experimental_materials(self, enabled):
+        self.experimental_materials = bool(enabled)
+        if hasattr(self, '_draw_list'): self._draw_list = None
+        if hasattr(self, '_material_ops'): self._material_ops.clear()
+        self.__dict__.pop('_program_memo', None)
+        self._schedule_draw()
+
+    def _static_vector_input_eligible(self):
+        # Level draws carry a per-model, source-instance eligibility decision.
+        if hasattr(self, '_static_vector_draw_eligible'):
+            return bool(self._static_vector_draw_eligible)
+        payload = getattr(self, '_payload', None) or {}
+        raw = payload.get('raw_vectors')
+        return bool(payload.get('static_vector_eligible') and raw is not None
+                    and len(raw) == len(payload.get('vertices', ())) and len(raw) > 0)
+
+    def _selected_surface(self, entry, level):
+        if level == 2:
+            if entry.get('graph_rule_surface'):
+                return entry['graph_rule_surface'], entry['graph_rule_textures'], False
+            static = (entry.get('experimental_preview') or {}).get('preview_contract') == 'static-packed-vector-preview-v1'
+            eligible = self._static_vector_input_eligible()
+            if (getattr(self,'experimental_materials',False) and (not static or eligible) and entry.get('experimental_preview')
+                    and entry['experimental_preview'].get('viewer_override', True)):
+                return entry['experimental_preview'], entry['experimental_textures'], True
+            if self.native_translation and entry.get('native_translation'):
+                return entry['native_translation'], entry['native_textures'], False
+        return None, {}, False
+
+    def set_ground_preview_controls(self, red, green, uv_scale):
+        """Uniform review controls; never alter native readiness or scene geometry."""
+        from nwo.shaders.terrain_preview import CONTRACT, rebind_preview
+        values = tuple(float(v) for v in (red, green, uv_scale))
+        if not all(math.isfinite(v) for v in values) or not (0 <= values[0] <= 1 and 0 <= values[1] <= 1 and 0.01 <= values[2] <= 100):
+            raise ValueError('Ground blend channels must be 0–1 and UV scale 0.01–100')
+        entries = list((getattr(self, '_materials', None) or getattr(self, '_gl_textures', None) or {}).values())
+        updates = [(e, rebind_preview(e['experimental_preview'], values)) for e in entries
+                   if e.get('experimental_preview', {}).get('preview_contract') == CONTRACT]
+        self.ground_preview_controls = values
+        for entry, receipt in updates:
+            entry['experimental_preview'] = receipt
+        if hasattr(self, '_draw_list'): self._draw_list = None
+        if hasattr(self, '_material_ops'): self._material_ops.clear()
+        self.__dict__.pop('_program_memo', None)
+        self._schedule_draw()
+
+    def _surface_program(self, entry, level, instanced=False):
+        """(program, uniform locations) of a material entry, memoised per entry, level and variant;
+        the memo belongs to the current Shading object and keeps the entry it was computed for."""
+        memo = self.__dict__.get('_program_memo')
+        if memo is None or memo[0] is not self._shading:
+            memo = self._program_memo = (self._shading, {})
+        scene = instanced and bool(getattr(self, 'scene_effects_active', lambda: False)())
+        key = (id(entry), level, instanced, scene, self._static_vector_input_eligible(), self.native_translation, getattr(self,'experimental_materials',False), 0 if instanced else self._bone_count)
+        found = memo[1].get(key)
+        if found is not None and found[0] is entry:
+            return found[1]
+        result = self._resolve_surface_program(entry, level, instanced)
+        memo[1][key] = (entry, result)
+        return result
+
+    def _resolve_surface_program(self, entry, level, instanced=False):
+        scene = instanced and bool(getattr(self, 'scene_effects_active', lambda: False)())
+        translation, textures, experimental = self._selected_surface(entry, level)
+        if translation:
+            srgb = {api: texture[1] for api, texture in textures.items()}
+            if translation.get('status') == 'partial_source_rule':
+                return self._shading.native_program(translation, srgb, instanced, scene=scene, rule_preview=True)
+            if experimental:
+                return self._shading.native_program(translation, srgb, instanced, scene=scene, experimental=True)
+            pane = entry.get('alpha_pane')
+            if pane:
+                return self._shading.native_program(translation, srgb, instanced, scene=scene,
+                                                    alpha_api=pane['alpha_api'], alpha_discard=pane['discard'],
+                                                    alpha_opacity=pane.get('opacity', 1.0))
+            if scene:
+                return self._shading.native_program(translation, srgb, instanced, scene=True)
+            return self._shading.native_program(translation, srgb, instanced)
+        if instanced:
+            return self._shading.instanced_program(scene=True) if scene else self._shading.instanced_program()
+        return self._shading.program(self._bone_count or 1)[:2]
+
+    def set_mode(self, mode):
+        """Solid shading, wireframe (mesh only), or both."""
+        if mode not in self.MODES:
+            raise ValueError(f"unknown view mode {mode!r}")
+        self._mode = mode
+        self._draw()
+
+    def _release_textures(self):
+        if getattr(self, '_effect_textures', None) and self._make_current():
+            self._release_effect_textures()
+        if self.__dict__.get('_hdr_target') and self._make_current():
+            self._hdr_release()
+        if self.__dict__.get('_bloom') and self._make_current():
+            self._bloom_release()
+        if self._gl_textures and self._make_current():
+            ids = list({entry[role][0] for entry in self._gl_textures.values()
+                        for role in ("_c", "_g", "_n", "_pick", "_h", "_bng_detail", "_vehicle_p2", "_tint_detail",
+                                     "_window_mask", "_window_n1", "_window_n2", "_window_c", "_window_g") if entry.get(role)})
+            ids.extend({texture[0] for entry in self._gl_textures.values() for texture in entry.get('native_textures', {}).values()})
+            ids.extend({texture[0] for entry in self._gl_textures.values()
+                        for texture in entry.get('fur_shell_textures', {}).values()})
+            ids.extend({texture[0] for entry in self._gl_textures.values() for texture in entry.get('graph_rule_textures', {}).values()})
+            ids = list(set(ids))
+            ids.extend(entry['_rock_volume'][0] for entry in self._gl_textures.values() if entry.get('_rock_volume'))
+            if ids:
+                self._gl.glDeleteTextures(len(ids), (ctypes.c_uint * len(ids))(*ids))
+        self._gl_textures = None
+
+    def _upload_textures(self):
+        """Create GL textures per material slot: {role: (GL id, sRGB)} and its K."""
+        gl = self._gl
+        self._gl_textures, by_path = {}, {}
+        for slot, entry in ((self._payload or {}).get("textures") or {}).items():
+            self._gl_textures[slot] = self._gl_entry(entry, by_path)
+        gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+
+    def _gl_entry(self, entry, by_path):
+        """One material's texture_preview entry with its textures uploaded: {role: (GL id, sRGB)} + parameters.
+
+        ``by_path`` maps texture path -> (GL id, sRGB) or None and is shared across materials."""
+        uploaded = {key: entry[key] for key in ("k", "g_mode", "self_lit", "spec", "gloss", "pick", "tint", "spec_tint", "forward", "arch_sequence", "vehicle", "facing_glow", "bright_center", "flat_surface", "liquid_flow", "no_shadow_cast", "shadow_only", "zurkon") if key in entry}
+        if "two_color_metal" in entry:
+            uploaded["two_color_metal"] = entry["two_color_metal"]
+        if "puddles" in entry:
+            uploaded["puddles"] = entry["puddles"]
+        if "glow" in entry:
+            uploaded["glow"] = entry["glow"]
+        if entry.get("foliage"):
+            uploaded["foliage"] = True
+        if entry.get("linear_z"):
+            uploaded["linear_z"] = True
+        if entry.get("alpha_cut"):
+            uploaded["alpha_cut"] = float(entry["alpha_cut"])
+        if "za_fresnel_power" in entry:
+            uploaded["za_fresnel_power"] = entry["za_fresnel_power"]
+        if entry.get('rock_blend'):
+            uploaded['rock_blend'] = dict(entry['rock_blend'])
+            if entry.get('_rock_volume'):
+                uploaded['_rock_volume'] = (self._upload_rock_volume(entry['_rock_volume']), False)
+                uploaded['rock_blend']['scales'] = entry['_rock_volume']['scales']
+        if entry.get('mud_blend'):
+            uploaded['mud_blend'] = dict(entry['mud_blend'])
+            if entry.get('_rock_volume'):
+                uploaded['_rock_volume'] = (self._upload_rock_volume(entry['_rock_volume']), False)
+                uploaded['mud_blend']['scales'] = entry['_rock_volume']['scales']
+        if entry.get('crater_blend'):
+            uploaded['crater_blend'] = dict(entry['crater_blend'])
+            if entry.get('_rock_volume'):
+                uploaded['_rock_volume'] = (self._upload_rock_volume(entry['_rock_volume']), False)
+        if entry.get('grass_blend'):
+            uploaded['grass_blend'] = dict(entry['grass_blend'])
+            if entry.get('_rock_volume'):
+                uploaded['_rock_volume'] = (self._upload_rock_volume(entry['_rock_volume']), False)
+                uploaded['grass_blend']['scales'] = entry['_rock_volume']['scales']
+        if entry.get('coral_blend'):
+            uploaded['coral_blend'] = dict(entry['coral_blend'])
+            if entry.get('_rock_volume'):
+                uploaded['_rock_volume'] = (self._upload_rock_volume(entry['_rock_volume']), False)
+                uploaded['coral_blend']['scales'] = entry['_rock_volume']['scales']
+        if entry.get('sediment_blend'):
+            uploaded['sediment_blend'] = dict(entry['sediment_blend'])
+            if entry.get('_rock_volume'):
+                uploaded['_rock_volume'] = (self._upload_rock_volume(entry['_rock_volume']), False)
+                uploaded['sediment_blend']['scales'] = entry['_rock_volume']['scales']
+        for key in ('parallax', 'parallax_normal'):
+            if key in entry: uploaded[key] = entry[key]
+        if "bng" in entry:
+            uploaded["bng"] = entry["bng"]
+        if "leaf_colour" in entry:
+            uploaded["leaf_colour"] = dict(entry["leaf_colour"])
+        if "fresnel_tint" in entry:
+            uploaded["fresnel_tint"] = dict(entry["fresnel_tint"])
+        if "crate_tint" in entry:
+            uploaded["crate_tint"] = dict(entry["crate_tint"])
+        if "alpha_pane" in entry:
+            uploaded["alpha_pane"] = dict(entry["alpha_pane"])
+        if "hair" in entry:
+            uploaded["hair"] = dict(entry["hair"])
+        for key in ("skin", "skin_detail"):
+            if key in entry:
+                uploaded[key] = dict(entry[key])
+        for role in GL_TEXTURE_ROLES:
+            texture = entry.get(role)
+            if not texture:
+                continue
+            key = texture["path"] if role in MIPMAP_ROLES else (texture["path"], "no_mipmaps")
+            if key not in by_path:
+                if not texture.get("pixels"):   # the loader dropped them after another key's upload
+                    self.shading_warning = f"Texture pixels unavailable ({role}): {texture['path']}"
+                    continue
+                self._mipmap_next = role in MIPMAP_ROLES   # read by _upload_texture
+                try:
+                    name = self._upload_texture(texture)
+                finally:
+                    self._mipmap_next = True
+                by_path[key] = (name, bool(texture.get("srgb"))) if name else None
+            if by_path[key]:
+                uploaded[role] = by_path[key]
+        for receipt_key, texture_key in (('native_translation','native_textures'), ('experimental_preview','experimental_textures'), ('graph_rule_surface','graph_rule_textures'), ('fur_shell_translation','fur_shell_textures')):
+            if not entry.get(receipt_key): continue
+            receipt = entry[receipt_key]
+            if receipt_key == 'experimental_preview' and hasattr(self, 'ground_preview_controls'):
+                from nwo.shaders.terrain_preview import CONTRACT, rebind_preview
+                if receipt.get('preview_contract') == CONTRACT:
+                    receipt = rebind_preview(receipt, self.ground_preview_controls)
+            native = {}
+            normal_api = (receipt.get('normal') or {}).get('api')
+            for api, texture in entry[texture_key].items():
+                path = texture['path']
+                linear_rgb = bool(texture.get('srgb')) and api != normal_api
+                cache_key = (path, 'native_srgb' if linear_rgb else 'native_linear')
+                if cache_key not in by_path:
+                    if not (texture.get('pixels') or texture.get('cube')):
+                        self.shading_warning = 'Native texture pixels unavailable: ' + path
+                        break
+                    cube = bool(texture.get('cube'))   # Rift Apart cube map: six face dicts, a GL cube map at its top mip
+                    name = self._upload_cube(texture, decode_srgb=linear_rgb) if cube else \
+                        self._upload_texture(texture, decode_srgb=linear_rgb,
+                                             mipmaps=False if texture.get('no_mipmaps') else None)   # atlases: tiles stay apart
+                    by_path[cache_key] = (name, linear_rgb, cube) if name else None
+                if not by_path[cache_key]:
+                    self.shading_warning = 'Native texture upload failed: ' + path
+                    break
+                native[api] = by_path[cache_key]
+            else:
+                uploaded[receipt_key] = receipt
+                uploaded[texture_key] = native
+        return uploaded
+
+    def _upload_rock_volume(self, texture):
+        gl = self._gl; address = gl.wglGetProcAddress(b"glTexImage3D")
+        if not address: raise RuntimeError('RockBlend requires glTexImage3D')
+        upload = ctypes.WINFUNCTYPE(None, ctypes.c_uint, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p)(address)
+        name = ctypes.c_uint(); gl.glGenTextures(1, ctypes.byref(name)); gl.glBindTexture(0x806F, name.value)
+        for p,v in ((0x2801,self.GL_LINEAR),(0x2800,self.GL_LINEAR),(0x2802,self.GL_REPEAT),(0x2803,self.GL_REPEAT),(0x8072,0x812F)):
+            gl.glTexParameteri(0x806F,p,v)
+        gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT,1)
+        pixels=ctypes.create_string_buffer(texture['pixels'])
+        upload(0x806F,0,0x8058,texture['width'],texture['height'],texture.get('depth',4),0,0x1908,self.GL_UNSIGNED_BYTE,pixels)
+        gl.glBindTexture(0x806F,0)
+        if gl.glGetError():
+            gl.glDeleteTextures(1,ctypes.byref(name)); raise RuntimeError('RockBlend volume upload failed')
+        return name.value
+
+    GL_LINEAR_MIPMAP_LINEAR = 0x2703
+    GL_TEXTURE_MAX_ANISOTROPY = 0x84FE        # EXT_texture_filter_anisotropic
+    GL_MAX_TEXTURE_MAX_ANISOTROPY = 0x84FF
+    MAX_ANISOTROPY = 8.0
+    MIPMAPS = True   # class switch: False keeps every texture on its top mip with GL_LINEAR
+    _mipmap_support = None
+
+    def _texture_features(self):
+        """{'generate': glGenerateMipmap or None, 'anisotropy': level or 0}, probed once per context."""
+        if self._mipmap_support is None:
+            gl = self._gl
+            gl.wglGetProcAddress.argtypes = [ctypes.c_char_p]; gl.wglGetProcAddress.restype = ctypes.c_void_p
+            address = gl.wglGetProcAddress(b"glGenerateMipmap")
+            generate = ctypes.WINFUNCTYPE(None, ctypes.c_uint)(address) if address else None
+            anisotropy = 0.0
+            try:
+                gl.glGetString.restype = ctypes.c_char_p
+                extensions = (gl.glGetString(0x1F03) or b"").split()   # GL_EXTENSIONS (compatibility context)
+                if b"GL_EXT_texture_filter_anisotropic" in extensions or b"GL_ARB_texture_filter_anisotropic" in extensions:
+                    value = ctypes.c_float(0.0)
+                    gl.glGetFloatv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+                    gl.glGetFloatv(self.GL_MAX_TEXTURE_MAX_ANISOTROPY, ctypes.byref(value))
+                    anisotropy = min(self.MAX_ANISOTROPY, value.value) if value.value > 1.0 else 0.0
+            except Exception:
+                anisotropy = 0.0
+            gl.glGetError()
+            self._mipmap_support = dict(generate=generate, anisotropy=anisotropy, compressed=True)
+        return self._mipmap_support
+
+    _mipmap_next = True
+    # Queue mip generation (build_deferred_mipmaps) instead of running it at upload; the level
+    # viewer defers it past the load, since drivers can spend long on block-compressed chains.
+    DEFER_MIPMAPS = False
+
+    def _upload_texture(self, texture, decode_srgb=False, mipmaps=None):
+        """One GL texture from GPU-ready blocks; 0 if the driver rejects the format.
+
+        With ``mipmaps`` (and MIPMAPS) the driver builds the mip chain from the uploaded top mip
+        (glGenerateMipmap) and the texture samples trilinear plus anisotropic filtering where the
+        extension exists. The chain is filtered in the texture's own colourspace (linear for sRGB
+        formats, as GL specifies). A driver that refuses to generate mips for block-compressed
+        formats leaves those on the top mip with GL_LINEAR (it is not asked again). ``mipmaps`` None
+        follows ``_mipmap_next`` (set per role by _gl_entry). With DEFER_MIPMAPS the texture is
+        queued in ``_mipmap_queue`` and samples its top mip until its chain is built."""
+        gl = self._gl
+        if mipmaps is None:
+            mipmaps = self._mipmap_next
+        self._compressed_uploader()
+        name = ctypes.c_uint(0)
+        gl.glGetError()
+        gl.glGenTextures(1, ctypes.byref(name))
+        gl.glBindTexture(self.GL_TEXTURE_2D, name.value)
+        for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                 (self.GL_TEXTURE_WRAP_S, self.GL_REPEAT), (self.GL_TEXTURE_WRAP_T, self.GL_REPEAT)):
+            gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
+        compressed = self._upload_image(self.GL_TEXTURE_2D, texture, decode_srgb)
+        if gl.glGetError():
+            # Driver rejected this format: show the material without it.
+            gl.glDeleteTextures(1, ctypes.byref(name))
+            name.value = 0
+        elif mipmaps and self.MIPMAPS:
+            if self.DEFER_MIPMAPS:
+                from collections import deque
+                self.__dict__.setdefault("_mipmap_queue", deque()).append((name.value, compressed))
+            else:
+                self._build_mipmaps(compressed)
+        return name.value
+
+    def _compressed_uploader(self):
+        """glCompressedTexImage2D (False when the driver lacks it), looked up once."""
+        if self._compressed_upload is None:
+            gl = self._gl
+            gl.wglGetProcAddress.argtypes = [ctypes.c_char_p]; gl.wglGetProcAddress.restype = ctypes.c_void_p
+            address = gl.wglGetProcAddress(b"glCompressedTexImage2D")
+            prototype = ctypes.WINFUNCTYPE(None, ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
+            self._compressed_upload = prototype(address) if address else False
+        return self._compressed_upload
+
+    def _upload_image(self, target, texture, decode_srgb=False):
+        """Level 0 of the bound texture's ``target`` (GL_TEXTURE_2D or a cube face) from a texture dict; True when it was a
+        block-compressed upload."""
+        gl = self._gl
+        pixels = texture["pixels"]
+        compressed = False
+        if texture.get("gl_format") and self._compressed_upload:
+            srgb_formats = {72: 0x8C4D, 75: 0x8C4E, 78: 0x8C4F, 99: 0x8E8D}
+            internal = srgb_formats.get(texture.get('format'), texture['gl_format']) if decode_srgb else texture['gl_format']
+            self._compressed_upload(target, 0, internal, texture["width"], texture["height"], 0, len(pixels), pixels)
+            compressed = True
+        elif texture.get("gl_float"):   # float RGBA (Rift Apart data formats): GL_RGBA32F from GL_RGBA / GL_FLOAT
+            gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
+            gl.glTexImage2D(target, 0, 0x8814, texture["width"], texture["height"], 0, 0x1908, 0x1406, pixels)
+        elif texture.get("gl_pixel_format"):
+            gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
+            internal = 0x8C43 if decode_srgb else texture['gl_pixel_format'] # SRGB8_ALPHA8: alpha remains linear
+            gl.glTexImage2D(target, 0, internal, texture["width"], texture["height"],
+                            0, texture["gl_pixel_format"], self.GL_UNSIGNED_BYTE, pixels)
+        return compressed
+
+    GL_TEXTURE_CUBE_MAP, GL_TEXTURE_CUBE_MAP_POSITIVE_X, GL_TEXTURE_CUBE_MAP_SEAMLESS = 0x8513, 0x8515, 0x884F
+
+    def _upload_cube(self, texture, decode_srgb=False):
+        """One GL cube map from ``texture['cube']``, six face dicts in +X, -X, +Y, -Y, +Z, -Z order with the top row first. D3D
+        and GL share the face table, so a lookup along the game's direction returns the D3D texel. The top mip, GL_LINEAR, clamped
+        (seamless across edges where the driver has it); 0 if the driver rejects a face."""
+        gl = self._gl
+        self._compressed_uploader()
+        name = ctypes.c_uint(0)
+        gl.glGetError()
+        gl.glGenTextures(1, ctypes.byref(name))
+        target = self.GL_TEXTURE_CUBE_MAP
+        gl.glBindTexture(target, name.value)
+        for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                 (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F), (0x8072, 0x812F)):
+            gl.glTexParameteri(target, parameter, value)
+        for k, face in enumerate(texture['cube']):
+            self._upload_image(self.GL_TEXTURE_CUBE_MAP_POSITIVE_X + k, face, decode_srgb)
+        if gl.glGetError():
+            gl.glDeleteTextures(1, ctypes.byref(name))
+            name.value = 0
+        else:
+            gl.glEnable(self.GL_TEXTURE_CUBE_MAP_SEAMLESS)   # GL 3.2 / ARB_seamless_cube_map; ignored where absent
+            gl.glGetError()
+        gl.glBindTexture(target, 0)
+        return name.value
+
+    def _build_mipmaps(self, compressed):
+        """Mip chain and filtering for the bound texture; on any GL error it stays top-mip GL_LINEAR
+        (an incomplete chain must never be sampled with a mipmap filter)."""
+        gl, features = self._gl, self._texture_features()
+        if features["generate"] is None or (compressed and not features["compressed"]):
+            return
+        features["generate"](self.GL_TEXTURE_2D)
+        if gl.glGetError():
+            if compressed:
+                features["compressed"] = False
+            return
+        gl.glTexParameteri(self.GL_TEXTURE_2D, self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR_MIPMAP_LINEAR)
+        if features["anisotropy"]:
+            gl.glTexParameterf.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_float]
+            gl.glTexParameterf(self.GL_TEXTURE_2D, self.GL_TEXTURE_MAX_ANISOTROPY, features["anisotropy"])
+        if gl.glGetError():   # keep the generated chain, drop what the driver refused
+            gl.glTexParameteri(self.GL_TEXTURE_2D, self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR)
+
+    def clear(self, message="Select a model with decoded mesh geometry to preview it."):
+        self._release_textures()
+        self._payload, self._mesh, self._arrays = None, None, None
+        self._bones, self._bone_count = None, 0
+        self._error = message
+        self._show_error(message)
+        self._draw()
+
+    def _show_error(self, message):
+        if message:
+            self._label.configure(text=message)
+            self._label.place(relx=0.5, rely=0.5, anchor="center", relwidth=1.0, relheight=1.0)
+        else:
+            self._label.place_forget()
+        # Removing or placing the label repaints this area afterwards.
+        self._schedule_draw()
+
+    def _on_configure(self, _event=None):
+        if os.name == "nt" and self._hrc is None and not self._context_error:
+            try:
+                self._create_context()
+            except Exception as exc:
+                self._context_error = f"3D preview unavailable: {exc}"
+                self._show_error(self._context_error)
+        self._draw()
+
+    def _create_context(self):
+        if os.name != "nt":
+            raise RuntimeError("native Windows OpenGL (WGL) is available only on Windows")
+        user32, gdi32, gl = ctypes.windll.user32, ctypes.windll.gdi32, ctypes.windll.opengl32
+        self._gdi32 = gdi32
+        gdi32.SwapBuffers.argtypes=[wintypes.HDC];gdi32.SwapBuffers.restype=wintypes.BOOL
+        gl.wglDeleteContext.argtypes=[ctypes.c_void_p];gl.wglDeleteContext.restype=wintypes.BOOL
+        user32.ReleaseDC.argtypes=[wintypes.HWND,wintypes.HDC];user32.ReleaseDC.restype=ctypes.c_int
+        hwnd = wintypes.HWND(self.winfo_id())
+        user32.GetDC.argtypes = [wintypes.HWND]
+        user32.GetDC.restype = wintypes.HDC
+        self._hdc = user32.GetDC(hwnd)
+        if not self._hdc:
+            raise OSError("could not acquire the viewport drawing surface")
+        pfd = _PIXELFORMATDESCRIPTOR()
+        pfd.nSize = ctypes.sizeof(pfd); pfd.nVersion = 1
+        pfd.dwFlags = 0x00000004 | 0x00000020 | 0x00000001
+        pfd.iPixelType = 0; pfd.cColorBits = 24; pfd.cDepthBits = 24; pfd.iLayerType = 0
+        gdi32.ChoosePixelFormat.argtypes = [wintypes.HDC, ctypes.POINTER(_PIXELFORMATDESCRIPTOR)]
+        gdi32.ChoosePixelFormat.restype = ctypes.c_int
+        gdi32.SetPixelFormat.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.POINTER(_PIXELFORMATDESCRIPTOR)]
+        gdi32.SetPixelFormat.restype = wintypes.BOOL
+        pixel_format = gdi32.ChoosePixelFormat(self._hdc, ctypes.byref(pfd))
+        if not pixel_format or not gdi32.SetPixelFormat(self._hdc, pixel_format, ctypes.byref(pfd)):
+            raise OSError("could not configure an OpenGL depth-buffer surface")
+        gl.wglCreateContext.argtypes = [wintypes.HDC]; gl.wglCreateContext.restype = ctypes.c_void_p
+        gl.wglMakeCurrent.argtypes = [wintypes.HDC, ctypes.c_void_p]; gl.wglMakeCurrent.restype = wintypes.BOOL
+        self._hrc = gl.wglCreateContext(self._hdc)
+        if not self._hrc or not gl.wglMakeCurrent(self._hdc, self._hrc):
+            raise OSError("Windows could not create an OpenGL context")
+        self._gl = gl
+        self._gl_direct = gl   # unwrapped handle (the thumbnail renderer proxies _gl to fix its clear colour)
+        self._set_gl_prototypes()
+        gl.glEnable(self.GL_DEPTH_TEST); gl.glEnable(self.GL_LIGHTING); gl.glEnable(self.GL_LIGHT0)
+        gl.glEnable(self.GL_NORMALIZE); gl.glEnable(self.GL_COLOR_MATERIAL)
+        gl.glColorMaterial(self.GL_FRONT_AND_BACK, self.GL_AMBIENT_AND_DIFFUSE)
+        gl.glLightfv(self.GL_LIGHT0, self.GL_AMBIENT, (ctypes.c_float * 4)(0.38, 0.38, 0.38, 1.0))
+        gl.glLightfv(self.GL_LIGHT0, self.GL_DIFFUSE, (ctypes.c_float * 4)(0.78, 0.78, 0.78, 1.0))
+        gl.glLightfv(self.GL_LIGHT0, self.GL_POSITION, (ctypes.c_float * 4)(-0.4, -0.6, 1.0, 0.0))
+        try:
+            from nwo.viewer.shading import Shading
+            self._shading = Shading(gl)
+            self._shading.program(1)   # compile now so a driver problem shows up immediately
+        except Exception as exc:
+            self._shading, self.shading_error = None, f"Shaded view unavailable: {exc}"
+        self._show_error(None if self._mesh else self._error)
+
+    def _set_gl_prototypes(self):
+        gl = self._gl
+        gl.glViewport.argtypes = [ctypes.c_int] * 4
+        gl.glMatrixMode.argtypes = [ctypes.c_uint]; gl.glLoadIdentity.argtypes = []
+        gl.glFrustum.argtypes = [ctypes.c_double] * 6
+        gl.glClearColor.argtypes = [ctypes.c_float] * 4; gl.glClear.argtypes = [ctypes.c_uint]
+        gl.glTranslatef.argtypes = [ctypes.c_float] * 3; gl.glRotatef.argtypes = [ctypes.c_float] * 4
+        gl.glColor3f.argtypes = [ctypes.c_float] * 3; gl.glEnableClientState.argtypes = [ctypes.c_uint]
+        gl.glVertexPointer.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_void_p]
+        gl.glNormalPointer.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_void_p]
+        gl.glDrawElements.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p]
+        gl.glPolygonMode.argtypes = [ctypes.c_uint, ctypes.c_uint]
+        gl.glPolygonOffset.argtypes = [ctypes.c_float, ctypes.c_float]
+        gl.glEnable.argtypes = [ctypes.c_uint]; gl.glDisable.argtypes = [ctypes.c_uint]
+        gl.glGenTextures.argtypes = [ctypes.c_int, ctypes.c_void_p]
+        gl.glDeleteTextures.argtypes = [ctypes.c_int, ctypes.c_void_p]
+        gl.glBindTexture.argtypes = [ctypes.c_uint, ctypes.c_uint]
+        gl.glTexParameteri.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_int]
+        gl.glPixelStorei.argtypes = [ctypes.c_uint, ctypes.c_int]
+        gl.glTexImage2D.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+        gl.glTexCoordPointer.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_void_p]
+        gl.glDisableClientState.argtypes = [ctypes.c_uint]
+        gl.glGetError.restype = ctypes.c_uint
+
+    def _schedule_draw(self):
+        # Tk paints after event handlers run, so draw once it has finished.
+        if not self._redraw_pending:
+            self._redraw_pending = True
+            self.after_idle(self._idle_draw)
+
+    def _idle_draw(self):
+        self._redraw_pending = False
+        self._draw()
+
+    def _make_current(self):
+        return bool(self._gl and self._hdc and self._hrc and self._gl.wglMakeCurrent(self._hdc, self._hrc))
+
+    def _draw(self):
+        if not self._make_current():
+            return
+        gl = self._gl
+        width, height = max(1, self.winfo_width()), max(1, self.winfo_height())
+        gl.glViewport(0, 0, width, height)
+        gl.glClearColor(*gl_color("viewport"))
+        gl.glClear(self.GL_COLOR_BUFFER_BIT | self.GL_DEPTH_BUFFER_BIT)
+        if self._mesh:
+            vertices, triangles, normals = self._mesh
+            self._camera = camera_fit(vertices, width / height, self._zoom, bounds=self._bounds)
+            c = self._camera
+            gl.glMatrixMode(self.GL_PROJECTION); gl.glLoadIdentity()
+            gl.glFrustum(c["left"], c["right"], c["bottom"], c["top"], c["near"], c["far"])
+            gl.glMatrixMode(self.GL_MODELVIEW); gl.glLoadIdentity()
+            gl.glTranslatef(self._pan[0], self._pan[1], -c["distance"])
+            gl.glRotatef(self._pitch, 1.0, 0.0, 0.0); gl.glRotatef(self._yaw, 0.0, 0.0, 1.0)
+            gl.glTranslatef(-c["center"][0], -c["center"][1], -c["center"][2])
+            self._frame_lighting = None
+            if self._arrays is None:
+                flat_vertices = [x for row in vertices for x in row]
+                flat_normals = [x for row in normals for x in row]
+                flat_indices = [i for tri in triangles for i in tri]
+                self._arrays = ((ctypes.c_float * len(flat_vertices))(*flat_vertices),
+                                (ctypes.c_float * len(flat_normals))(*flat_normals),
+                                (ctypes.c_uint * len(flat_indices))(*flat_indices), None, None, None, None)
+            vertex_array, normal_array, index_array, uv_array, joint_array, weight_array, raw_vector_array, tangent_array = (tuple(self._arrays) + (None,) * 8)[:8]
+            self._sync_buffers()
+            gl.glEnableClientState(self.GL_VERTEX_ARRAY); gl.glEnableClientState(self.GL_NORMAL_ARRAY)
+            gl.glVertexPointer(3, self.GL_FLOAT, 0, self._vptr(vertex_array))
+            gl.glNormalPointer(self.GL_FLOAT, 0, self._vptr(normal_array))
+            if uv_array is not None:
+                gl.glEnableClientState(self.GL_TEXTURE_COORD_ARRAY)
+                gl.glTexCoordPointer(2, self.GL_FLOAT, 0, self._vptr(uv_array))
+            batches = (self._payload or {}).get("batches") or [(None, 0, len(index_array) // 3)]
+            # Shadow-cast-only slots (render_state.SHADOW_ONLY_FLAG) never reach the game's colour pass, and the game
+            # issues no draw at all for "not_drawn" ones (Rift Apart: rcra.material.draw_skip_note).
+            textures = (self._payload or {}).get("textures") or {}
+            batches = [b for b in batches if not (textures.get(b[0]) or {}).get("shadow_only")]
+            batches = [b for b in batches if not (textures.get(b[0]) or {}).get("not_drawn")]
+            if self._gl_textures is None and uv_array is not None:
+                self._upload_textures()
+            drawn = False
+            if self._shading is not None and not self.shading_error:
+                try:
+                    self._draw_shaded(index_array, uv_array, joint_array, weight_array, batches, raw_vector_array, tangent_array)
+                    drawn = True
+                except Exception as exc:   # keep the fixed-function view working
+                    self.shading_error = f"Shaded view unavailable: {exc}"
+                    self._shading_draw_failed = True
+                    self._hdr_abort()
+                    self._unbind_material_units()
+                    self._disable_shader_arrays()   # the fixed path would otherwise read these stale pointers
+                    self._shading.glUseProgram(0)
+            if not drawn:
+                self._draw_fixed(index_array, uv_array, batches)
+            gl.glDisableClientState(self.GL_TEXTURE_COORD_ARRAY)
+            gl.glDisableClientState(self.GL_NORMAL_ARRAY); gl.glDisableClientState(self.GL_VERTEX_ARRAY)
+            self._unbind_buffers()
+        self._gdi32.SwapBuffers(self._hdc)
+
+    def _draw_range(self, index_array, first, count):
+        self._gl.glDrawElements(self.GL_TRIANGLES, count * 3, self.GL_UNSIGNED_INT,
+                                self._vptr(index_array, first * 3 * ctypes.sizeof(ctypes.c_uint), self.GL_ELEMENT_ARRAY_BUFFER))
+
+    # GPU vertex/index buffers (2026-10-09) ---------------------------------
+    # Each mesh array is uploaded once on first use instead of being copied from
+    # client memory every frame (13 ms for a 550k-vertex prop).
+    # Without the GL 1.5 entry points every pointer falls back to client memory.
+    GL_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER, GL_STATIC_DRAW = 0x8892, 0x8893, 0x88E4
+
+    def _buffers(self):
+        if self._buffer_ext is None:
+            self._buffer_ext = False
+            try:
+                gl = self._gl
+                gl.wglGetProcAddress.argtypes = [ctypes.c_char_p]; gl.wglGetProcAddress.restype = ctypes.c_void_p
+                prototypes = {"glGenBuffers": [ctypes.c_int, ctypes.c_void_p], "glDeleteBuffers": [ctypes.c_int, ctypes.c_void_p],
+                              "glBindBuffer": [ctypes.c_uint, ctypes.c_uint],
+                              "glBufferData": [ctypes.c_uint, ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_uint]}
+                functions = {}
+                for name, argtypes in prototypes.items():
+                    address = gl.wglGetProcAddress(name.encode())
+                    if not address:
+                        return False
+                    functions[name] = ctypes.WINFUNCTYPE(None, *argtypes)(address)
+                self._buffer_ext = functions
+            except Exception:
+                self._buffer_ext = False
+        return self._buffer_ext
+
+    def _sync_buffers(self):
+        """Free the previous mesh's buffers once a different mesh is drawn."""
+        if self._vbo_owner is not self._arrays:
+            ext = self._buffers()
+            names = [name for name, _array in self._vbos.values()]
+            if ext and names:
+                ext["glDeleteBuffers"](len(names), (ctypes.c_uint * len(names))(*names))
+            self._vbos, self._vbo_owner = {}, self._arrays
+            self._stale.clear()
+
+    def _vptr(self, array, offset=0, target=None):
+        """Pointer argument for ``array``: a byte offset into its GPU buffer (bound here), else its client address."""
+        target = target or self.GL_ARRAY_BUFFER
+        ext = self._buffers()
+        if not ext:
+            return ctypes.c_void_p(ctypes.addressof(array) + offset)
+        entry = self._vbos.get(id(array))
+        if entry is None or entry[1] is not array:
+            name = ctypes.c_uint(0)
+            ext["glGenBuffers"](1, ctypes.byref(name))
+            ext["glBindBuffer"](target, name.value)
+            ext["glBufferData"](target, ctypes.sizeof(array), ctypes.c_void_p(ctypes.addressof(array)), self.GL_STATIC_DRAW)
+            entry = self._vbos[id(array)] = (name.value, array)
+            self._stale.discard(id(array))
+        ext["glBindBuffer"](target, entry[0])
+        if id(array) in self._stale:   # blend shapes rewrote the array (set_morph): refill its buffer
+            ext["glBufferData"](target, ctypes.sizeof(array), ctypes.c_void_p(ctypes.addressof(array)), self.GL_STATIC_DRAW)
+            self._stale.discard(id(array))
+        return ctypes.c_void_p(offset)
+
+    def _unbind_buffers(self):
+        ext = self._buffers()
+        if ext:
+            ext["glBindBuffer"](self.GL_ARRAY_BUFFER, 0); ext["glBindBuffer"](self.GL_ELEMENT_ARRAY_BUFFER, 0)
+
+    def _draw_fixed(self, index_array, uv_array, batches):
+        """Fallback without shaders: static geometry, base colour only."""
+        gl = self._gl
+        mode = "Textured" if self._mode == "Shaded" else self._mode
+        if mode == "Textured" and uv_array is not None:
+            gl.glEnable(self.GL_LIGHTING)
+            gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_FILL)
+            for slot, first, count in batches:
+                texture = ((self._gl_textures or {}).get(slot) or {}).get("_c")
+                if texture:
+                    gl.glEnable(self.GL_TEXTURE_2D); gl.glBindTexture(self.GL_TEXTURE_2D, texture[0])
+                    gl.glColor3f(1.0, 1.0, 1.0)
+                else:
+                    gl.glDisable(self.GL_TEXTURE_2D); gl.glColor3f(0.72, 0.74, 0.78)
+                self._draw_range(index_array, first, count)
+            gl.glDisable(self.GL_TEXTURE_2D); gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+            return
+        draw = lambda: gl.glDrawElements(self.GL_TRIANGLES, len(index_array), self.GL_UNSIGNED_INT,
+                                         self._vptr(index_array, 0, self.GL_ELEMENT_ARRAY_BUFFER))
+        if mode != "Wireframe":
+            gl.glEnable(self.GL_LIGHTING)
+            gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_FILL)
+            # Push faces back slightly so an overlaid wireframe stays visible.
+            gl.glEnable(self.GL_POLYGON_OFFSET_FILL); gl.glPolygonOffset(1.0, 1.0)
+            gl.glColor3f(0.72, 0.74, 0.78)
+            draw()
+            gl.glDisable(self.GL_POLYGON_OFFSET_FILL)
+        if mode in ("Wireframe", "Solid + wireframe"):
+            gl.glDisable(self.GL_LIGHTING)
+            gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_LINE)
+            gl.glColor3f(*((0.62, 0.78, 0.95) if mode == "Wireframe" else (0.12, 0.13, 0.15)))
+            draw()
+            gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_FILL)
+            gl.glEnable(self.GL_LIGHTING)
+
+    def _draw_shaded(self, index_array, uv_array, joint_array, weight_array, batches, raw_vector_array=None, tangent_array=None):
+        """GLSL path for every mode: GPU skinning, base colour, and the game BRDF."""
+        from nwo.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, BONE_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT, RCRA_COLOUR_ATTRIBUTE
+        gl, sh = self._gl, self._shading
+        self.shading_warning = None
+        effect_quads = self._effect_frame()
+        program, u, size = sh.program(self._bone_count or 1)
+        sh.glUseProgram(program)
+        self._apply_lighting(u)
+        for unit, name in ((TINT_DETAIL_TEXTURE_UNIT, "uTexTintDetail"), (0, "uTexC"), (1, "uTexG"), (2, "uTexN"), (PICK_TEXTURE_UNIT, "uTexP"), (TINT_MASK_TEXTURE_UNIT, "uTexH"), (ARCH_SEQUENCE_TEXTURE_UNIT, "uTexSequence"), (BNG_DETAIL_TEXTURE_UNIT, "uTexBngDetail"), (VEHICLE_PALETTE_TEXTURE_UNIT, "uTexVehicleP2")):
+            sh.glUniform1i(u[name], unit)
+        skin = joint_array is not None and self._bones is not None
+        sh.glUniform1i(u["uSkin"], 1 if skin else 0)
+        if skin:
+            sh.glActiveTexture(self.GL_TEXTURE0 + BONE_TEXTURE_UNIT)
+            if self._bone_texture is None:
+                name = ctypes.c_uint(0)
+                gl.glGenTextures(1, ctypes.byref(name)); self._bone_texture = name.value
+                gl.glBindTexture(self.GL_TEXTURE_2D, self._bone_texture)
+                for parameter in (self.GL_TEXTURE_MIN_FILTER, self.GL_TEXTURE_MAG_FILTER):
+                    gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, 0x2600)   # NEAREST: exact matrices
+            gl.glBindTexture(self.GL_TEXTURE_2D, self._bone_texture)
+            if self._bones_dirty:
+                # RGBA32F, 4 texels (matrix rows) per joint, one row.
+                gl.glTexImage2D(self.GL_TEXTURE_2D, 0, 0x8814, 4 * self._bone_count, 1, 0, 0x1908, self.GL_FLOAT,
+                                ctypes.cast(self._bones, ctypes.c_void_p))
+                self._bones_dirty = False
+            sh.glUniform1i(u["uBoneTex"], BONE_TEXTURE_UNIT)
+            sh.glUniform1f(u["uBoneWidth"], float(4 * self._bone_count))
+            sh.glActiveTexture(self.GL_TEXTURE0)
+            stride = 8 * ctypes.sizeof(ctypes.c_float)
+            for location, array, offset in ((ATTRIBUTES['aJoints0'], joint_array, 0), (ATTRIBUTES['aJoints1'], joint_array, 16),
+                                           (ATTRIBUTES['aWeights0'], weight_array, 0), (ATTRIBUTES['aWeights1'], weight_array, 16)):
+                sh.glEnableVertexAttribArray(location)
+                sh.glVertexAttribPointer(location, 4, self.GL_FLOAT, 0, stride, self._vptr(array, offset))
+        else:
+            for location in ATTRIBUTES.values():
+                sh.glDisableVertexAttribArray(location)
+                sh.glVertexAttrib4f(location, 0.0, 0.0, 0.0, 0.0)
+        if raw_vector_array is not None and (self._payload or {}).get("static_vector_eligible"):
+            sh.glEnableVertexAttribArray(STATIC_VECTOR_ATTRIBUTE)
+            sh.glVertexAttribPointer(STATIC_VECTOR_ATTRIBUTE, 3, self.GL_FLOAT, 0, 0, self._vptr(raw_vector_array))
+        else:
+            sh.glDisableVertexAttribArray(STATIC_VECTOR_ATTRIBUTE)
+            sh.glVertexAttrib4f(STATIC_VECTOR_ATTRIBUTE, 0.0, 0.0, 0.0, 0.0)
+        if tangent_array is not None:
+            sh.glEnableVertexAttribArray(TANGENT_ATTRIBUTE)
+            sh.glVertexAttribPointer(TANGENT_ATTRIBUTE, 4, self.GL_FLOAT, 0, 0, self._vptr(tangent_array))
+        else:
+            sh.glDisableVertexAttribArray(TANGENT_ATTRIBUTE)
+            sh.glVertexAttrib4f(TANGENT_ATTRIBUTE, 0.0, 0.0, 0.0, 0.0)
+        alpha = getattr(self,'_rock_alpha',None)
+        if alpha is not None:
+            sh.glEnableVertexAttribArray(14); sh.glVertexAttribPointer(14,1,self.GL_FLOAT,0,0,self._vptr(alpha))
+        else:
+            sh.glDisableVertexAttribArray(14); sh.glVertexAttrib4f(14,1.0,0.0,0.0,0.0)
+        # Rift Apart vertex colour for the translated materials (rcra_glsl.vertex_source squares it): the stored bytes as
+        # UNORM, as the engine's typed load reads them; without a colour section 1, the engine's value for a subset without
+        # one. No R&C 2016 program reads this location.
+        colour = getattr(self, '_rcra_colour', None)
+        if colour is not None:
+            sh.glEnableVertexAttribArray(RCRA_COLOUR_ATTRIBUTE)
+            sh.glVertexAttribPointer(RCRA_COLOUR_ATTRIBUTE, 4, self.GL_UNSIGNED_BYTE, 1, 0, self._vptr(colour))
+        else:
+            sh.glDisableVertexAttribArray(RCRA_COLOUR_ATTRIBUTE); sh.glVertexAttrib4f(RCRA_COLOUR_ATTRIBUTE, 1.0, 1.0, 1.0, 1.0)
+        # Standalone models have no zone-keyed stream: retain uniform review controls.
+        sh.glDisableVertexAttribArray(15); sh.glVertexAttrib4f(15,0.0,0.0,0.0,0.0)
+        mode = self._mode
+        level = {"Shaded": 2, "Textured": 1}.get(mode, 0)
+        if uv_array is None:
+            level = 0
+        if mode != "Wireframe":
+            gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_FILL)
+            gl.glEnable(self.GL_POLYGON_OFFSET_FILL); gl.glPolygonOffset(1.0, 1.0)
+            sh.glUniform1i(u["uMode"], level)
+            sh.glUniform3f(u["uColor"], 0.72, 0.74, 0.78)
+            # Shaded: forward (glass) batches are drawn after every opaque one, see _draw_glass.
+            opaque, glass = split_forward(batches, self._gl_textures, self.native_translation) if level == 2 else (batches, [])
+            base_program, base_u = program, u
+            panes = [b for b in opaque if ((self._gl_textures or {}).get(b[0]) or {}).get('alpha_pane')]
+            if panes:   # alpha panes (textures 'alpha_pane') blend over every opaque batch, farthest first
+                opaque = [b for b in opaque if b not in panes]
+                cached = getattr(self, '_glass_centres', None)
+                if not cached or cached[0] is not self._mesh:
+                    cached = self._glass_centres = (self._mesh, batch_centres(self._mesh[0], self._mesh[1], batches))
+                modelview = (ctypes.c_float * 16)()
+                gl.glGetFloatv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+                gl.glGetFloatv(self.GL_MODELVIEW_MATRIX, modelview)
+                opaque = opaque + list(forward_order(panes, cached[1], list(modelview), lambda slot: False))
+            # Panes, idle-effect quads and the HDR_FORWARD_KINDS batches blend in scene-linear colour and are tonemapped once
+            # (_hdr_begin); other models keep drawing display-referred straight into the window.
+            hdr_forward = any(forward_rule((self._gl_textures or {}).get(b[0]) or {}, self.native_translation).get('kind')
+                              in self.HDR_FORWARD_KINDS for b in glass)
+            emitters = self.BLOOM and self.BLOOM_EMITTERS and any(
+                self_lit_entry(((self._gl_textures or {}).get(b[0]) or {}), self.native_translation) for b in batches)
+            hdr = self._hdr_begin() if level == 2 and (panes or effect_quads or hdr_forward or emitters) else None
+            if hdr:   # the program in use took its tonemap uniform before the float target was bound
+                self._apply_lighting(u)
+            for slot, first, count in opaque:
+                entry = (self._gl_textures or {}).get(slot) or {}
+                if hdr and entry.get('alpha_pane'):
+                    self._bloom_before(hdr)   # the scene before the transparent pass, for the bloom
+                next_program, next_u = self._surface_program(entry, level)
+                if next_program != program:
+                    program, u = next_program, next_u
+                    sh.glUseProgram(program); self._apply_lighting(u)
+                    sh.glUniform1i(u['uSkin'], int(skin))
+                    sh.glUniform1i(u['uBoneTex'], BONE_TEXTURE_UNIT)
+                    sh.glUniform1f(u['uBoneWidth'], float(4 * self._bone_count))
+                    sh.glUniform1i(u['uMode'], level)
+                    sh.glUniform3f(u['uColor'], 0.72, 0.74, 0.78)
+                    for unit, name in ((0,'uTexC'),(1,'uTexG'),(2,'uTexN'),(PICK_TEXTURE_UNIT,'uTexP'),
+                                      (TINT_MASK_TEXTURE_UNIT,'uTexH'),(ARCH_SEQUENCE_TEXTURE_UNIT,'uTexSequence'),
+                                      (BNG_DETAIL_TEXTURE_UNIT,'uTexBngDetail'),(VEHICLE_PALETTE_TEXTURE_UNIT,'uTexVehicleP2'),
+                                      (TINT_DETAIL_TEXTURE_UNIT,'uTexTintDetail')):
+                        sh.glUniform1i(u[name], unit)
+                self._apply_material(u, entry, level)
+                reticle = entry.get('forward') if entry.get('forward', {}).get('kind') == 'victor_reticle' else None
+                if reticle and reticle.get('blend') == 'additive':
+                    gl.glEnable(self.GL_BLEND); gl.glBlendFunc(self.GL_SRC_ALPHA, self.GL_ONE)
+                    gl.glDepthMask(0); gl.glEnable(self.GL_CULL_FACE)
+                pane = entry.get('alpha_pane')
+                if pane:
+                    gl.glBlendFunc.argtypes = [ctypes.c_uint, ctypes.c_uint]; gl.glDepthMask.argtypes = [ctypes.c_ubyte]
+                    gl.glEnable(self.GL_BLEND); self._blend_over()
+                    gl.glDepthMask(0); (gl.glDisable if pane.get('two_sided') else gl.glEnable)(self.GL_CULL_FACE)
+                # basic_flat_color keeps the flags word's back-face cull (inward-facing shells such as the Telepathipus brain
+                # case inside); other opaque materials draw both faces.
+                cull = bool((entry.get('flat_surface') or {}).get('cull_back'))
+                if cull:
+                    gl.glEnable(self.GL_CULL_FACE)
+                self._draw_range(index_array, first, count)
+                if cull:
+                    gl.glDisable(self.GL_CULL_FACE)
+                if pane:
+                    gl.glDepthMask(1); gl.glDisable(self.GL_BLEND); gl.glDisable(self.GL_CULL_FACE)
+                if reticle and reticle.get('blend') == 'additive':
+                    gl.glDepthMask(1); gl.glDisable(self.GL_BLEND); gl.glDisable(self.GL_CULL_FACE)
+            shells = [b for b in opaque if self.native_translation and level == 2
+                      and ((self._gl_textures or {}).get(b[0]) or {}).get('fur_shell_translation')]
+            if shells:
+                self._draw_fur_shells(index_array, shells, skin)
+            program, u = base_program, base_u
+            sh.glUseProgram(program)
+            if glass:
+                self._bloom_before(hdr)
+                self._draw_glass(index_array, glass, skin)
+                sh.glUseProgram(program)
+            gl.glDisable(self.GL_POLYGON_OFFSET_FILL)
+            if level == 2 and effect_quads:
+                self._bloom_before(hdr)
+                self._draw_effect_preview(effect_quads)
+                sh.glUseProgram(program)
+            if hdr:
+                self._hdr_resolve(hdr)
+                sh.glUseProgram(program)
+        if mode in ("Wireframe", "Solid + wireframe"):
+            sh.glUniform1i(u["uMode"], 3)
+            sh.glUniform3f(u["uColor"], *((0.62, 0.78, 0.95) if mode == "Wireframe" else (0.12, 0.13, 0.15)))
+            gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_LINE)
+            gl.glDrawElements(self.GL_TRIANGLES, len(index_array), self.GL_UNSIGNED_INT, self._vptr(index_array, 0, self.GL_ELEMENT_ARRAY_BUFFER))
+            gl.glPolygonMode(self.GL_FRONT_AND_BACK, self.GL_FILL)
+        self._unbind_material_units()
+        self._disable_shader_arrays()
+        sh.glUseProgram(0)
+
+    def _draw_fur_shells(self, index_array, batches, skin):
+        """Rift Apart fur shells (nwo.games.rcra.fur): after every opaque batch, each fur batch again once per shell layer
+        1 .. L - 1 with its shell program (rcra_glsl.shell_vertex_source), inner layer first, blended over by its coverage
+        without depth writes, both faces."""
+        from nwo.viewer.shading import BONE_TEXTURE_UNIT
+        gl, sh = self._gl, self._shading
+        gl.glBlendFunc.argtypes = [ctypes.c_uint, ctypes.c_uint]; gl.glDepthMask.argtypes = [ctypes.c_ubyte]
+        for slot, first, count in batches:
+            entry = (self._gl_textures or {}).get(slot) or {}
+            receipt, textures = entry['fur_shell_translation'], entry['fur_shell_textures']
+            program, u = sh.fur_shell_program(receipt, {api: texture[1] for api, texture in textures.items()})
+            sh.glUseProgram(program); self._apply_lighting(u)
+            sh.glUniform1i(u['uSkin'], int(skin))
+            sh.glUniform1i(u['uBoneTex'], BONE_TEXTURE_UNIT)
+            sh.glUniform1f(u['uBoneWidth'], float(4 * (self._bone_count or 1)))
+            sh.glUniform1i(u['uMode'], 2)
+            sh.glUniform3f(u['uColor'], 0.72, 0.74, 0.78)
+            self._apply_material(u, dict(native_translation=receipt, native_textures=textures), 2)
+            fur = receipt['fur']
+            sh.glUniform1f(u['uFurInverse'], 1.0 / float(fur['layers']))
+            sh.glUniform1f(u['uFurLength'], float(fur['length']))
+            sh.glUniform1f(u['uFurOffsetScale'], float(fur['offset_scale']))
+            gl.glEnable(self.GL_BLEND); self._blend_over(); gl.glDepthMask(0); gl.glDisable(self.GL_CULL_FACE)
+            for layer in range(1, int(fur['layers'])):
+                sh.glUniform1f(u['uFurLayer'], float(layer))
+                self._draw_range(index_array, first, count)
+            gl.glDepthMask(1); gl.glDisable(self.GL_BLEND)
+
+    def _disable_shader_arrays(self):
+        """Turn every generic vertex attribute array the shaded path can enable off again. A shaded draw that raises
+        part-way leaves them enabled, and the fixed-function fallback then reads their dangling pointers."""
+        from nwo.viewer.shading import ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, RCRA_COLOUR_ATTRIBUTE, UV1_ATTRIBUTE
+        sh = self._shading
+        for location in (14, 15, RCRA_COLOUR_ATTRIBUTE, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, UV1_ATTRIBUTE, *ATTRIBUTES.values()):
+            sh.glDisableVertexAttribArray(location)
+
+    def _effect_frame(self):
+        """This frame's effect quads in Shaded mode (the health crate's idle effect, nwo/viewer/idle_effect.py, a holocon
+        device's hologram, nwo/viewer/holocon_effect.py, or a holocard's glow, nwo/viewer/holocard_effect.py), and the effect light for _apply_lighting; none for other models
+        or beyond the effect's fade distance."""
+        self._preview_light = None
+        preview = (self._payload or {}).get('effect_preview')
+        if not preview or self._mode != 'Shaded':
+            return []
+        if preview.get('family') == 'holocon':
+            from nwo.viewer.holocon_effect import billboards
+        elif preview.get('family') == 'holocard':
+            from nwo.viewer.holocard_effect import billboards
+        elif preview.get('family') == 'mech_flame':
+            from nwo.viewer.mech_flame_effect import billboards
+        else:
+            from nwo.viewer.idle_effect import billboards
+        modelview = (ctypes.c_float * 16)()
+        self._gl.glGetFloatv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        self._gl.glGetFloatv(self.GL_MODELVIEW_MATRIX, modelview)
+        quads, self._preview_light = billboards(preview, list(modelview))
+        return quads
+
+    def _effect_textures_for(self, preview):
+        """GL textures of the effect's sprite images (noise, spin, ring), uploaded once per payload. Roles in the preview's
+        ``srgb_roles`` decode sRGB in the sampler and those in ``mipmap_roles`` get a mip chain (the holocard glow's images,
+        sampled with an implicit LOD as in the game)."""
+        cached = getattr(self, '_effect_textures', None)
+        if cached is None or cached[0] is not preview:
+            self._release_effect_textures()
+            uploaded = {}
+            srgb, mipmapped = set(preview.get('srgb_roles') or ()), set(preview.get('mipmap_roles') or ())
+            for role, texture in (preview.get('textures') or {}).items():
+                try:
+                    uploaded[role] = self._upload_texture(texture, decode_srgb=role in srgb, mipmaps=role in mipmapped)
+                except Exception:   # a refused format draws that sprite kind without its image
+                    uploaded[role] = 0
+            cached = self._effect_textures = (preview, uploaded)
+        return cached[1]
+
+    def _release_effect_textures(self):
+        cached = getattr(self, '_effect_textures', None)
+        self._effect_textures = None
+        ids = [name for name in (cached[1].values() if cached else ()) if name]
+        if ids:
+            self._gl.glDeleteTextures.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            self._gl.glDeleteTextures(len(ids), (ctypes.c_uint * len(ids))(*ids))
+
+    def _draw_effect_preview(self, quads):
+        """The health crate's idle effect, a holocon hologram or a holocard's glow: view-space quads with the decoded sprite
+        programs (EFFECT_FRAGMENT), alpha-over (the holocard's additive, SRC_ALPHA / ONE), depth-tested without depth write
+        (the flares and the holocard quads with depth test off; the holocon icon culls back faces, as captured), after the panes and glass, into the float scene target when there is one
+        (_hdr_begin). A labelled preview: the module's PREVIEW_LIMITATIONS names the presentation values and inferred
+        stand-ins."""
+        from nwo.viewer.idle_effect import MASK_WEIGHT
+        gl, sh = self._gl, self._shading
+        preview = self._payload['effect_preview']
+        textures = self._effect_textures_for(preview)
+        program, u = sh.effect_program()
+        sh.glUseProgram(program)
+        self._apply_lighting(u)
+        units = ((0, 'noise', 'uEffectNoise'), (1, 'spin', 'uEffectSpin'), (2, 'ring', 'uEffectRing'), (3, 'icon', 'uHoloIcon'),
+                 (4, 'background', 'uHoloBackground'), (5, 'scan', 'uHoloScan'), (6, 'trigger', 'uHoloTrigger'),
+                 (8, 'holocard_glow', 'uCardGlow'), (9, 'holocard_noise', 'uCardNoise'), (10, 'ethereal', 'uCardSmoke'),
+                 (11, 'sparkle', 'uCardSparkle'), (12, 'mech_flame_noise', 'uFlameNoise'))
+        for unit, role, name in units:
+            sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+            gl.glBindTexture(self.GL_TEXTURE_2D, textures.get(role, 0))
+            sh.glUniform1i(u[name], unit)
+        sh.glUniform1i(u['uHoloLaser'], 7)
+        sh.glActiveTexture(self.GL_TEXTURE0)
+        sh.glUniform1f(u['uEffectAmplitude'], float(preview['amplitude']))
+        sh.glUniform1f(u['uEffectTime'], float(preview.get('frame_time', 0.0)))
+        values, frame = preview.get('icon_values'), preview.get('frame')
+        if values:
+            sh.glUniform4f(u['uHoloOffsetsRB'], *values['offset_r'], *values['offset_b'])
+            sh.glUniform2f(u['uHoloOffsetG'], *values['offset_g'])
+            sh.glUniform1f(u['uHoloHue'], float(values['hue']))
+        if frame:
+            sh.glUniform3f(u['uHoloFrame'], float(frame['time']), float(frame['random']), float(frame['seed']))
+        gl.glBlendFunc.argtypes = [ctypes.c_uint, ctypes.c_uint]; gl.glDepthMask.argtypes = [ctypes.c_ubyte]
+        gl.glVertex3f.argtypes = [ctypes.c_float] * 3; gl.glTexCoord2f.argtypes = [ctypes.c_float] * 2
+        gl.glNormal3f.argtypes = [ctypes.c_float] * 3
+        gl.glEnable(self.GL_BLEND); self._blend_over()
+        additive = False
+        gl.glDepthMask(0); gl.glDisable(self.GL_CULL_FACE)
+        gl.glMatrixMode(self.GL_MODELVIEW); gl.glPushMatrix(); gl.glLoadIdentity()   # quads are in view space
+        try:
+            for quad in quads:
+                if quad['depth_test']:
+                    gl.glEnable(self.GL_DEPTH_TEST)
+                else:
+                    gl.glDisable(self.GL_DEPTH_TEST)
+                if quad.get('cull'):
+                    gl.glEnable(self.GL_CULL_FACE)
+                else:
+                    gl.glDisable(self.GL_CULL_FACE)
+                if quad.get('laser'):
+                    sh.glActiveTexture(self.GL_TEXTURE0 + 7)
+                    gl.glBindTexture(self.GL_TEXTURE_2D, textures.get(quad['laser'], 0))
+                    sh.glActiveTexture(self.GL_TEXTURE0)
+                sh.glUniform1i(u['uEffectKind'], quad['kind'])
+                sh.glUniform3f(u['uEffectColour'], *quad['colour'])
+                sh.glUniform1f(u['uEffectAlpha'], quad['alpha'])
+                sh.glUniform1f(u['uEffectDiscard'], quad['discard'])
+                sh.glUniform1f(u['uEffectMaskWeight'], MASK_WEIGHT.get(quad['kind'], 0.0))
+                soft = quad.get('soft')   # holocon glow: soft-particle plane and size; 0 keeps the term at 1
+                sh.glUniform4f(u['uEffectSoftPlane'], *(soft[:4] if soft else (0.0, 0.0, 0.0, 0.0)))
+                sh.glUniform1f(u['uEffectSoftSize'], float(soft[4]) if soft else 0.0)
+                if bool(quad.get('additive')) != additive:   # the holocard glow: SRC_ALPHA / ONE, coverage unchanged
+                    additive = bool(quad.get('additive'))
+                    if not additive:
+                        self._blend_over()
+                    elif getattr(self, '_linear_output', False):
+                        self._hdr_fns['glBlendFuncSeparate'](self.GL_SRC_ALPHA, self.GL_ONE, 0, 1)   # ZERO, ONE
+                    else:
+                        gl.glBlendFunc(self.GL_SRC_ALPHA, self.GL_ONE)
+                sh.glUniform3f(u['uEffectFace'], *quad.get('face', (0.0, 0.0, 1.0)))
+                normals = quad.get('normals') or ((0.0, 0.0, 1.0),) * len(quad['corners'])
+                gl.glBegin(0x0004 if quad.get('triangles') else 0x0007)   # GL_TRIANGLES (the mech flame mesh) or GL_QUADS
+                for ((x, y, z), (s, t)), normal in zip(quad['corners'], normals):
+                    gl.glNormal3f(*normal); gl.glTexCoord2f(s, t); gl.glVertex3f(x, y, z)
+                gl.glEnd()
+        finally:
+            gl.glPopMatrix()
+            if additive:
+                self._blend_over()
+            gl.glEnable(self.GL_DEPTH_TEST); gl.glDepthMask(1); gl.glDisable(self.GL_BLEND); gl.glDisable(self.GL_CULL_FACE)
+            for unit in (12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0):
+                sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+                gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+
+    # Float scene target (2026-11-07) -------------------------------------------
+    # The game alpha-blends its forward draws into an HDR scene target and tonemaps once. Frames with health crate panes or
+    # idle-effect quads do the same: every pass draws into an RGBA16F colour + depth texture target with display() bypassed
+    # (uTonemap 3, LINEAR_TONEMAP), and shading.HDR_RESOLVE_FRAGMENT tonemaps it over the background. Every other frame
+    # draws display-referred straight into the window, as before (its glass still tonemaps per fragment).
+    LINEAR_TONEMAP = 3
+    BLOOM = True   # the decoded bloom (nwo/viewer/bloom.py) over frames that use the float scene target
+    # Emission-only forward programs whose colour is far above display white at a small alpha (the turret barrier and its
+    # targeting display: alpha 19/255 over HDR emission). Tonemapped per fragment they would clip to white before blending
+    # and show as a faint pane; the game blends them in its HDR target, so their frames use the float target too.
+    # The Telepathipus brain case (uKind 20) mixes the scene colour behind it into its own colour, so its frames need the
+    # scene-linear colour of the float target to copy (_scene_copies). The test dummy's energy ball (uKind 25) blends HDR
+    # emission (G up to about 2 in its capture) alpha-over in the game's float target.
+    HDR_FORWARD_KINDS = frozenset({'turret_shield', 'turret_hud', 'brain_case', 'energy_ball', TRANSLATED_FORWARD})
+    # Frames with a self-lit material (self_lit_entry: the Clank bots' eyes, antenna bulbs) also use the float target, so the
+    # decoded bloom glows around their emission as in the game (gadgebot capture: eye glow reproduced to 0.5 %). Without a
+    # transparent pass the bloom's 'before' copy is the resolve copy, as in the game's chain.
+    BLOOM_EMITTERS = True
+    GL_FRAMEBUFFER, GL_FRAMEBUFFER_BINDING, GL_FRAMEBUFFER_COMPLETE = 0x8D40, 0x8CA6, 0x8CD5
+    _HDR_FUNCTIONS = {'glGenFramebuffers': (None, 'ip'), 'glBindFramebuffer': (None, 'uu'),
+                      'glFramebufferTexture2D': (None, 'uuuui'), 'glCheckFramebufferStatus': ('u', 'u'),
+                      'glDeleteFramebuffers': (None, 'ip'), 'glBlendFuncSeparate': (None, 'uuuu')}
+
+    def _hdr_functions(self):
+        """GL 3 framebuffer and GL 1.4 separate-blend entry points, or False when the driver lacks one."""
+        functions = self.__dict__.get('_hdr_fns')
+        if functions is None:
+            gl, types = self._gl, dict(i=ctypes.c_int, u=ctypes.c_uint, p=ctypes.c_void_p)
+            gl.wglGetProcAddress.argtypes = [ctypes.c_char_p]; gl.wglGetProcAddress.restype = ctypes.c_void_p
+            functions = {}
+            for name, (result, arguments) in self._HDR_FUNCTIONS.items():
+                address = gl.wglGetProcAddress(name.encode())
+                if not address or address in (1, 2, 3, ctypes.c_void_p(-1).value):
+                    functions = False
+                    break
+                functions[name] = ctypes.WINFUNCTYPE(types.get(result), *(types[a] for a in arguments))(address)
+            self._hdr_fns = functions
+        return functions
+
+    def _hdr_create(self, functions, width, height):
+        """The target for one viewport size: {'size', 'fbo', 'colour', 'depth'}; fbo 0 when the driver refuses it."""
+        gl = self._gl
+        names = (ctypes.c_uint * 2)()
+        gl.glGenTextures(2, names)
+        self._shading.glActiveTexture(self.GL_TEXTURE0)
+        for name, (internal, layout, kind) in zip(names, ((0x881A, 0x1908, self.GL_FLOAT), (0x81A6, 0x1902, 0x1405))):
+            gl.glBindTexture(self.GL_TEXTURE_2D, name)   # RGBA16F colour; DEPTH_COMPONENT24 depth
+            for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, 0x2600), (self.GL_TEXTURE_MAG_FILTER, 0x2600),
+                                     (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F)):
+                gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
+            gl.glTexImage2D(self.GL_TEXTURE_2D, 0, internal, width, height, 0, layout, kind, None)
+        gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+        frame = ctypes.c_uint(0)
+        functions['glGenFramebuffers'](1, ctypes.byref(frame))
+        functions['glBindFramebuffer'](self.GL_FRAMEBUFFER, frame.value)
+        functions['glFramebufferTexture2D'](self.GL_FRAMEBUFFER, 0x8CE0, self.GL_TEXTURE_2D, names[0], 0)   # COLOR_ATTACHMENT0
+        functions['glFramebufferTexture2D'](self.GL_FRAMEBUFFER, 0x8D00, self.GL_TEXTURE_2D, names[1], 0)   # DEPTH_ATTACHMENT
+        target = dict(size=(width, height), fbo=frame.value, colour=names[0], depth=names[1])
+        if functions['glCheckFramebufferStatus'](self.GL_FRAMEBUFFER) != self.GL_FRAMEBUFFER_COMPLETE:
+            self._hdr_release(target)
+            target = dict(size=(width, height), fbo=0, colour=0, depth=0)
+        return target
+
+    def _hdr_release(self, target=None):
+        target = target or self.__dict__.pop('_hdr_target', None)
+        if target and target.get('fbo'):
+            self._gl.glDeleteTextures(2, (ctypes.c_uint * 2)(target['colour'], target['depth']))
+            self._hdr_fns['glDeleteFramebuffers'](1, ctypes.byref(ctypes.c_uint(target['fbo'])))
+
+    def _hdr_begin(self):
+        """Bind and clear the float scene target for this frame and switch display() to linear output; returns the target
+        with the framebuffer to resolve into, or None (no framebuffer support: the frame blends display-referred)."""
+        functions = self._hdr_functions()
+        if not functions:
+            return None
+        gl = self._gl
+        gl.glGetIntegerv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        viewport, previous = (ctypes.c_int * 4)(), ctypes.c_int(0)
+        gl.glGetIntegerv(0x0BA2, viewport)   # GL_VIEWPORT
+        gl.glGetIntegerv(self.GL_FRAMEBUFFER_BINDING, ctypes.byref(previous))
+        size = (max(1, viewport[2]), max(1, viewport[3]))
+        target = self.__dict__.get('_hdr_target')
+        if target is None or target['size'] != size:
+            self._hdr_release()
+            target = self._hdr_target = self._hdr_create(functions, *size)
+        functions['glBindFramebuffer'](self.GL_FRAMEBUFFER, target['fbo'] or previous.value)
+        if not target['fbo']:
+            return None
+        getattr(self, '_gl_direct', gl).glClearColor(0.0, 0.0, 0.0, 0.0)
+        gl.glClear(self.GL_COLOR_BUFFER_BIT | self.GL_DEPTH_BUFFER_BIT)
+        self._linear_output, self._hdr_previous = True, previous.value
+        self._bloom_before_done = False
+        return dict(target, previous=previous.value)
+
+    def _blend_over(self):
+        """SRC_ALPHA / ONE_MINUS_SRC_ALPHA; in the float scene target the alpha channel accumulates coverage instead."""
+        gl = self._gl
+        if getattr(self, '_linear_output', False):
+            self._hdr_fns['glBlendFuncSeparate'](self.GL_SRC_ALPHA, self.GL_ONE_MINUS_SRC_ALPHA, self.GL_ONE, self.GL_ONE_MINUS_SRC_ALPHA)
+        else:
+            gl.glBlendFunc.argtypes = [ctypes.c_uint, ctypes.c_uint]
+            gl.glBlendFunc(self.GL_SRC_ALPHA, self.GL_ONE_MINUS_SRC_ALPHA)
+
+    def _hdr_resolve(self, target):
+        """Tonemap the float scene target once into the framebuffer it replaced (shading.HDR_RESOLVE_FRAGMENT)."""
+        gl, sh = self._gl, self._shading
+        self._linear_output = False
+        bloom = self._bloom_texture(target)   # runs the bloom chain into its own targets (None without one)
+        self._hdr_fns['glBindFramebuffer'](self.GL_FRAMEBUFFER, target['previous'])
+        program, u = sh.hdr_resolve_program()
+        sh.glUseProgram(program)
+        self._apply_lighting(u)
+        for unit, name in ((0, 'colour'), (1, 'depth')):
+            sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+            gl.glBindTexture(self.GL_TEXTURE_2D, target[name])
+            sh.glUniform1i(u['uHdr' + name.title()], unit)
+        sh.glActiveTexture(self.GL_TEXTURE0 + 2)
+        gl.glBindTexture(self.GL_TEXTURE_2D, bloom or 0)
+        sh.glUniform1i(u['uBloom'], 2)
+        sh.glUniform1i(u['uBloomOn'], int(bool(bloom)))
+        sh.glActiveTexture(self.GL_TEXTURE0)
+        sh.glUniform2f(u['uHdrSize'], float(target['size'][0]), float(target['size'][1]))
+        straight = bool(getattr(self, 'transparent', False))   # thumbnail renderer: transparent target read as straight alpha
+        sh.glUniform1i(u['uHdrStraight'], int(straight))
+        # The colour the window was cleared to (the thumbnail renderer's opaque target clears to its own grey).
+        background = getattr(self._gl, '_clear', None) or gl_color("viewport")
+        sh.glUniform3f(u['uHdrBackground'], *(float(c) for c in background[:3]))
+        gl.glBlendFunc.argtypes = [ctypes.c_uint, ctypes.c_uint]; gl.glDepthMask.argtypes = [ctypes.c_ubyte]
+        gl.glVertex2f.argtypes = [ctypes.c_float] * 2
+        gl.glDisable(self.GL_DEPTH_TEST); gl.glDepthMask(0); gl.glDisable(self.GL_CULL_FACE)
+        if not straight:
+            gl.glEnable(self.GL_BLEND); gl.glBlendFunc(self.GL_ONE, self.GL_ONE_MINUS_SRC_ALPHA)
+        for matrix in (self.GL_PROJECTION, self.GL_MODELVIEW):
+            gl.glMatrixMode(matrix); gl.glPushMatrix(); gl.glLoadIdentity()
+        try:
+            gl.glBegin(0x0007)   # GL_QUADS
+            for x, y in ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)):
+                gl.glVertex2f(x, y)
+            gl.glEnd()
+        finally:
+            for matrix in (self.GL_PROJECTION, self.GL_MODELVIEW):
+                gl.glMatrixMode(matrix); gl.glPopMatrix()
+            gl.glEnable(self.GL_DEPTH_TEST); gl.glDepthMask(1); gl.glDisable(self.GL_BLEND)
+            for unit in (2, 1, 0):
+                sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+                gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+
+    # Bloom (nwo/viewer/bloom.py) ----------------------------------------------
+    # The float scene target is copied (13-tap downsample) before the first transparent draw and again at the resolve; the
+    # decoded pass list turns the two into the bloom texture that HDR_RESOLVE_FRAGMENT adds before its sRGB encode.
+    def _bloom_image(self, functions, width, height):
+        """One RGBA16F bilinear clamp-to-edge image with a framebuffer: {'w', 'h', 'tex', 'fbo'}."""
+        gl = self._gl
+        name = ctypes.c_uint(0)
+        gl.glGenTextures(1, ctypes.byref(name))
+        self._shading.glActiveTexture(self.GL_TEXTURE0)
+        gl.glBindTexture(self.GL_TEXTURE_2D, name.value)
+        for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                 (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F)):
+            gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
+        gl.glTexImage2D(self.GL_TEXTURE_2D, 0, 0x881A, width, height, 0, 0x1908, self.GL_FLOAT, None)
+        gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+        frame = ctypes.c_uint(0)
+        functions['glGenFramebuffers'](1, ctypes.byref(frame))
+        functions['glBindFramebuffer'](self.GL_FRAMEBUFFER, frame.value)
+        functions['glFramebufferTexture2D'](self.GL_FRAMEBUFFER, 0x8CE0, self.GL_TEXTURE_2D, name.value, 0)
+        if functions['glCheckFramebufferStatus'](self.GL_FRAMEBUFFER) != self.GL_FRAMEBUFFER_COMPLETE:
+            raise RuntimeError('bloom framebuffer incomplete')
+        return dict(w=width, h=height, tex=name.value, fbo=frame.value)
+
+    def _bloom_images(self, size):
+        """The bloom images for a viewport size (before, after, the pyramid D0..D10 and the bloom texture), cached."""
+        from nwo.viewer import bloom
+        cached = self.__dict__.get('_bloom')
+        if cached is None or cached['size'] != size:
+            self._bloom_release()
+            functions = self._hdr_functions()
+            half = bloom.padded_half(*size)
+            sizes = {'before': half, 'after': half, 'bloom': bloom.bloom_size(*size)}
+            sizes.update({'D%d' % i: s for i, s in enumerate(bloom.level_sizes(*size))})
+            cached = self._bloom = dict(size=size, images={})
+            for name, (w, h) in sizes.items():
+                cached['images'][name] = self._bloom_image(functions, w, h)
+        return cached['images']
+
+    def _bloom_release(self):
+        cached = self.__dict__.pop('_bloom', None)
+        if cached:
+            images = list(cached['images'].values())
+            self._gl.glDeleteTextures(len(images), (ctypes.c_uint * len(images))(*(i['tex'] for i in images)))
+            for image in images:
+                self._hdr_fns['glDeleteFramebuffers'](1, ctypes.byref(ctypes.c_uint(image['fbo'])))
+
+    def _bloom_pass(self, p, images, source=None, source_size=None):
+        """Draw one pass of bloom.passes (or a 'down13' dict) into its image; `source` is the scene colour texture of a 13-tap pass."""
+        gl, sh = self._gl, self._shading
+        dst = images[p['dst']]
+        self._hdr_fns['glBindFramebuffer'](self.GL_FRAMEBUFFER, dst['fbo'])
+        gl.glViewport(0, 0, dst['w'], dst['h'])
+        program, u = sh.bloom_program(p['kind'])
+        sh.glUseProgram(program)
+        sh.glUniform2f(u['uSize'], float(dst['w']), float(dst['h']))
+        if p['kind'] == 'down13':
+            sources, names = [source], ('uSrc',)
+            sh.glUniform2f(u['uSrcSize'], float(source_size[0]), float(source_size[1]))
+        elif p['kind'] == 'prefilter':
+            sources, names = [images[name]['tex'] for name in p['src']], ('uBefore', 'uAfter')
+            sh.glUniform1f(u['uGain'], float(p['gain']))
+            sh.glUniform1f(u['uWeight'], float(p['weight']))
+            sh.glUniform1i(u['uDiff'], int(p['diff']))
+        else:
+            sources, names = [images[p['src'][0]]['tex']], ('uSrc',)
+            sh.glUniform2f(u['uOffset'], float(p['offset'][0]), float(p['offset'][1]))
+            if p['kind'] == 'up':
+                sh.glUniform1f(u['uAlpha'], float(p['alpha']))
+        for unit, (name, texture) in enumerate(zip(names, sources)):
+            sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+            gl.glBindTexture(self.GL_TEXTURE_2D, texture)
+            sh.glUniform1i(u[name], unit)
+        if p.get('blend'):
+            gl.glEnable(self.GL_BLEND)
+            gl.glBlendFunc(self.GL_SRC_ALPHA, self.GL_ONE_MINUS_SRC_ALPHA if p['blend'] == 'lerp' else self.GL_ONE)
+        else:
+            gl.glDisable(self.GL_BLEND)
+        gl.glBegin(0x0007)   # GL_QUADS
+        for x, y in ((-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)):
+            gl.glVertex2f(x, y)
+        gl.glEnd()
+        for unit in range(len(sources)):
+            sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+            gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+
+    def _bloom_state(self):
+        """The GL state the bloom passes change: viewport, program, framebuffer, texture unit, depth, blend and cull."""
+        gl = self._gl
+        gl.glGetIntegerv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        gl.glIsEnabled.restype = ctypes.c_ubyte
+        gl.glGetBooleanv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        viewport, program, frame, unit, mask = (ctypes.c_int * 4)(), ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0), ctypes.c_ubyte(1)
+        gl.glGetIntegerv(0x0BA2, viewport)
+        gl.glGetIntegerv(0x8B8D, ctypes.byref(program))   # GL_CURRENT_PROGRAM
+        gl.glGetIntegerv(self.GL_FRAMEBUFFER_BINDING, ctypes.byref(frame))
+        gl.glGetIntegerv(0x84E0, ctypes.byref(unit))      # GL_ACTIVE_TEXTURE
+        gl.glGetBooleanv(0x0B72, ctypes.byref(mask))      # GL_DEPTH_WRITEMASK
+        return dict(viewport=tuple(viewport), program=program.value, frame=frame.value, unit=unit.value, mask=mask.value,
+                    depth=gl.glIsEnabled(self.GL_DEPTH_TEST), blend=gl.glIsEnabled(self.GL_BLEND), cull=gl.glIsEnabled(self.GL_CULL_FACE))
+
+    def _bloom_restore(self, saved):
+        gl, sh = self._gl, self._shading
+        gl.glDepthMask.argtypes = [ctypes.c_ubyte]
+        self._hdr_fns['glBindFramebuffer'](self.GL_FRAMEBUFFER, saved['frame'])
+        gl.glViewport(*saved['viewport'])
+        sh.glUseProgram(saved['program'])
+        sh.glActiveTexture(saved['unit'])
+        gl.glDepthMask(saved['mask'])
+        for capability, was in ((self.GL_DEPTH_TEST, saved['depth']), (self.GL_BLEND, saved['blend']), (self.GL_CULL_FACE, saved['cull'])):
+            (gl.glEnable if was else gl.glDisable)(capability)
+
+    def _bloom_prepare(self):
+        gl = self._gl
+        gl.glBlendFunc.argtypes = [ctypes.c_uint, ctypes.c_uint]
+        gl.glVertex2f.argtypes = [ctypes.c_float] * 2
+        gl.glDisable(self.GL_DEPTH_TEST)
+        gl.glDisable(self.GL_CULL_FACE)
+
+    def _bloom_before(self, hdr):
+        """Copy the float scene target (half resolution, 13 taps) before the first transparent draw of the frame."""
+        if not hdr or not self.BLOOM or self.__dict__.get('_bloom_before_done') or self.__dict__.get('_bloom_error'):
+            return
+        self._bloom_before_done = True
+        saved = self._bloom_state()
+        try:
+            self._bloom_prepare()
+            images = self._bloom_images(hdr['size'])
+            self._bloom_pass(dict(kind='down13', dst='before'), images, hdr['colour'], hdr['size'])
+        except Exception as exc:   # a driver that refuses the float targets or programs keeps the frame without bloom
+            self._bloom_error = repr(exc)
+        finally:
+            self._bloom_restore(saved)
+
+    def _bloom_texture(self, target):
+        """Run the bloom chain for this frame; the GL texture of the bloom image, or None."""
+        self._bloom_before(target)   # a frame without a transparent pass: 'before' is the scene at the resolve
+        if not self.BLOOM or not self.__dict__.get('_bloom_before_done') or self.__dict__.get('_bloom_error'):
+            return None
+        from nwo.levels.display import EXPOSURE_MULTIPLIER
+        from nwo.viewer import bloom
+        saved = self._bloom_state()
+        try:
+            self._bloom_prepare()
+            images = self._bloom_images(target['size'])
+            self._bloom_pass(dict(kind='down13', dst='after'), images, target['colour'], target['size'])
+            state = self._lighting_state()
+            exposure = bloom.gate_exposure(state['exposure'], state['tonemap'] == self.GAME_TONEMAP, EXPOSURE_MULTIPLIER)
+            for p in bloom.passes(*target['size'], exposure):
+                self._bloom_pass(p, images)
+            return images['bloom']['tex']
+        except Exception as exc:
+            self._bloom_error = repr(exc)
+            return None
+        finally:
+            self._bloom_restore(saved)
+
+    def _hdr_abort(self):
+        """After a failed shaded draw: back to the framebuffer the float target replaced, without a resolve."""
+        if getattr(self, '_linear_output', False):
+            self._linear_output = False
+            self._hdr_fns['glBindFramebuffer'](self.GL_FRAMEBUFFER, self._hdr_previous)
+
+    def _unbind_material_units(self):
+        self._shading.glActiveTexture(self.GL_TEXTURE0+14);self._gl.glBindTexture(self.GL_TEXTURE_2D,0)
+        self._shading.glActiveTexture(self.GL_TEXTURE0 + 15); self._gl.glBindTexture(0x806F,0)
+        from nwo.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, BONE_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT
+        for unit in (15, 7, PARALLAX_HEIGHT_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, TINT_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, PICK_TEXTURE_UNIT, BONE_TEXTURE_UNIT, 2, 1, 0):
+            self._shading.glActiveTexture(self.GL_TEXTURE0 + unit)
+            self._gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+
+    RCRA_PROBE_UNIT, RCRA_BRDF_UNIT = 19, 20   # Rift Apart ambient light: the review probe cube and the BRDF lookup
+
+    def _apply_rcra_ambient(self, u, receipt):
+        """Bind the review probe and the engine's BRDF lookup for a Rift Apart receipt with an ``ambient`` recipe
+        (nwo.viewer.rcra_glsl.ambient_source) and set uRcraProbeOn; off while they are not ready."""
+        sh = self._shading
+        from nwo.viewer.rcra_glsl import uses_probe
+        textures = self._rcra_ambient_textures(receipt) if uses_probe(receipt) else None
+        if u.get('uRcraProbeOn', -1) != -1:
+            sh.glUniform1i(u['uRcraProbeOn'], 1 if textures else 0)
+        if not textures:
+            return
+        gl = self._gl
+        sh.glActiveTexture(self.GL_TEXTURE0 + self.RCRA_PROBE_UNIT)
+        gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP, textures[0])
+        sh.glActiveTexture(self.GL_TEXTURE0 + self.RCRA_BRDF_UNIT)
+        gl.glBindTexture(self.GL_TEXTURE_2D, textures[1])
+        sh.glActiveTexture(self.GL_TEXTURE0)
+        if u.get('uRcraProbe', -1) != -1:
+            sh.glUniform1i(u['uRcraProbe'], self.RCRA_PROBE_UNIT)
+        if u.get('uRcraBrdf', -1) != -1:
+            sh.glUniform1i(u['uRcraBrdf'], self.RCRA_BRDF_UNIT)
+
+    def _rcra_ambient_textures(self, receipt):
+        """(probe cube, BRDF lookup) GL names for the Rift Apart ambient light under the Shared HDRI lighting, or None. The
+        probe (nwo.games.rcra.probe: the review HDRI without its sun, prefiltered by the engine's probe program) is built
+        once per HDRI and install on a worker thread, cached on disk, and uploaded here with the world strength applied."""
+        state = self._lighting_state()
+        root = receipt.get('engine_root')
+        if not state['hdri'] or not root or not self._environment or not getattr(self._shading, 'supports_parallax', True):
+            return None   # the probe reads need textureCubeLod (GL_ARB_shader_texture_lod, as parallax does)
+        key = (root, self._environment.get('sha256'), self._environment.get('strength'))
+        build = self.__dict__.get('_rcra_probe')
+        if build is None or build['key'] != key:
+            if build is not None:
+                self._delete_rcra_probe(build)
+            build = self._rcra_probe = dict(key=key, levels=None, lut=None, names=None, error=None)
+            self._start_rcra_probe(build, root)
+        if build['names'] is None and build['levels'] is not None:
+            build['names'] = self._upload_rcra_probe(build)
+        return build['names'] or None
+
+    def _start_rcra_probe(self, build, root):
+        import threading
+
+        def work():
+            try:
+                from nwo.games.rcra import engine_tables, probe
+                from nwo.viewer.environment import CACHE_DIR, review_residual
+                image, _key = review_residual()
+                lut = engine_tables.brdf_lookup(root)[0]
+                build['levels'], build['lut'] = probe.cached_probe_levels(root, image, CACHE_DIR), lut
+            except Exception as error:   # the rig's ambient stays; the reason is kept for the status line
+                build['error'] = '%s: %s' % (type(error).__name__, error)
+                self.shading_warning = 'Rift Apart ambient light: ' + build['error']
+            try:
+                self.after(0, self._schedule_draw)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _upload_rcra_probe(self, build):
+        """(cube, 2D) GL names of the probe levels (RGB16F, every mip, trilinear, seamless) and the BRDF lookup's slice 0
+        (RGBA16F, linear, clamped), or (0, 0) on a GL error."""
+        import numpy as np
+        gl = self._gl
+        strength = float(self._environment.get('strength', 1.0))
+        names = []
+        cube = ctypes.c_uint(0)
+        gl.glGetError()
+        gl.glGenTextures(1, ctypes.byref(cube))
+        gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP, cube.value)
+        gl.glPixelStorei(self.GL_UNPACK_ALIGNMENT, 1)
+        for level, faces in enumerate(build['levels']):
+            for face in range(6):
+                data = np.ascontiguousarray(faces[face] * strength, np.float32)
+                gl.glTexImage2D(self.GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, 0x881B, data.shape[1], data.shape[0], 0,
+                                0x1907, self.GL_FLOAT, data.ctypes.data_as(ctypes.c_void_p))   # GL_RGB16F from RGB float
+        for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, 0x2703), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                 (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F), (0x8072, 0x812F),
+                                 (0x813C, 0), (0x813D, len(build['levels']) - 1)):   # LINEAR_MIPMAP_LINEAR, base and max level
+            gl.glTexParameteri(self.GL_TEXTURE_CUBE_MAP, parameter, value)
+        gl.glEnable(self.GL_TEXTURE_CUBE_MAP_SEAMLESS)
+        gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP, 0)
+        names.append(cube.value)
+        lut = ctypes.c_uint(0)
+        gl.glGenTextures(1, ctypes.byref(lut))
+        gl.glBindTexture(self.GL_TEXTURE_2D, lut.value)
+        data = np.ascontiguousarray(build['lut'], np.float32)
+        gl.glTexImage2D(self.GL_TEXTURE_2D, 0, 0x881A, data.shape[1], data.shape[0], 0, 0x1908, self.GL_FLOAT,
+                        data.ctypes.data_as(ctypes.c_void_p))   # GL_RGBA16F from RGBA float
+        for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR), (self.GL_TEXTURE_MAG_FILTER, self.GL_LINEAR),
+                                 (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F)):
+            gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
+        gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+        names.append(lut.value)
+        if gl.glGetError():
+            self._delete_rcra_probe(dict(names=tuple(names)))
+            build['error'] = 'GL upload failed'
+            return (0, 0)
+        return tuple(names)
+
+    def _delete_rcra_probe(self, build):
+        for name in build.get('names') or ():
+            if name:
+                self._gl.glDeleteTextures(1, ctypes.byref(ctypes.c_uint(name)))
+        build['names'] = None
+
+    def _apply_material(self, u, entry, level):
+        """Bind one material's textures and set its uniforms on the current opaque program."""
+        from nwo.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT, LEAF_CMA_TEXTURE_UNIT, RETICLE_TEXTURE_UNIT
+        gl, sh = self._gl, self._shading
+        translation, textures, _experimental = self._selected_surface(entry, level)
+        if translation:
+            from nwo.viewer.native_glsl import TEXTURE_UNITS
+            # Same sorted API allocation as emit_surface; no DAG emission during a draw.
+            for index, api in enumerate(sorted(textures)):
+                unit = TEXTURE_UNITS[index]
+                sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+                cube = len(textures[api]) > 2 and textures[api][2]   # a Rift Apart cube map (_upload_cube)
+                gl.glBindTexture(self.GL_TEXTURE_CUBE_MAP if cube else self.GL_TEXTURE_2D, textures[api][0])
+                sh.glUniform1i(u[f'uNativeTex{api}'], unit)
+            if translation.get('kind') == 'rcra':
+                self._apply_rcra_ambient(u, translation)
+            return
+        for unit, role, has, srgb in ((PARALLAX_HEIGHT_TEXTURE_UNIT, "_parallax_height", "uHasParallaxHeight", None), (GLOW_PARALLAX_TEXTURE_UNIT, "_glow_parallax", "uHasGlowParallax", "uSrgbGlowParallax"), (TINT_DETAIL_TEXTURE_UNIT, "_tint_detail", "uHasTintDetail", "uSrgbTintDetail"), (0, "_c", "uHasC", "uSrgbC"), (1, "_g", "uHasG", "uSrgbG"), (2, "_n", "uHasN", None),
+                                      (PICK_TEXTURE_UNIT, "_pick", "uHasP", "uSrgbP"),
+                                      (TINT_MASK_TEXTURE_UNIT, "_h", "uHasH", None), (ARCH_SEQUENCE_TEXTURE_UNIT, "_sequence", "uHasSequence", None), (BNG_DETAIL_TEXTURE_UNIT, "_bng_detail", "uHasBngDetail", None),
+                                      (VEHICLE_PALETTE_TEXTURE_UNIT, "_vehicle_p2", "uHasVehicleP2", "uSrgbVehicleP2")):
+            texture = entry.get(role) if level else None
+            sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+            gl.glBindTexture(self.GL_TEXTURE_2D, texture[0] if texture else 0)
+            sh.glUniform1i(u[has], 1 if texture else 0)
+            if srgb:
+                sh.glUniform1i(u[srgb], 1 if texture and texture[1] else 0)
+        # Novalis tree leaf colour (material E/S, frozen palette U): cma per pixel on its own unit.
+        leaf = (entry.get("leaf_colour") or {}) if level else {}
+        cma = entry.get("_cma") if level else None
+        sh.glActiveTexture(self.GL_TEXTURE0 + LEAF_CMA_TEXTURE_UNIT)
+        gl.glBindTexture(self.GL_TEXTURE_2D, cma[0] if cma else 0)
+        sh.glUniform1i(u["uTexCma"], LEAF_CMA_TEXTURE_UNIT)
+        sh.glUniform1i(u["uHasCma"], 1 if cma else 0)
+        sh.glUniform1i(u["uSrgbCma"], 1 if cma and cma[1] else 0)
+        sh.glUniform1i(u["uLeafColour"], 1 if cma and leaf.get("palette_rgb") else 0)
+        sh.glUniform4f(u["uLeafP"], float(leaf.get("exponent", 1.0)), float(leaf.get("scale", 1.0)), 1.0 if leaf.get("mapped_fresnel") else 0.0, 0.0)
+        sh.glUniform3f(u["uLeafPalette"], *(float(x) for x in leaf.get("palette_rgb", (1.0, 1.0, 1.0))))
+        fresnel = entry.get("fresnel_tint") or {}   # no texture or palette input, so model and level viewers both apply it
+        sh.glUniform1i(u["uFresnelTint"], 1 if fresnel else 0)
+        sh.glUniform3f(u["uFresnelC"], *(float(x) for x in fresnel.get("colour", (1.0, 1.0, 1.0))))
+        sh.glUniform1f(u["uFresnelE"], float(fresnel.get("exponent", 1.0)))
+        crate = entry.get("crate_tint") or {}   # constant colour only: model and level viewers both apply it
+        sh.glUniform1i(u["uCrateTint"], 1 if crate else 0)
+        sh.glUniform3f(u["uCrateC"], *(float(x) for x in crate.get("colour", (1.0, 1.0, 1.0))))
+        hair = entry.get("hair") or {}   # constant colours and keys only: model and level viewers both apply it
+        sh.glUniform1i(u["uHair"], 1 if hair else 0)
+        sh.glUniform3f(u["uHairA"], *(float(x) for x in hair.get("albedo", (1.0, 1.0, 1.0))))
+        sh.glUniform3f(u["uHairB"], *(float(x) for x in hair.get("spec", (0.0, 0.0, 0.0))))
+        sh.glUniform4f(u["uHairP"], float(hair.get("rim_exponent", 3.0)), float(hair.get("gloss_scale", 0.71)),
+                       float(hair.get("diffuse_sigma", 0.0)), float(hair.get("normal_strength", 0.3)))
+        flow = entry.get("liquid_flow") or {}
+        sh.glUniform1i(u["uLiquidFlow"], 1 if flow and level == 2 else 0)
+        sh.glUniform3f(u["uLiquidUV"], *(float(x) for x in flow.get("uv_offset", (0.0, 0.0))), 0.0)
+        flat = entry.get("flat_surface") or {}   # constant albedo, F0 and gloss: no texture input
+        sh.glUniform1i(u["uFlatSurface"], 1 if flat and level == 2 else 0)
+        sh.glUniform3f(u["uFlatColour"], *(float(x) for x in flat.get("colour", (1.0, 1.0, 1.0))))
+        sh.glUniform4f(u["uFlatSpec"], float(flat.get("f0", 0.0)), float(flat.get("gloss", 0.0)),
+                       1.0 if flat.get("texture_sum") else 0.0, 1.0 if flat.get("f0_colour") else 0.0)
+        sh.glUniform3f(u["uFlatF0"], *(float(x) for x in flat.get("f0_colour", (0.0, 0.0, 0.0))))
+        sh.glUniform1i(u["uBasicFlatColor"], 1 if flat.get("model") == "basic_flat_color" and level == 2 else 0)
+        sh.glUniform1f(u["uBasicFlatEmissionScale"], float(flat.get("emission_scale", 0.0)))
+        reticle = (entry.get('forward') or {}) if (entry.get('forward') or {}).get('kind') == 'victor_reticle' else {}
+        reticle_texture = entry.get('_reticle')
+        # The bounded reticle has no _c read, so it aliases sampler unit 0 only when its API8
+        # source exists. Leave ordinary materials' C texture intact; unit 14 remains puddle atlas.
+        if reticle and reticle_texture:
+            sh.glActiveTexture(self.GL_TEXTURE0 + RETICLE_TEXTURE_UNIT)
+            gl.glBindTexture(self.GL_TEXTURE_2D, reticle_texture[0])
+        sh.glUniform1i(u['uTexReticle'], RETICLE_TEXTURE_UNIT)
+        sh.glUniform1i(u['uHasReticle'], int(bool(reticle and reticle_texture)))
+        sh.glUniform1i(u['uVictorReticle'], int(bool(reticle and reticle_texture) and level == 2))
+        rp = reticle.get('params') or {}
+        sh.glUniform4f(u['uReticleP'], float(rp.get('uv_phase', 0.0)), float(rp.get('texture_gain', 0.0)),
+                       float(rp.get('ring_tint', 0.0)), float(rp.get('amplitude', 0.0)))
+        sh.glUniform3f(u['uReticleF0'], 0.0, 0.0999755859375, 0.0999755859375)
+        skin = entry.get("skin") or {}   # basic_skin writers: no extra texture besides the optional detail normal
+        sh.glUniform1i(u["uSkinKind"], int(skin.get("kind", 0)))
+        sh.glUniform4f(u["uSkinA"], float(skin.get("cap", 0.5)), float(skin.get("gloss_fresnel", 0.5)), float(skin.get("spec_fresnel", 1.0)), float(skin.get("exponent", 1.0)))
+        sh.glUniform4f(u["uSkinB"], float(skin.get("albedo", 1.0)), float(skin.get("gloss", 1.0)), float(skin.get("spec", 1.0)), float(skin.get("gloss2", 1.0)))
+        skin_detail = entry.get("skin_detail") or {}
+        sh.glUniform4f(u["uSkinC"], float(skin.get("spec2", 1.0)), float(skin_detail.get("uv_scale", 0.0)), float(skin_detail.get("blend", 0.0)), 0.0)
+        pom = entry.get('parallax') or {}
+        supported = getattr(sh, 'supports_parallax', True)
+        valid = parallax_preview_parameters_valid(pom)
+        if pom and not supported:
+            self.shading_warning = 'Parallax unavailable: explicit texture gradients require GL_ARB_shader_texture_lod'
+        elif pom and not valid:
+            self.shading_warning = 'Parallax unavailable: nonfinite parameters or invalid signed step endpoints; preview guard, native behavior unproven'
+        sh.glUniform1i(u['uParallax'], 1 if pom and level == 2 and supported and valid else 0)
+        sh.glUniform1i(u['uParallaxNormal'], 1 if entry.get('parallax_normal') else 0)
+        sh.glUniform1i(u['uTexParallaxHeight'], PARALLAX_HEIGHT_TEXTURE_UNIT)
+        sh.glUniform4f(u['uParallaxP'], *(float((pom if valid else {}).get(k,d)) for k,d in
+            (('height_scale',0.),('steps_front',16.),('steps_grazing',64.),('fade',1.))))
+        rock = entry.get('rock_blend') or {}
+        grass = entry.get('grass_blend') or {}
+        mud = entry.get('mud_blend') or {}
+        crater = entry.get('crater_blend') or {}
+        volume = entry.get('_rock_volume')
+        sh.glActiveTexture(self.GL_TEXTURE0 + 15); gl.glBindTexture(0x806F, volume[0] if volume else 0)
+        sh.glUniform1i(u['uRockTex'],15); sh.glUniform1i(u['uRockBlend'],1 if rock and volume and level == 2 else 0)
+        sh.glUniform1i(u['uMudBlend'],1 if mud and volume and not mud.get('unresolved_layers') and level == 2 else 0)
+        sh.glUniform4f(u['uMudP0'],float(mud.get('mask_strength',.5)),float(mud.get('sharpness',1.)),
+                       1./max(1e-5,float(mud.get('world_tile',1.))),1.-float(mud.get('mud_darken',0.)))
+        sh.glUniform4f(u['uMudP1'],float(mud.get('sand_uv_scale',1.)),float(mud.get('mud_uv_scale',1.)),float(mud.get('gloss_scale',1.)),
+                       float(mud.get('f0_scale',1.))*min(1.,max(0.,.3+.3*float(mud.get('f0_bias',0.)))))
+        sh.glUniform4f(u['uMudP2'],float(mud.get('grain_uv_scale',1.)),float(mud.get('sand_normal_uv_scale',1.)),
+                       float(mud.get('sand_normal_strength',1.)),0.)
+        sh.glUniform1i(u['uCraterBlend'],1 if crater and volume and not crater.get('unresolved_layers') and level == 2 else 0)
+        sh.glUniform4f(u['uCraterP'],1./max(1e-5,float(crater.get('world_tile',1.))),float(crater.get('g_uv_scale',1.)),
+                       float(getattr(self,'crater_paint_default',crater.get('paint_default',0.)))**2,float(crater.get('crater_uv_scale',1.)))
+        sh.glUniform1i(u['uGrassBlend'],1 if grass and volume and not grass.get('unresolved_layers') and level == 2 else 0)
+        sh.glUniform4f(u['uGrassP'],*(float(grass.get(k,d)) for k,d in (('threshold',.6),('uv_scale',1.),('layer_uv_scale',1.))),
+                       1./max(1e-5,float(grass.get('world_tile',1.))))
+        coral = entry.get('coral_blend') or {}
+        sh.glUniform1i(u['uCoralBlend'],1 if coral and volume and not coral.get('unresolved_layers') and level == 2 else 0)
+        if coral and volume and not coral.get('unresolved_layers'):
+            scroll = coral.get('scroll', ((0.,)*3,)*3); scales = coral.get('scales', [(1.,1.)]*10); flags = coral.get('extra_srgb', (False,)*10)
+            sh.glUniform4f(u['uCoralA'], float(coral.get('height_width', .5)), float(coral.get('water_top', 223.)),
+                           float(coral.get('water_fade', 2.)), 0.0)   # 0.333 CB0[99]: static render, game time 0
+            sh.glUniform4f(u['uCoralB'], float(coral.get('coral_f0', 1.)), float(coral.get('coral_gloss', 1.)),
+                           float(coral.get('base_f0', 1.)), float(coral.get('base_gloss', 1.)))
+            sh.glUniform3f(u['uCoralNoise'], *(float(x) for x in coral.get('noise_scale', (1., 1., 1.))))
+            sh.glUniform3fv(u['uCoralScroll'], 3, (ctypes.c_float * 9)(*(float(x) for row in scroll for x in row)))
+            fallback = getattr(self, 'ground_preview_controls', None) or coral.get('paint_fallback', (0.75, 0.5))
+            sh.glUniform2fv(u['uCoralPaint'], 1, (ctypes.c_float * 2)(float(fallback[0]) ** 2, float(fallback[1]) ** 2))
+            sh.glUniform2fv(u['uCoralScale'], 10, (ctypes.c_float * 20)(*(float(x) for pair in scales for x in pair)))
+            sh.glUniform1fv(u['uCoralSrgb'], 10, (ctypes.c_float * 10)(*(1.0 if x else 0.0 for x in flags)))
+        sed = entry.get('sediment_blend') or {}
+        sed_on = bool(sed and volume and not sed.get('unresolved_layers') and level == 2)
+        sh.glUniform1i(u['uSedKind'], ({'gas': 1, 'gbl': 2}.get(sed.get('kind'), 0) if sed_on else 0))
+        if sed_on:
+            if sed['kind'] == 'gas':
+                sh.glUniform4f(u['uSedA'], *(float(sed[k]) for k in ('gradient_start', 'gradient_end', 'weight_start', 'weight_end')))
+                sh.glUniform4f(u['uSedB'], float(sed['gloss_scale']), float(sed['f0_scale']), 0.0, 0.0)
+            else:
+                sh.glUniform4f(u['uSedA'], *(float(sed[k]) for k in ('world_tile', 'noise_a', 'noise_b', 'height_tile')))
+                sh.glUniform4f(u['uSedB'], float(sed['f0_scale']), float(sed['cliff_gloss_scale']), float(sed['wall_gloss_scale']), 0.0)
+            fallback = getattr(self, 'ground_preview_controls', None) or (sed.get('paint_fallback', 0.75),)
+            sh.glUniform1f(u['uSedPaint'], float(fallback[0]) ** 2)
+            sh.glUniform2fv(u['uSedScale'], 5, (ctypes.c_float * 10)(*(float(x) for pair in sed.get('scales', [(1., 1.)] * 5) for x in pair)))
+            sh.glUniform1fv(u['uSedSrgb'], 5, (ctypes.c_float * 5)(*(1.0 if x else 0.0 for x in sed.get('extra_srgb', (False,) * 5))))
+        sh.glUniform3f(u['uRockSrgb'],*[float(x) for x in (rock or grass or mud or crater).get('extra_srgb',(False,)*3)][:3])
+        scales = (rock or grass or mud or crater).get('scales',[(1.,1.)]*4)
+        sh.glUniform4f(u['uRockScale0'],*scales[0],*scales[1]); sh.glUniform4f(u['uRockScale1'],*scales[2],*scales[3])
+        sh.glUniform3f(u['uRockTint'],*(float(x) for x in rock.get('tint',(1.,)*3)))
+        sh.glUniform4f(u['uRockP'],*(float(rock.get(k,d)) for k,d in (('exponent',1.),('tint_amount',0.),('mask_strength',1.),('sharpness',1.))))
+        breakup = rock.get('variant') == 'color_breakup'
+        sh.glUniform3f(u['uRockBreakup'], 1. if breakup else 0., 1./max(1e-5,float(rock.get('world_tile',1.))),
+                       float(rock.get('layer_uv_scale',1.)))
+        puddles=entry.get('puddles') or {}; atlas=entry.get('_puddle_atlas')
+        sh.glActiveTexture(self.GL_TEXTURE0+14);gl.glBindTexture(self.GL_TEXTURE_2D,atlas[0] if atlas else 0)
+        sh.glUniform1i(u['uPuddleTex'],14);sh.glUniform1i(u['uHasPuddleAtlas'],1 if atlas else 0)
+        sh.glUniform1i(u['uPuddles'],1 if puddles and atlas and level==2 else 0)
+        p=puddles.get('params',[0.]*15)
+        sh.glUniform4f(u['uPuddle0'],*p[0:4]);sh.glUniform4f(u['uPuddle1'],*p[4:8])
+        sh.glUniform4f(u['uPuddle2'],*p[8:12]);sh.glUniform3f(u['uPuddle3'],*p[12:15])
+        scales=puddles.get('scales',[(1.,1.,0.,0.)]*2)
+        sludge=puddles.get('variant')=='sludge'
+        sh.glUniform4f(u['uPuddleSludge'],*((float(puddles.get('uv_scale',1.)),float(puddles.get('dry_gloss',1.)),float(puddles.get('dry_f0',1.)),1.)
+                                            if sludge else (1.,1.,1.,0.)))
+        sh.glUniform4f(u['uPuddleNoiseScale'],*scales[0]);sh.glUniform4f(u['uPuddleRippleScale'],*scales[1])
+        glow = entry.get("glow") or {}
+        sh.glUniform1i(u["uGlowKind"], int(glow.get("kind", 0)) if level == 2 else 0)
+        sh.glUniform3f(u["uGlowColour"], *(float(x) for x in glow.get("colour", (0.0,) * 3)))
+        multiplier = 1.0 + float(glow.get("vertex_fade", 0.0)) * (abs(float(glow.get("vertex_magnitude", 1.0))) - 1.0)
+        sh.glUniform4f(u["uGlowP"], float(glow.get("depth", 0.0)), float(glow.get("bias", 0.0)),
+                       float(glow.get("environment_scale", 0.0)), multiplier)
+        sh.glUniform1i(u["uSrgbGlowMask"], 1 if glow and entry.get("_h") and entry["_h"][1] else 0)
+        sh.glUniform1i(u["uTexGlowParallax"], GLOW_PARALLAX_TEXTURE_UNIT)
+        sh.glUniform1f(u["uK"], float(entry.get("k", 0.0)))
+        sh.glUniform1i(u["uGMode"], {"grey_skin": 1, "grey": 2}.get(entry.get("g_mode"), 0))
+        sh.glUniform1f(u["uSpecScale"], float(entry.get("spec", 1.0)))
+        sh.glUniform1f(u["uGlossScale"], float(entry.get("gloss", 1.0)))
+        metal = entry.get("two_color_metal") or {}
+        sh.glUniform1i(u["uTwoColorMetal"], 1 if metal and level == 2 else 0)
+        for name, key in (("uMetalDiffuseA", "diffuse_a"), ("uMetalDiffuseB", "diffuse_b"),
+                          ("uMetalSpecA", "spec_a"), ("uMetalSpecB", "spec_b")):
+            sh.glUniform3f(u[name], *(float(x) for x in metal.get(key, (1., 1., 1.))))
+        sh.glUniform4f(u["uMetalP"], *(float(metal.get(key, fallback)) for key, fallback in
+                       (("power", 1.), ("gloss_power", 4.), ("texture_scale", 6.), ("normal_strength", 1.))))
+        fg = entry.get("facing_glow") or {}
+        sh.glUniform1i(u["uFacingGlow"], 1 if fg and level else 0)
+        sh.glUniform4f(u["uFacingGlowP"], *(float(fg.get(key, 0.0)) for key in ("amplitude", "exponent", "a_scale", "a_offset")))
+        sh.glUniform3f(u["uFacingGlowQ"], float(fg.get("bias", 0.0)), float(fg.get("g_scale", 0.0)), 0.0)
+        zk = entry.get("zurkon") or {}   # Mrs. Zurkon 2F0F9452: _c, _g, _n and the specular tint in the "_h" role
+        sh.glUniform1i(u["uZurkon"], 1 if zk and level == 2 else 0)
+        sh.glUniform4f(u["uZurkonP"], *(float(zk.get(key, 0.0)) for key in ("f0_scale", "gloss_scale", "rim_weight", "rim_exponent")))
+        sh.glUniform4f(u["uZurkonQ"], float(zk.get("facing_exponent", 1.0)), float(zk.get("glow_gain", 0.0)),
+                       1.0 if zk.get("texture_tint") else 0.0, 0.0)
+        sh.glUniform3f(u["uZurkonGlow"], *(float(x) for x in zk.get("glow_colour", (0.0, 0.0, 0.0))))
+        sh.glUniform3f(u["uZurkonTint"], *(float(x) for x in zk.get("tint", (1.0, 1.0, 1.0))))
+        sh.glUniform1i(u["uSrgbZurkonTint"], 1 if zk and entry.get("_h") and entry["_h"][1] else 0)
+        bc = entry.get("bright_center") or {}
+        sh.glUniform1i(u["uBrightCentre"], 1 if bc and level == 2 else 0)
+        sh.glUniform1i(u["uBrightWhite"], 1 if bc.get("albedo_white") else 0)
+        sh.glUniform3f(u["uBrightEdge"], *(float(x) for x in bc.get("edge", (0.0, 0.0, 0.0))))
+        sh.glUniform3f(u["uBrightColour"], *(float(x) for x in bc.get("centre", (0.0, 0.0, 0.0))))
+        sh.glUniform4f(u["uBrightP"], *(float(bc.get(key, 0.0)) for key in ("exponent", "weight", "f0", "gloss_sq")))
+        sh.glUniform1i(u["uFoliage"], 1 if entry.get("foliage") else 0)
+        # Leaf cut-out needs the bound `_c` alpha: Solid mode (level 0) binds no texture and draws whole.
+        # Alpha panes (textures 'alpha_pane') discard below their cut-off and write sat(sat(_c.a) opacity) (uAlphaOut 2).
+        pane = entry.get("alpha_pane") if level and entry.get("_c") else None
+        sh.glUniform1f(u["uAlphaCut"], float(pane["discard"]) if pane else
+                       float(entry.get("alpha_cut", 0.0)) if level and entry.get("_c") else 0.0)
+        sh.glUniform1i(u["uAlphaOut"], 2 if pane else 0)
+        sh.glUniform1f(u["uPaneOpacity"], float(pane["opacity"]) if pane else 1.0)
+        sh.glUniform1i(u["uLinearZ"], 1 if entry.get("linear_z") else 0)
+        sh.glUniform1i(u["uZaFresnel"], 1 if "za_fresnel_power" in entry else 0)
+        sh.glUniform1f(u["uZaFresnelPower"], float(entry.get("za_fresnel_power", 8.0)))
+        sh.glUniform1i(u["uSelfLitG"], 1 if entry.get("self_lit") == "g_blue" else 0)
+        bng = entry.get("bng") or {}
+        sh.glUniform1i(u["uBngKind"], int(bng.get("kind", 0)) if level == 2 else 0)
+        sh.glUniform3f(u["uBngColour"], *(float(x) for x in bng.get("colour", (1.0, 1.0, 1.0))))
+        sh.glUniform4f(u["uBngP"], *(float(x) for x in bng.get("params", (0.0,) * 4)))
+        sh.glUniform3f(u["uBngDetail"], *(float(x) for x in bng.get("detail", (1.0, 1.0, 0.0))))
+        vehicle = entry.get("vehicle")
+        sh.glUniform1i(u["uVehicle"], 1 if vehicle else 0)
+        if vehicle:
+            sh.glUniform3f(u["uVehicleA"], *(float(x) for x in vehicle["a"]))
+            sh.glUniform3f(u["uVehicleB"], *(float(x) for x in vehicle["b"]))
+            sh.glUniform3f(u["uVehicleP"], float(vehicle["blend"]), float(vehicle["rim"]), 0.0)
+        sequence = entry.get("arch_sequence")
+        sh.glUniform1i(u["uArchSequence"], 1 if sequence else 0)
+        if sequence:
+            sh.glUniform3f(u["uArchColour"], *(float(x) for x in sequence["colour"]))
+            sh.glUniform4f(u["uArchP"], *(float(sequence[k]) for k in ("intensity", "linear", "mask_bias", "power")))
+            sh.glUniform1f(u["uArchPhase"], float(sequence["phase"]))
+        pick = entry.get("pick") or {}
+        sh.glUniform3f(u["uPick"], float(pick.get("scale", 0.0)), float(pick.get("blend", 0.0)), float(pick.get("u", 0.0)))
+        sh.glUniform3f(u["uSpecTint"], *(float(x) for x in entry.get("spec_tint", (1.0, 1.0, 1.0))))
+        tint = entry.get("tint")
+        sh.glUniform1i(u["uTint"], 1 if tint else 0)
+        sh.glUniform1i(u["uTintVariant"], {"random": 1, "detail": 2, "world": 3, "world_normal": 4}.get((tint or {}).get("variant"), 0))
+        sh.glUniform3f(u["uTintPalette"], *(float(x) for x in (tint or {}).get("palette_rgb", (1.0, 1.0, 1.0))))
+        sh.glUniform1f(u["uTintPaletteBlend"], float((tint or {}).get("palette_blend", 0.0)))
+        sh.glUniform3f(u["uTintDetailP"], float((tint or {}).get("detail_scale", 1.0)), float((tint or {}).get("detail_strength", 1.0)), 0.0)
+        sh.glUniform3f(u["uTintWorldOrigin"], *(float(x) for x in (tint or {}).get("world_origin", (0.0, 0.0, 0.0))))
+        if tint:
+            sh.glUniform3f(u["uTintA"], *(float(x) for x in tint["a"]))
+            sh.glUniform3f(u["uTintB"], *(float(x) for x in tint["b"]))
+            sh.glUniform4f(u["uTintP"], float(tint["power_a"]), float(tint["power_b"]),
+                           float(tint["weight_b"]), float(tint["mask_b"]))
+            sh.glUniform1f(u["uTintM"], float(tint["weight_a"]))
+
+    GL_BLEND = 0x0BE2
+    GL_CULL_FACE = 0x0B44
+    GL_BACK = 0x0405
+    GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE = 0x0302, 0x0303, 1
+    GL_MODELVIEW_MATRIX = 0x0BA6
+
+    def _apply_screen_forward(self, u, entry):
+        gl, sh = self._gl, self._shading
+        sh.glUniform1i(u['uScreenNoiseA'], 0); sh.glUniform1i(u['uScreenNoiseB'], 1)
+        for unit, role, name in ((0, '_c', 'uScreenSrgbA'), (1, '_g', 'uScreenSrgbB')):
+            texture = entry.get(role); sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+            gl.glBindTexture(self.GL_TEXTURE_2D, texture[0] if texture else 0)
+            sh.glUniform1i(u[name], int(bool(texture and texture[1])))
+        texture = entry.get('_n'); sh.glUniform1i(u['uScreenSrgbN'], int(bool(texture and texture[1])))
+
+    EFFECT_KINDS = frozenset({'ion_tubes', 'number_display', 'warmonger_reticle', 'turret_shield', 'turret_hud', 'dwarf_star',
+                              'energy_ball'})   # forward rules with a per-frame term (CB0[99] or CB0[107])
+    EFFECT_PERIOD = 1024.0                    # seconds; every decoded scroll has period 1, so the wrap is invisible
+
+    def _effect_time(self, forward):
+        """Presentation clock (seconds) for a time-driven forward rule: running while a clip plays, held while it is
+        paused, and None (the rule's static time) at the rest pose."""
+        if forward.get('kind') not in self.EFFECT_KINDS:
+            return None
+        if not self.animate_effects:
+            return self._effect_held
+        import time
+        now = time.perf_counter()
+        if self._effect_origin is None:
+            self._effect_origin = now - (self._effect_held or 0.0)
+        if self._effects_job is None:
+            self._effects_job = self.after(33, self._effects_tick)
+        return (now - self._effect_origin) % self.EFFECT_PERIOD
+
+    def set_effects_running(self, running, reset=False):
+        """Start or stop the effect clock; ``reset`` also returns it to the static time (no clip selected)."""
+        import time
+        if running:
+            self.animate_effects, self._effect_origin = True, None
+        else:
+            if self.animate_effects and self._effect_origin is not None:
+                self._effect_held = (time.perf_counter() - self._effect_origin) % self.EFFECT_PERIOD
+            self.animate_effects = False
+            if reset:
+                self._effect_held = None
+        self._schedule_draw()
+
+    def _effects_tick(self):
+        self._effects_job = None
+        try:
+            if self.animate_effects and self.winfo_exists() and self.winfo_viewable():
+                self._schedule_draw()   # the draw re-arms the tick while a time-driven material is on screen
+        except tk.TclError:
+            pass
+
+    def _apply_water_surface(self, u, entry, forward, scene_depth=None):
+        """uW, the foam tiles and the scene depth of the decoded water closure (GLASS_FRAGMENT uKind 4, uE.z = 1).
+
+        ``scene_depth`` is (GL depth texture, (width, height, near, far)) when the viewer copied the frame's depth buffer,
+        else None (no thickness: no shore fade and no foam). Every other forward kind gets zeros and no textures."""
+        from nwo.viewer.shading import SCENE_DEPTH_TEXTURE_UNIT, WATER_FOAM_TEXTURE_UNITS, water_surface_uniforms
+        gl, sh = self._gl, self._shading
+        vectors = water_surface_uniforms(forward)
+        sh.glUniform4fv(u["uW"], 6, (ctypes.c_float * 24)(*(float(x) for vector in vectors for x in vector)))
+        surface = forward.get("kind") == "water" and bool(forward.get("surface"))
+        roles = ("_water_foam_a", "_water_foam_b")
+        foam = surface and all(entry.get(role) for role in roles)
+        sh.glUniform1i(u["uHasWaterFoam"], 1 if foam else 0)
+        for unit, role, name, srgb in zip(WATER_FOAM_TEXTURE_UNITS, roles, ("uWaterFoamA", "uWaterFoamB"),
+                                          ("uWaterFoamSrgbA", "uWaterFoamSrgbB")):
+            texture = entry.get(role) if foam else None
+            sh.glUniform1i(u[name], unit)
+            sh.glUniform1i(u[srgb], 1 if texture and texture[1] else 0)
+            if surface:
+                sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+                gl.glBindTexture(self.GL_TEXTURE_2D, texture[0] if texture else 0)
+        depth = surface and scene_depth is not None
+        sh.glUniform1i(u["uSceneDepth"], SCENE_DEPTH_TEXTURE_UNIT)
+        sh.glUniform1i(u["uHasSceneDepth"], 1 if depth else 0)
+        if depth:
+            sh.glActiveTexture(self.GL_TEXTURE0 + SCENE_DEPTH_TEXTURE_UNIT)
+            gl.glBindTexture(self.GL_TEXTURE_2D, scene_depth[0])
+            sh.glUniform4f(u["uSceneDepthInfo"], *(float(x) for x in scene_depth[1]))
+        sh.glActiveTexture(self.GL_TEXTURE0)
+
+    def _draw_glass(self, index_array, batches, skin):
+        """Forward batches: the material's blend state and culling; opaque ones first with depth write, then the blended ones with no depth write, farthest first.
+
+        Blend/cull come from the material flags word (texture_preview.blend_state): additive is
+        (SRC_ALPHA, ONE), alpha-over (SRC_ALPHA, ONE_MINUS_SRC_ALPHA); an opaque flag draws without
+        blending and with depth write; mode 3 (never captured) falls back to alpha-over. In the float scene
+        target the alpha channel accumulates coverage (_blend_over) and additive draws leave it unchanged.
+        """
+        from nwo.viewer.shading import BONE_TEXTURE_UNIT, PICK_TEXTURE_UNIT, UV1_ATTRIBUTE, glass_uniforms
+        gl, sh = self._gl, self._shading
+        program, u = sh.glass_program()
+        sh.glUseProgram(program)
+        self._apply_lighting(u)
+        sh.glUniform1i(u["uSkin"], 1 if skin else 0)
+        if skin:
+            sh.glUniform1i(u["uBoneTex"], BONE_TEXTURE_UNIT)
+            sh.glUniform1f(u["uBoneWidth"], float(4 * self._bone_count))
+        sh.glUniform1i(u["uTexN"], 2); sh.glUniform1i(u["uTexP"], PICK_TEXTURE_UNIT)
+        uv1 = getattr(self, "_uv1", None)
+        if uv1 is not None:   # the second UV pair, read only by the window glass rule
+            sh.glEnableVertexAttribArray(UV1_ATTRIBUTE)
+            sh.glVertexAttribPointer(UV1_ATTRIBUTE, 2, self.GL_FLOAT, 0, 0, self._vptr(uv1))
+        else:
+            sh.glDisableVertexAttribArray(UV1_ATTRIBUTE)
+        gl.glBlendFunc.argtypes = [ctypes.c_uint, ctypes.c_uint]; gl.glDepthMask.argtypes = [ctypes.c_ubyte]
+        gl.glCullFace.argtypes = [ctypes.c_uint]; gl.glGetFloatv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        cached = getattr(self, "_glass_centres", None)
+        if not cached or cached[0] is not self._mesh:
+            cached = self._glass_centres = (self._mesh, batch_centres(self._mesh[0], self._mesh[1], batches))
+        modelview = (ctypes.c_float * 16)()
+        gl.glGetFloatv(self.GL_MODELVIEW_MATRIX, modelview)
+        gl.glCullFace(self.GL_BACK)   # decoded meshes are counter-clockwise front, GL's default
+        native = self.native_translation
+        ordered = forward_order(batches, cached[1], list(modelview),
+                                lambda slot: forward_rule(self._gl_textures[slot], native).get("blend") == "opaque")
+        copies = None   # the frame's colour and depth, copied before the first brain case batch (_scene_copies)
+        for slot, first, count in ordered:
+            entry = self._gl_textures[slot]
+            forward = forward_rule(entry, native)
+            if forward.get('kind') == TRANSLATED_FORWARD:
+                self._draw_translated_forward(index_array, entry, forward, first, count, skin)
+                sh.glUseProgram(program)
+                continue
+            blended = forward.get("blend") != "opaque"
+            gl.glDepthMask(0 if blended else 1)
+            (gl.glEnable if blended else gl.glDisable)(self.GL_BLEND)
+            if forward.get("blend") != "additive":
+                self._blend_over()
+            elif getattr(self, '_linear_output', False):   # float target: added light leaves the coverage alone
+                self._hdr_fns['glBlendFuncSeparate'](self.GL_SRC_ALPHA, self.GL_ONE, 0, 1)   # ZERO, ONE
+            else:
+                gl.glBlendFunc(self.GL_SRC_ALPHA, self.GL_ONE)
+            (gl.glDisable if forward.get("two_sided") else gl.glEnable)(self.GL_CULL_FACE)
+            for unit, role, has, srgb in ((2, "_n", "uHasN", None), (PICK_TEXTURE_UNIT, "_pick", "uHasP", "uSrgbP")):
+                texture = entry.get(role)
+                sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+                gl.glBindTexture(self.GL_TEXTURE_2D, texture[0] if texture else 0)
+                sh.glUniform1i(u[has], 1 if texture else 0)
+                if srgb:
+                    sh.glUniform1i(u[srgb], 1 if texture and texture[1] else 0)
+            if forward.get('kind') in ('screen', 'number_display', 'victor_reticle'):
+                self._apply_screen_forward(u, entry)
+            water_heights = forward.get('kind') == 'water' and bool(forward.get('sampling'))
+            sh.glUniform1i(u['uHasWaterHeights'], 1 if water_heights and entry.get('_water_height_a') and entry.get('_water_height_b') else 0)
+            if water_heights:
+                for unit, role, name in ((0, '_water_height_a', 'uWaterHeightA'), (1, '_water_height_b', 'uWaterHeightB')):
+                    texture = entry.get(role)
+                    sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+                    gl.glBindTexture(self.GL_TEXTURE_2D, texture[0] if texture else 0)
+                    sh.glUniform1i(u[name], unit)
+            self._apply_water_surface(u, entry, forward, scene_depth=None)
+            self._apply_window_glass(u, entry, forward, uv1 is not None)
+            if forward.get('kind') == 'brain_case':
+                copies = copies or self._scene_copies()
+            self._bind_scene_copies(u, copies if forward.get('kind') == 'brain_case' else None)
+            kind, *vectors = glass_uniforms(forward, self._effect_time(forward))
+            sh.glUniform1i(u["uKind"], kind)
+            for name, vector in zip(("uA", "uB", "uC", "uD", "uE"), vectors):
+                sh.glUniform4f(u[name], *(float(x) for x in vector))
+            self._draw_range(index_array, first, count)
+        gl.glDepthMask(1); gl.glDisable(self.GL_BLEND); gl.glDisable(self.GL_CULL_FACE)
+        sh.glDisableVertexAttribArray(UV1_ATTRIBUTE)
+
+    def _draw_translated_forward(self, index_array, entry, forward, first, count, skin):
+        """One translated Rift Apart forward batch (nwo.viewer.rcra_glsl) in its own program: the multiply pass scales what
+        is behind by the material's background factor (blended: mix(1, B, alpha); additive: 1 + alpha B; modulate: the
+        tint), then the colour pass adds its premultiplied colour, coverage blended over. Depth is tested, not written. A
+        program that samples the scene behind (forward rule reads_scene) reads a copy of the frame taken before the batch."""
+        from nwo.viewer.rcra_glsl import PASS_UNIFORM
+        from nwo.viewer.shading import BONE_TEXTURE_UNIT
+        gl, sh = self._gl, self._shading
+        program, u = self._surface_program(entry, 2)
+        sh.glUseProgram(program)
+        self._apply_lighting(u)
+        sh.glUniform1i(u['uSkin'], int(skin))
+        sh.glUniform1i(u['uBoneTex'], BONE_TEXTURE_UNIT)
+        sh.glUniform1f(u['uBoneWidth'], float(4 * self._bone_count))
+        sh.glUniform1i(u['uMode'], 2)
+        self._apply_material(u, entry, 2)
+        if forward.get('reads_scene'):
+            self._bind_scene_copies(u, self._scene_copies())
+        mode = forward.get('blend')
+        separate = self._hdr_fns.get('glBlendFuncSeparate') if getattr(self, '_linear_output', False) else None
+        zero, one, src_colour, one_minus_src_alpha = 0, 1, 0x0300, 0x0303
+
+        def blend(colour, alpha):
+            if separate:
+                separate(colour[0], colour[1], alpha[0], alpha[1])
+            else:
+                gl.glBlendFunc(colour[0], colour[1])
+        gl.glDepthMask(0); gl.glEnable(self.GL_BLEND)
+        (gl.glDisable if forward.get('two_sided') else gl.glEnable)(self.GL_CULL_FACE)
+        sh.glUniform1i(u[PASS_UNIFORM], 0)
+        blend((zero, src_colour), (zero, one))
+        self._draw_range(index_array, first, count)
+        if mode != 'modulate':
+            sh.glUniform1i(u[PASS_UNIFORM], 1)
+            blend((one, one), (one, one_minus_src_alpha) if mode == 'blended' else (zero, one))
+            self._draw_range(index_array, first, count)
+        self._blend_over()
+
+    def _scene_copies(self):
+        """(colour texture, depth texture, (width, height, near, far)): the frame's colour and depth buffers as they are before
+        the Telepathipus brain case draws (its program reads the scene colour and linear depth behind each fragment). The colour
+        is RGBA16F in the float scene target (scene-linear, as the game's), else RGBA8 display-referred."""
+        from nwo.viewer.shading import SCENE_COLOUR_TEXTURE_UNIT
+        gl, sh = self._gl, self._shading
+        names = self.__dict__.get('_scene_copy_gl')
+        if names is None:
+            ids = (ctypes.c_uint * 2)()
+            gl.glGenTextures(2, ids)
+            for name in ids:
+                gl.glBindTexture(self.GL_TEXTURE_2D, name)
+                for parameter, value in ((self.GL_TEXTURE_MIN_FILTER, 0x2600), (self.GL_TEXTURE_MAG_FILTER, 0x2600),   # GL_NEAREST
+                                         (self.GL_TEXTURE_WRAP_S, 0x812F), (self.GL_TEXTURE_WRAP_T, 0x812F)):
+                    gl.glTexParameteri(self.GL_TEXTURE_2D, parameter, value)
+            names = self._scene_copy_gl = (ids[0], ids[1])
+        viewport = (ctypes.c_int * 4)()
+        gl.glGetIntegerv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        gl.glGetIntegerv(0x0BA2, viewport)      # GL_VIEWPORT
+        gl.glCopyTexImage2D.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int]
+        sh.glActiveTexture(self.GL_TEXTURE0 + SCENE_COLOUR_TEXTURE_UNIT)
+        colour_format = 0x881A if getattr(self, '_linear_output', False) else 0x8058   # GL_RGBA16F / GL_RGBA8
+        for name, internal in zip(names, (colour_format, 0x1902)):   # GL_DEPTH_COMPONENT
+            gl.glBindTexture(self.GL_TEXTURE_2D, name)
+            gl.glCopyTexImage2D(self.GL_TEXTURE_2D, 0, internal, viewport[0], viewport[1], viewport[2], viewport[3], 0)
+        gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+        sh.glActiveTexture(self.GL_TEXTURE0)
+        camera = self._camera or {}
+        return names[0], names[1], (float(viewport[2]), float(viewport[3]), float(camera.get('near', 0.05)), float(camera.get('far', 1000.0)))
+
+    def _bind_scene_copies(self, u, copies):
+        """Bind _scene_copies on the scene colour and depth units of the glass program, or clear its flags (copies None)."""
+        from nwo.viewer.shading import SCENE_COLOUR_TEXTURE_UNIT, SCENE_DEPTH_TEXTURE_UNIT
+        gl, sh = self._gl, self._shading
+        sh.glUniform1i(u['uSceneColour'], SCENE_COLOUR_TEXTURE_UNIT)
+        sh.glUniform1i(u['uHasSceneColour'], 1 if copies else 0)
+        if not copies:
+            return
+        sh.glUniform1i(u['uHasSceneDepth'], 1)
+        sh.glUniform4f(u['uSceneDepthInfo'], *copies[2])
+        for unit, name in ((SCENE_COLOUR_TEXTURE_UNIT, copies[0]), (SCENE_DEPTH_TEXTURE_UNIT, copies[1])):
+            sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+            gl.glBindTexture(self.GL_TEXTURE_2D, name)
+        sh.glActiveTexture(self.GL_TEXTURE0)
+
+    def _apply_window_glass(self, u, entry, forward, has_uv1):
+        """The window glass rule's extra images (shading.WINDOW_GLASS_TEXTURES: mask, window normal, detail normal,
+        painted glass _c), the UV1 flag and uWindowP (GLASS_FRAGMENT uKind 14); the taxi glass (uKind 17) binds its window
+        _g and _c on two of those units (shading.TAXI_GLASS_TEXTURES; the Deplanetizer dome glass, uKind 21, its _g the same way)
+        and the turret barrier kinds (18, 19), the brain case (20), the dwarf star (22) and the energy ball (25) bind the four roles as they are. Every
+        other forward kind gets the flags cleared and
+        no textures bound."""
+        from nwo.viewer.shading import TAXI_GLASS_TEXTURES, WINDOW_GLASS_TEXTURES, window_glass_uniform
+        gl, sh = self._gl, self._shading
+        window = forward.get("kind") == "window_glass"
+        # The barrier rules, the brain case, the dwarf star and the energy ball read the four window roles as they are.
+        turret = forward.get("kind") in ("turret_shield", "turret_hud", "brain_case", "dwarf_star", "energy_ball")
+        taxi = ({unit: role for unit, role, *_ in TAXI_GLASS_TEXTURES}
+                if forward.get("kind") in ("glass_taxi", "glass_tinted_spec", "decal_gnormal", "rcra_arch_glass") else None)
+        sh.glUniform1i(u["uHasUV1"], 1 if window and has_uv1 else 0)
+        sh.glUniform4f(u["uWindowP"], *window_glass_uniform(forward))
+        for unit, role, sampler, has, srgb in WINDOW_GLASS_TEXTURES:
+            if taxi is not None:
+                role = taxi.get(unit)
+            texture = entry.get(role) if (window or turret or taxi is not None) and role else None
+            sh.glUniform1i(u[sampler], unit)
+            sh.glUniform1i(u[has], 1 if texture else 0)
+            if srgb:
+                sh.glUniform1i(u[srgb], 1 if texture and texture[1] else 0)
+            if window or turret or taxi is not None:
+                sh.glActiveTexture(self.GL_TEXTURE0 + unit)
+                gl.glBindTexture(self.GL_TEXTURE_2D, texture[0] if texture else 0)
+        sh.glActiveTexture(self.GL_TEXTURE0)
+
+    def _begin_orbit(self, event): self._drag = (event.x, event.y, self._yaw, self._pitch)
+    def _orbit(self, event):
+        if self._drag:
+            x, y, yaw, pitch = self._drag
+            self._yaw = yaw + (event.x - x) * 0.6
+            self._pitch = max(-89.0, min(89.0, pitch + (event.y - y) * 0.6))
+            # Coalesced: each draw waits for the display refresh, so drawing per
+            # motion event let fast drags queue up and lag behind the mouse.
+            self._schedule_draw()
+    def _begin_pan(self, event): self._drag = (event.x, event.y, self._pan[0], self._pan[1])
+    def _pan_drag(self, event):
+        if self._drag:
+            x, y, px, py = self._drag
+            scale = (self._camera["radius"] / max(1, self.winfo_height())) if self._camera else 0.01
+            self._pan = [px + (event.x - x) * scale, py - (event.y - y) * scale]
+            self._schedule_draw()
+    def _wheel(self, event): self._zoom_by(1.12 if event.delta > 0 else 1 / 1.12)
+    def _wheel_anywhere(self, event):
+        try:
+            hovered = self.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError):   # pointer over a popup/menu Tk does not track
+            return
+        while hovered is not None and hovered is not self:
+            hovered = hovered.master
+        if hovered is self:
+            self._wheel(event)
+    def _zoom_by(self, factor):
+        self._zoom = max(0.08, min(20.0, self._zoom * factor)); self._schedule_draw()
+    def _reset_camera(self, _event=None):
+        self._yaw, self._pitch, self._zoom, self._pan = 0.0, -65.0, 1.0, [0.0, 0.0]
+        self._draw()
+
+    def _on_destroy(self, event):
+        if event.widget is not self:
+            return
+        if self._gl and self._hrc:
+            try:
+                self._gl.wglMakeCurrent(None, None)
+                self._gl.wglDeleteContext(self._hrc)
+            except Exception:
+                pass
+        if self._hdc:
+            try:
+                ctypes.windll.user32.ReleaseDC(wintypes.HWND(self.winfo_id()), self._hdc)
+            except Exception:
+                pass
+        self._hrc = self._hdc = self._gl = None
+        self._environment_texture = None
+
+
+__all__ = ["MeshPayloadError", "ModelViewport", "camera_fit", "light_frames", "mesh_bounds", "perspective_matrix", "validate_mesh"]
+
+
+
+
+
+

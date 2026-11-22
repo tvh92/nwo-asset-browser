@@ -1,6 +1,6 @@
 import unittest
 
-from rc2016.pipeline.node_layout import COLUMN_GAP, ROW_GAP, layout_positions
+from nwo.pipeline.node_layout import COLUMN_GAP, ROW_GAP, layout_positions
 
 
 class NodeLayoutTests(unittest.TestCase):

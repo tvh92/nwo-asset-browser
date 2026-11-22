@@ -10,8 +10,8 @@ from unittest import mock
 
 import numpy as np
 
-from rc2016.pipeline import actor_placements as P
-from rc2016.pipeline.run import placed_group_members
+from nwo.pipeline import actor_placements as P
+from nwo.pipeline.run import placed_group_members
 
 ZONE = 'levels/test/gp_flight.zone'
 HEAD = 'character/enemy/enm_test/enm_test.model'

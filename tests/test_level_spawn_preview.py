@@ -5,9 +5,9 @@ from pathlib import Path
 import struct
 import unittest
 
-from rc2016.levels import spawn_format as sf
-from rc2016.levels.actor_format import IDENTITY
-from rc2016.formats.container import game_crc32
+from nwo.levels import spawn_format as sf
+from nwo.levels.actor_format import IDENTITY
+from nwo.formats.container import game_crc32
 from tests.test_level_actors import container, change
 from tests.test_level_actor_layer import actor, catalog
 
@@ -89,8 +89,8 @@ class FactoryTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('RC2016_RESEARCH'), 'set RC2016_RESEARCH for real factory inputs')
 class ArchiveFactoryTests(unittest.TestCase):
     def test_novalis_exact_factory_links_preview_84_peckbots_and_20_birdbots(self):
-        from rc2016.levels.actors import ActorCatalog
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.actors import ActorCatalog
+        from nwo.levels.scene import open_archive
         root = Path(os.environ['RC2016_RESEARCH'])
         archive = open_archive(root)
         try:

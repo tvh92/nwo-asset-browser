@@ -1,8 +1,8 @@
-"""Model variant kinds the browser's Variants menu hides (rc2016.app.variants)."""
+"""Model variant kinds the browser's Variants menu hides (nwo.app.variants)."""
 
 import unittest
 
-from rc2016.app.variants import VARIANT_KINDS, search_reveals, variant_kind
+from nwo.app.variants import VARIANT_KINDS, search_reveals, variant_kind
 
 PATHS = [
     "characters/enemy/enm_bladeball_ps4/enm_bladeball_ps4.model",
@@ -59,7 +59,7 @@ class VariantKindTests(unittest.TestCase):
         self.assertEqual({k.key for k in VARIANT_KINDS if k.hidden_by_default}, {"topiary", "test", "no_geometry"})
 
     def test_a_record_flag_marks_models_without_geometry(self):
-        from rc2016.app.batch import PipelineModelCandidate
+        from nwo.app.batch import PipelineModelCandidate
         empty = PipelineModelCandidate(model_id="1", archive_path=PATHS[1], no_geometry=True)
         self.assertEqual(variant_kind(PATHS[1], LISTED, empty), "no_geometry")   # before the topiary suffix
         self.assertEqual(variant_kind(PATHS[1], LISTED, PipelineModelCandidate(model_id="2", archive_path=PATHS[1])),

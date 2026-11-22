@@ -4,8 +4,8 @@ import tempfile
 import types
 import unittest
 
-from rc2016.app import catalog, gallery, main as appmain, thumbnails as th
-from rc2016.app.catalog import ResultRef
+from nwo.app import catalog, gallery, main as appmain, thumbnails as th
+from nwo.app.catalog import ResultRef
 
 WINDOW = next(c for c in vars(appmain).values() if isinstance(c, type) and hasattr(c, "update_record_row"))
 

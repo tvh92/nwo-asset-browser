@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.viewer import textures as tp
+from nwo.viewer import textures as tp
 from tests.test_viewer_textures import FakeArchive, dat1
 
 GRAPH = 'materialgraph/character/hero/hero_bright_center_light/hero_bright_center_light.materialgraph'
@@ -41,8 +41,8 @@ def extract(rows, sha=None):
     rules = tuple((p, dict(r, _graph_sha256=digest) if r.get('bright_center') == 'clank' else r) for p, r in tp.GRAPH_RULES)
     params = dict(parameters=[], unsupported_parameters=rows)
     with (patch.object(tp, 'GRAPH_RULES', rules),
-          patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+          patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
+          patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
         return tp.material_texture_paths(archive, 'm/a.material')
 
 
@@ -89,8 +89,8 @@ def evaluate(program, cb2, ndv, time=0.0, w=1.0, tex=(1.0, 1.0, 1.0)):
 
     N = attribute2, V from the screen ray (0, 0, -1), flat tangent-space normal and zero specular-AA width.
     """
-    from rc2016.shaders.ir import DAG
-    from rc2016.shaders.translator import lower_deferred
+    from nwo.shaders.ir import DAG
+    from nwo.shaders.translator import lower_deferred
     lowered = lower_deferred(program['ir'])
     ir = DAG(lowered['nodes'])
     angle = math.acos(ndv)
@@ -122,8 +122,8 @@ class ClankArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders.translator import compile_graph
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders.translator import compile_graph
         cls.archive = open_archive(root)
         cls.graph_data = bytes(asset_bytes(cls.archive, GRAPH))
         cls.variant_data = bytes(asset_bytes(cls.archive, VARIANT))
@@ -144,7 +144,7 @@ class ClankArchiveTests(unittest.TestCase):
         self.assertEqual(self.qwark['0xd14a48d7']['code_sha256'], VARIANT_CODE_SHA)
 
     def test_material_stores_none_of_the_graph_keys_and_overrides_the_albedo_slot(self):
-        from rc2016.formats.materials import extract_material_parameters
+        from nwo.formats.materials import extract_material_parameters
         keys = {p['key_hash'] for p in extract_material_parameters(self.material_data)['parameters']}
         keys |= {p['key_hash'] for p in extract_material_parameters(self.material_data).get('unsupported_parameters', [])}
         self.assertFalse(keys & set(DEFAULTS))
@@ -175,8 +175,8 @@ class ClankArchiveTests(unittest.TestCase):
         self.assertAlmostEqual(w, 0.15 + 0.85 * (0.5 * math.sin(4.2 * 0.25) + 0.5), places=6)
 
     def test_engine_inputs_that_block_native_translation(self):
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.shaders import bindings
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.shaders import bindings
         params = extract_material_parameters(self.material_data)
 
         def reasons(**kw):
@@ -213,8 +213,8 @@ class ClankArchiveTests(unittest.TestCase):
 
     def test_blink_phase_forms(self):
         """Clank has no per-vertex phase term; the Qwark sibling has one (source expression text of the lowered DAGs)."""
-        from rc2016.shaders.ir import DAG
-        from rc2016.shaders.translator import lower_deferred
+        from nwo.shaders.ir import DAG
+        from nwo.shaders.translator import lower_deferred
         def uses_attribute3w_in_phase(program):
             lowered = lower_deferred(program['ir'])
             ir = DAG(lowered['nodes'])

@@ -3,8 +3,8 @@ import struct
 import unittest
 from unittest import mock
 
-from rc2016.shaders import interpolants
-from rc2016.shaders.ir import DAG
+from nwo.shaders import interpolants
+from nwo.shaders.ir import DAG
 
 
 def _channel_ir(flags, *, square_semantic=5, square_lane=3, alternate=None):
@@ -67,7 +67,7 @@ class PassScopedEvidenceTests(unittest.TestCase):
     def _call(self, headers, data, spans, exports, pass_count):
         with mock.patch.object(interpolants, 'shader_headers', return_value=headers), \
              mock.patch.object(interpolants, 'sections', return_value=spans), \
-             mock.patch('rc2016.shaders.bindings.pass_contracts', return_value=[dict(index=i) for i in range(pass_count)]), \
+             mock.patch('nwo.shaders.bindings.pass_contracts', return_value=[dict(index=i) for i in range(pass_count)]), \
              mock.patch.object(interpolants, 'vertex_exports', side_effect=lambda row: exports[row['header_offset']]):
             return interpolants.squared_stream_evidence(data)
 

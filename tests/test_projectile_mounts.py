@@ -1,8 +1,8 @@
 import unittest
 
-from rc2016.pipeline.projectile_mounts import (WARMONGER, WARMONGER_ROCKET, WARMONGER_V1, WARMONGER_V5, idle_offsets,
+from nwo.pipeline.projectile_mounts import (WARMONGER, WARMONGER_ROCKET, WARMONGER_V1, WARMONGER_V5, idle_offsets,
                                                rack_matrix, rack_placements)
-from rc2016.pipeline.run import GROUP_STATUSES, assemble_group_blend
+from nwo.pipeline.run import GROUP_STATUSES, assemble_group_blend
 
 WEAPON = 'equipment/weapon/wpn_bouncer/wpn_bouncer.model'
 BALL = 'equipment/projectile/proj_bouncer/proj_bouncer.model'
@@ -78,7 +78,7 @@ class RackTests(unittest.TestCase):
                 finals[path].write_bytes(path.encode())
             manifest = dict(models={k: dict(status=GROUP_STATUSES[0], model=k, final=str(v)) for k, v in finals.items()}, errors=[])
             captured = {}
-            with patch('rc2016.pipeline.run.run_group_blend', lambda name, members, *a: captured.update(members=members)):
+            with patch('nwo.pipeline.run.run_group_blend', lambda name, members, *a: captured.update(members=members)):
                 assemble_group_blend(list(finals), manifest, SimpleNamespace(group_blend='warmonger', group_actors=''),
                                      lambda *a, **k: None)
         return captured['members'], finals

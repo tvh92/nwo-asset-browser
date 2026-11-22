@@ -4,7 +4,7 @@ import math
 import os
 import unittest
 
-from rc2016.shaders import dxbc, sm5
+from nwo.shaders import dxbc, sm5
 
 try:
     D3D = ctypes.WinDLL('d3dcompiler_47.dll') if os.name == 'nt' else None

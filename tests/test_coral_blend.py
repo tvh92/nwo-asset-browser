@@ -8,7 +8,7 @@ import random
 import unittest
 from pathlib import Path
 
-from rc2016.viewer import textures as tp
+from nwo.viewer import textures as tp
 
 GRAPH = 'materialgraph/environment/pokitaru/ground/pok_gnd_coral_underwater_blend_01/pok_gnd_coral_underwater_blend_01.materialgraph'
 MATERIAL = 'material/environment/pokitaru/ground/pok_gnd_coral_underwater_blend_01/pok_gnd_coral_underwater_blend_01.material'
@@ -26,7 +26,7 @@ class CoralBlendRuleTests(unittest.TestCase):
         self.assertEqual(tp._graph_rule([GRAPH]), {})
 
     def test_term_is_registered_for_the_blender_front_end(self):
-        from rc2016.formats import materials
+        from nwo.formats import materials
         self.assertIn('coral_blend', materials.VIEWER_RULE_EXTRAS)
         self.assertIn('coral_blend', materials.VIEWER_RULE_BUILT)
         self.assertIn('coral_blend', materials.VIEWER_LINEAR_Z_TERMS)
@@ -103,8 +103,8 @@ class CoralBlendArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders.translator import compile_graph
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders.translator import compile_graph
         cls.archive = open_archive(root)
         cls.graph = bytes(asset_bytes(cls.archive, GRAPH))
         cls.program = next(p for p in compile_graph(cls.graph, allow_independent_samplers=True)['programs']
@@ -143,8 +143,8 @@ class CoralBlendArchiveTests(unittest.TestCase):
         self.assertEqual(paths['graph_identity']['sha256'], tp.CORAL_BLEND_GRAPH_SHA256)
 
     def test_writer_matches_the_decoded_kernel(self):
-        from rc2016.shaders.ir import DAG
-        from rc2016.shaders.translator import lower_deferred
+        from nwo.shaders.ir import DAG
+        from nwo.shaders.translator import lower_deferred
         lowered = lower_deferred(self.program['ir'])
         ir = DAG(lowered['nodes'])
         subs = {i: ir.const(0.0) for i, node in enumerate(ir.nodes) if node['op'] == 'unsupported'}   # strength fade: close range

@@ -7,7 +7,7 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders.bindings import program_contracts
+from nwo.shaders.bindings import program_contracts
 
 
 SHADER_BASE = 0x1000
@@ -52,7 +52,7 @@ def invoke(rows, *, contract_list=None, shader_size=SHADER_SIZE, b6_size=None, s
     spans = {0xB6D49474: (0x200, len(table)),
              0x873D1E6C: (shader_base, shader_size)}
     data = bytes(spans[0xB6D49474][0]) + table
-    with patch("rc2016.shaders.bindings.sections", return_value=spans):
+    with patch("nwo.shaders.bindings.sections", return_value=spans):
         return program_contracts(data, candidate or program(), contract_list,
                                  allow_independent_samplers=allow_independent_samplers)
 

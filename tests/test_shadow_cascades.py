@@ -8,9 +8,9 @@ import unittest
 
 import numpy as np
 
-from rc2016.levels import shadow_cascades as sc
-from rc2016.levels.scene_effects import AO_SETTLE_SECONDS, SHADOW_FOLLOW_SECONDS, SceneEffects
-from rc2016.levels.viewport import BASIS, projection_matrix, view_matrix
+from nwo.levels import shadow_cascades as sc
+from nwo.levels.scene_effects import AO_SETTLE_SECONDS, SHADOW_FOLLOW_SECONDS, SceneEffects
+from nwo.levels.viewport import BASIS, projection_matrix, view_matrix
 
 CAMERA = (140.071732, 63.6009293, 151.753494)
 FORWARD = (0.771155715, -0.365430444, -0.521324754)

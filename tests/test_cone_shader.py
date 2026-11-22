@@ -1,11 +1,11 @@
-"""The light cone pixel program as Python (rc2016/levels/cone_shader.py) against the translated game program 0xE8CDB312."""
+"""The light cone pixel program as Python (nwo/levels/cone_shader.py) against the translated game program 0xE8CDB312."""
 import math
 import os
 import random
 import unittest
 from pathlib import Path
 
-from rc2016.levels import cone_shader
+from nwo.levels import cone_shader
 
 class FormulaTests(unittest.TestCase):
     def test_the_fade_is_zero_at_the_apex_and_the_base_and_one_minus_u_between(self):
@@ -55,8 +55,8 @@ class TranslatedProgramTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders import translator
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders import translator
         archive = open_archive(RESEARCH)
         graph = asset_bytes(archive, 'materialgraph/visualeffect/environment/global/ambient/gbl_amb_light_cone_circular_med/'
                                      'gbl_amb_light_cone_circular_med.materialgraph')

@@ -2,9 +2,9 @@ import math
 import struct
 import unittest
 
-from rc2016.levels import fog
+from nwo.levels import fog
 
-# Reference outputs of the decoded formula, computed independently of rc2016.levels.fog (the
+# Reference outputs of the decoded formula, computed independently of nwo.levels.fog (the
 # haze_ref.py `fog_T` / `build_cb0` of the research notes) for the Novalis header profile at camera height 75.
 NOVALIS = dict(heights=(-100.0, -52.0, 386.0, 926.0, 400.0), densities=(1.0, 0.1, 0.002, 0.0, 0.0))
 VELDIN = dict(heights=(-150.0, -20.0, 40.0, 250.0, 1000.0), densities=(1.0, 0.4, 0.07, 0.01, 0.0))

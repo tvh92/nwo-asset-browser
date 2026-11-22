@@ -3,9 +3,9 @@ import unittest
 
 import numpy as np
 
-from rc2016.formats.clips import worlds_batch
-from rc2016.formats.skeleton import AFTER_ROTATION, SSC0, bundled_profile, inheritance_rule, rest_inheritance_rule
-from rc2016.research.inheritance_audit import basis_shear, bit0_joints, clip_rows, summary
+from nwo.formats.clips import worlds_batch
+from nwo.formats.skeleton import AFTER_ROTATION, SSC0, bundled_profile, inheritance_rule, rest_inheritance_rule
+from nwo.research.inheritance_audit import basis_shear, bit0_joints, clip_rows, summary
 from tests.test_after_rotation_inheritance import arm
 
 SHEEP = 'f7cdfd434c569f75a0abf7f276d58fe573064572effa21d0121e932aee33907d'
@@ -20,7 +20,7 @@ class BundledProfiles(unittest.TestCase):
         self.assertIsNone(bundled_profile('0' * 64))
 
     def test_only_the_sheep_profile_names_a_rest_rule(self):
-        from rc2016.formats.skeleton import PROFILE_FOLDER
+        from nwo.formats.skeleton import PROFILE_FOLDER
         import json
         named = {path.stem: json.loads(path.read_text(encoding='utf-8')).get('rest_inheritance')
                  for path in PROFILE_FOLDER.glob('*.json')}

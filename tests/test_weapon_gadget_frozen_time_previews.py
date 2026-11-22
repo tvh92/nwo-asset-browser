@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.shaders.bindings import (
+from nwo.shaders.bindings import (
     MAG_BOOT_FAN_SOURCE_PREVIEW,
     PIXELIZER_BARREL_SOURCE_PREVIEW,
     PLASMA_STRIKER_SCOPE_SOURCE_PREVIEW,
@@ -71,7 +71,7 @@ class FrozenTimeArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -80,11 +80,11 @@ class FrozenTimeArchiveTests(unittest.TestCase):
             cls.archive.close()
 
     def test_exact_source_writers_are_ready_with_frozen_input(self):
-        from rc2016.formats.index import references
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.bindings import prepare_translation
-        from rc2016.viewer.native_glsl import evaluate_surface
+        from nwo.formats.index import references
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.bindings import prepare_translation
+        from nwo.viewer.native_glsl import evaluate_surface
         for rule, contract, apis, expected in CASES:
             with self.subTest(rule=rule['label']):
                 graph_data = asset_bytes(self.archive, rule['graph_path'])

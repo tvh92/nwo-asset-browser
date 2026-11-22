@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import (GLASS_FRAGMENT, GLASS_KINDS, GLASS_UNIFORMS, INSTANCE_ATTRIBUTES, INSTANCED_VERTEX, UV1_ATTRIBUTE,
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import (GLASS_FRAGMENT, GLASS_KINDS, GLASS_UNIFORMS, INSTANCE_ATTRIBUTES, INSTANCED_VERTEX, UV1_ATTRIBUTE,
                                     VERTEX, WINDOW_GLASS_TEXTURES, glass_uniforms, window_glass_uniform)
 
 GRAPH = 'materialgraph/global/basic_glass/jn_glass_parallax_mask.materialgraph'
@@ -100,7 +100,7 @@ class RuleBindingTests(unittest.TestCase):
         self.assertEqual(roles, ['_n', '_pick'])
         self.assertEqual(expected['VR glass f0 weight'], 0.784)
         self.assertEqual((expected['VR glass glass weight'], expected['VR glass colour']), (0.406, (0.0027, 0.5457, 0.8879)))
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_glass')[1].split('def apply_viewer_graph_rule')[0]
         for name in ('glass tint', 'glass gloss', 'glass rim exp', 'glass f0 weight', 'glass interior weight',
                      'glass interior light', 'glass interior map', 'glass world map', 'VR glass interior',
@@ -111,8 +111,8 @@ class RuleBindingTests(unittest.TestCase):
 
 class WindowTextureTests(unittest.TestCase):
     def test_extra_roles_units_and_uniforms(self):
-        from rc2016.formats.materials import VIEWER_TERM_ROLES
-        from rc2016.viewer.viewport import GL_TEXTURE_ROLES, MIPMAP_ROLES
+        from nwo.formats.materials import VIEWER_TERM_ROLES
+        from nwo.viewer.viewport import GL_TEXTURE_ROLES, MIPMAP_ROLES
         roles = [role for role, _ in tp.WINDOW_GLASS_ROLES]
         self.assertEqual(tp.WINDOW_GLASS_ROLES, (('_window_mask', 'mask'), ('_window_n1', 'window_normal'),
                                                  ('_window_n2', 'detail_normal'), ('_window_c', 'glass_c')))
@@ -135,7 +135,7 @@ class WindowTextureTests(unittest.TestCase):
 
     def test_secondary_uv_reads_the_second_half_pair(self):
         import numpy as np
-        from rc2016.formats.native_model import secondary_uv
+        from nwo.formats.native_model import secondary_uv
         words = np.array([[0x3C00, 0x0000], [0x3800, 0x3C00]], dtype=np.uint16)   # (1, 0), (0.5, 1)
         self.assertEqual(secondary_uv(dict(uv0_secondary_packed=words)).tolist(), [[1.0, 0.0], [0.5, 1.0]])
         self.assertIsNone(secondary_uv(dict(uv0_secondary_packed=None)))
@@ -148,7 +148,7 @@ class ArchiveRuleTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
+        from nwo.levels.scene import asset_bytes, open_archive
         cls.archive = open_archive(root)
         cls.graph = asset_bytes(cls.archive, GRAPH)
 
@@ -158,8 +158,8 @@ class ArchiveRuleTests(unittest.TestCase):
             cls.archive.close()
 
     def test_identities_and_contract_layout(self):
-        from rc2016.shaders import translator
-        from rc2016.shaders.bindings import pass_contracts
+        from nwo.shaders import translator
+        from nwo.shaders.bindings import pass_contracts
         self.assertEqual(hashlib.sha256(self.graph).hexdigest(), GRAPH_SHA)
         programs = {p['shader_id']: p['code_sha256'] for p in translator.pixel_programs(self.graph)}
         for shader_id, digest in CODE_SHA.items():
@@ -209,7 +209,7 @@ class ArchiveRuleTests(unittest.TestCase):
                 tp.material_texture_paths(self.archive, WINDOW_01)
 
     def test_blender_rule_is_ported(self):
-        from rc2016.formats.materials import viewer_graph_rule
+        from nwo.formats.materials import viewer_graph_rule
         rule = viewer_graph_rule(self.archive, WINDOW_01)
         self.assertTrue(rule['applies'])
         self.assertEqual(rule['ported'], ['window_glass'])

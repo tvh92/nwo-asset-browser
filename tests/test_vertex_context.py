@@ -7,10 +7,10 @@ import struct
 import unittest
 from dataclasses import FrozenInstanceError
 
-from rc2016.shaders import gcn
-from rc2016.shaders.ir import bits
-from rc2016.shaders.translator import Compiler, decoder
-from rc2016.shaders.vertex_context import ContextCompiler, InstanceRecordContext, RECORD_BYTES
+from nwo.shaders import gcn
+from nwo.shaders.ir import bits
+from nwo.shaders.translator import Compiler, decoder
+from nwo.shaders.vertex_context import ContextCompiler, InstanceRecordContext, RECORD_BYTES
 
 
 def assert_context_read_failed(test, c, dst, count):
@@ -283,7 +283,7 @@ class VertexExportsContextTests(unittest.TestCase):
         code = s_buffer_load("S_BUFFER_LOAD_DWORD", 8, 0, 0)
         context = context_for(code, record=record_words(900))
         row = self.row(code)
-        from rc2016.shaders.interpolants import vertex_exports
+        from nwo.shaders.interpolants import vertex_exports
         result, reason = vertex_exports(row, context=context)
         self.assertIsNone(reason)
         self.assertIsNotNone(result)
@@ -294,7 +294,7 @@ class VertexExportsContextTests(unittest.TestCase):
 
     def test_no_context_keeps_regular_dag_without_context_receipt(self):
         code = s_buffer_load("S_BUFFER_LOAD_DWORD", 8, 0, 0)
-        from rc2016.shaders.interpolants import vertex_exports
+        from nwo.shaders.interpolants import vertex_exports
         result, reason = vertex_exports(self.row(code))
         self.assertIsNone(reason)
         self.assertIsNotNone(result)
@@ -305,7 +305,7 @@ class VertexExportsContextTests(unittest.TestCase):
         code = s_buffer_load("S_BUFFER_LOAD_DWORD", 8, 0, 0)
         context = context_for(code, instance_vgpr=3)
         row = self.row(code, [dict(vgpr=2, size=2, semantic=7)])
-        from rc2016.shaders.interpolants import vertex_exports
+        from nwo.shaders.interpolants import vertex_exports
         with self.assertRaisesRegex(ValueError, "overlaps a declared vertex input"):
             vertex_exports(row, context=context)
 

@@ -11,10 +11,10 @@ import random
 import unittest
 from pathlib import Path
 
-from rc2016.formats.links import EXACT, rule_coverage
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.formats.links import EXACT, rule_coverage
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 
 GRAPH = 'materialgraph/global/test/test_liquid_orientation/test_liquid_orientation.materialgraph'
 MATERIAL = 'material/global/test/test_liquid_orientation/test_liquid_orientation.material'
@@ -127,7 +127,7 @@ class RuleBindingTests(unittest.TestCase):
             self.assertNotIn('VR glass rim bias', names)                  # opaque: no alpha terms
             self.assertEqual(roles, ['_n'] if textured else [])
             self.assertEqual(expected['VR glass spec tint'], list(RULE_PARAMS['spec_tint']))
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_glass')[1].split('def apply_viewer_graph_rule')[0]
         for name in ('glass body', 'glass spec tint', 'glass gloss', 'glass normal strength', 'glass liquid flow map A',
                      'glass liquid flow map B', "glass liquid normal N'"):
@@ -142,9 +142,9 @@ class ArchiveProgramTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.research import forward_loops
-        from rc2016.shaders import translator
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.research import forward_loops
+        from nwo.shaders import translator
         cls.archive = open_archive(root)
         cls.graph = asset_bytes(cls.archive, GRAPH)
         cls.material = asset_bytes(cls.archive, MATERIAL)
@@ -157,7 +157,7 @@ class ArchiveProgramTests(unittest.TestCase):
             cls.archive.close()
 
     def evaluate(self, root, inp, samples, values, memo):
-        from rc2016.shaders.ir import compute
+        from nwo.shaders.ir import compute
         nodes = self.compiler.ir.nodes
 
         def visit(i):
@@ -190,9 +190,9 @@ class ArchiveProgramTests(unittest.TestCase):
         self.assertEqual(next(nodes[a]['value'] for a in nodes[5212]['args'] if nodes[a]['op'] == 'const'), SPEC_TINT_R)
 
     def test_material_is_all_graph_defaults(self):
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.pipeline import render_state
-        from rc2016.shaders.bindings import pass_contracts
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.pipeline import render_state
+        from nwo.shaders.bindings import pass_contracts
         self.assertEqual(extract_material_parameters(self.material)['status'], 'no_parameter_sections')
         contract = pass_contracts(self.graph)[0]
         self.assertEqual({e['key_hash']: contract['defaults'][e['key_hash']] for e in contract['table']},
@@ -203,7 +203,7 @@ class ArchiveProgramTests(unittest.TestCase):
         self.assertEqual(render_state.material_flags(data=self.material), 0x23C)       # opaque, two-sided
 
     def test_material_only_terms_match_the_program_numerically(self):
-        from rc2016.shaders.ir import from_bits
+        from nwo.shaders.ir import from_bits
         compiler = self.compiler
         rng = random.Random(20261023)
         worst = {}

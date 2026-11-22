@@ -2,8 +2,8 @@
 import struct
 import unittest
 
-from rc2016.shaders import gcn
-from rc2016.shaders.translator import Compiler, decoder
+from nwo.shaders import gcn
+from nwo.shaders.translator import Compiler, decoder
 from tests.test_gcn_control_flow import sop1, sop2, program
 
 

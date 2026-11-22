@@ -1,11 +1,11 @@
-"""Pure lighting-map math of the shared review environment (rc2016/viewer/environment.py)."""
+"""Pure lighting-map math of the shared review environment (nwo/viewer/environment.py)."""
 import math
 from pathlib import Path
 import unittest
 
 import numpy as np
 
-from rc2016.viewer import environment
+from nwo.viewer import environment
 
 
 class SharedLightingFileTests(unittest.TestCase):

@@ -1,0 +1,1260 @@
+"""Native PS4 GCN -> scalar DAG -> deferred material outputs.
+
+No graph-name, shader-ID or code-hash recipe dispatch. Hashes identify source
+bytes only. Unsupported reachable instructions/branches remain diagnostics.
+
+Forward branches and the exec mask are linearised by predication: a block
+predicate (uniform control flow) and the exec predicate (per-lane activity)
+are 0/1 DAG values, and each register write merges as select(active, new, old).
+Branches on exec state are resolved for an active lane, which assumes scalar
+state written inside an exec-skipped region is not read after it, as in
+structured compiler output. Backward branches are unrolled only within a proven bound.
+"""
+from collections import Counter
+import hashlib
+import json
+import itertools
+import math
+from pathlib import Path
+import re
+import struct
+import sys
+import threading
+
+from nwo.shaders.ir import DAG, bits, from_bits
+
+VERSION=16
+ROOT=Path(__file__).resolve().parents[2]
+SHADER_SECTION=0x873D1E6C
+# VALU instructions that also write a scalar carry/flag register pair.
+CARRY_OUT={'V_ADD_I32','V_SUB_I32','V_SUBREV_I32','V_ADDC_U32','V_SUBB_U32','V_SUBBREV_U32',
+           'V_DIV_SCALE_F32','V_DIV_SCALE_F64'}
+
+# Variants that differ from the base opcode only for zero times infinity/NaN
+# (DX9 legacy multiply), NaN operands, or by clamping an infinite result to
+# the largest finite float. The IR has finite values only, where they agree.
+MAX_PREDICATE_ATOMS=12
+INTEGER_VALU={'V_ADD_I32','V_SUB_I32','V_SUBREV_I32','V_AND_B32','V_OR_B32','V_XOR_B32','V_LSHLREV_B32',
+              'V_LSHRREV_B32','V_ASHRREV_I32','V_LSHL_B32','V_LSHR_B32','V_ASHR_I32','V_MUL_LO_I32','V_MUL_LO_U32',
+              'V_MUL_U32_U24','V_MAD_U32_U24','V_SAD_U32','V_BFE_U32','V_BFI_B32','V_CVT_F32_I32','V_CVT_F32_U32',
+              'V_CVT_I32_F32','V_CVT_U32_F32','V_CVT_F32_UBYTE0','V_CVT_F32_UBYTE1','V_CVT_F32_UBYTE2','V_CVT_F32_UBYTE3'}
+BUFFER_LOAD_WORDS={
+    'BUFFER_LOAD_FORMAT_X':1,'BUFFER_LOAD_FORMAT_XY':2,'BUFFER_LOAD_FORMAT_XYZ':3,'BUFFER_LOAD_FORMAT_XYZW':4,
+    'BUFFER_LOAD_UBYTE':1,'BUFFER_LOAD_SBYTE':1,'BUFFER_LOAD_USHORT':1,'BUFFER_LOAD_SSHORT':1,
+    'BUFFER_LOAD_DWORD':1,'BUFFER_LOAD_DWORDX2':2,'BUFFER_LOAD_DWORDX3':3,'BUFFER_LOAD_DWORDX4':4,
+    'TBUFFER_LOAD_FORMAT_X':1,'TBUFFER_LOAD_FORMAT_XY':2,'TBUFFER_LOAD_FORMAT_XYZ':3,'TBUFFER_LOAD_FORMAT_XYZW':4}
+MAX_LOOP_ITERATIONS=32
+_PATTERNS={}
+
+
+def atom_pattern(n,j):
+    """Truth table of atom j over n atoms: bit k set where bit j of k is set."""
+    key=(n,j)
+    if key not in _PATTERNS:
+        size=1<<n;block=1<<j
+        # Repeat (block zeros, block ones) across the table: the repunit of 2*block-bit blocks.
+        repunit=((1<<size)-1)//((1<<(2*block))-1)
+        _PATTERNS[key]=(((1<<block)-1)<<block)*repunit
+    return _PATTERNS[key]
+def drop_atom(table,n,j):
+    """Truth table over n atoms without atom j, for a function that does not depend on it:
+    the half where atom j is 0, compacted bit-parallel (a pext of the zero blocks)."""
+    full=(1<<(1<<n))-1
+    x=table&(full^atom_pattern(n,j))
+    # Kept blocks of 2^t bits sit every 2^(t+1) bits; pair them up until they are contiguous.
+    for t in range(j+1,n):x=(x|(x>>(1<<(t-1))))&(full^atom_pattern(n,t))
+    return x
+
+
+def project_table(table,n,used):
+    """Truth table restricted to the ``used`` atoms (ascending indices), unused atoms at 0:
+    bit k is the table at the assignment taking bit q of k for atom used[q]."""
+    unused=sorted(set(range(n))-set(used),reverse=True)
+    for j in unused:   # highest first, so lower atom indices stay valid
+        table=drop_atom(table,n,j);n-=1
+    return table
+
+
+class Registers(dict):
+    """A register file that can log writes: while ``log`` is a dict, the first write to each
+    register records its previous value (None if it had none). ``order`` holds each register's
+    position in iteration order (its first insertion; deletions rebuild it)."""
+    __slots__=('log','order')
+
+    def __init__(self,*args,**kwargs):
+        super().__init__();self.log=None;self.order={}
+        self.update(*args,**kwargs)
+
+    def __setitem__(self,key,value):
+        log=self.log
+        if log is not None and key not in log:log[key]=dict.get(self,key)
+        if key not in self.order:self.order[key]=len(self.order)
+        dict.__setitem__(self,key,value)
+
+    def update(self,*args,**kwargs):
+        for key,value in dict(*args,**kwargs).items():self[key]=value
+
+    def setdefault(self,key,default=None):
+        if key not in self:self[key]=default
+        return self[key]
+
+    def _reorder(self):
+        self.order={key:j for j,key in enumerate(self)}
+
+    def __delitem__(self,key):
+        dict.__delitem__(self,key);self._reorder()
+
+    def pop(self,*args):
+        value=dict.pop(self,*args);self._reorder();return value
+
+    def popitem(self):
+        item=dict.popitem(self);self._reorder();return item
+
+    def clear(self):
+        dict.clear(self);self.order={}
+
+
+PREDICATE_OPS={'mul','max','sub','select'}
+MASK_OP=re.compile(r'S_(AND|OR|XOR|ANDN2|ORN2|NAND|NOR|XNOR|MOV|NOT)(_SAVEEXEC)?_B64')
+UNIFORM_INT_OPS={'u_and','u_or','u_xor','u_andn2','u_shl','u_shr','u_eq','u_lt','u_le','i_lt','i_le','u_bit',
+                 'u_add','u_sub','u_mul','i_shr','u_bfe','f2i','f2u'}
+# name -> (IR op, SCC): 'nonzero' result != 0, 'carry'/'borrow' unsigned, 'keep' unchanged, None unmodelled.
+UNIFORM_SOP2={'S_AND_B32':('u_and','nonzero'),'S_OR_B32':('u_or','nonzero'),'S_XOR_B32':('u_xor','nonzero'),
+              'S_ANDN2_B32':('u_andn2','nonzero'),'S_LSHL_B32':('u_shl','nonzero'),'S_LSHR_B32':('u_shr','nonzero'),
+              'S_ASHR_I32':('i_shr','nonzero'),'S_ADD_U32':('u_add','carry'),'S_SUB_U32':('u_sub','borrow'),
+              'S_ADD_I32':('u_add',None),'S_SUB_I32':('u_sub',None),'S_MUL_I32':('u_mul','keep')}
+FINITE_ALIASES={'V_MUL_LEGACY_F32':'V_MUL_F32','V_MAC_LEGACY_F32':'V_MAC_F32',
+                'V_MAD_LEGACY_F32':'V_MAD_F32','V_MIN_LEGACY_F32':'V_MIN_F32',
+                'V_MAX_LEGACY_F32':'V_MAX_F32','V_RCP_CLAMP_F32':'V_RCP_F32',
+                'V_RSQ_CLAMP_F32':'V_RSQ_F32','V_LOG_CLAMP_F32':'V_LOG_F32'}
+
+
+def decoder():
+    # The GCN field decoder, cross-checked against opengnm's decoder.
+    from nwo.shaders import gcn_fields
+    return gcn_fields
+
+
+def sections(data):
+    if len(data)<16 or struct.unpack_from('<I',data)[0]!=0x44415431:
+        raise ValueError('Invalid DAT1 shader graph')
+    declared,count=struct.unpack_from('<IH',data,8)
+    if declared!=len(data) or 16+count*12>len(data):raise ValueError('DAT1 bounds')
+    result={}
+    for i in range(count):
+        tag,off,size=struct.unpack_from('<III',data,16+12*i)
+        if tag in result or off<16+count*12 or off+size>len(data):raise ValueError('DAT1 section bounds')
+        result[tag]=(off,size)
+    return result
+
+
+def pixel_programs(data):
+    spans=sections(data)
+    if SHADER_SECTION not in spans:return []
+    lo,size=spans[SHADER_SECTION];hi=lo+size
+    result=[]
+    starts=[lo+m.start() for m in re.finditer(b'Shdr',data[lo:hi]) if m.start()<3 or data[lo+m.start()-3:lo+m.start()]!=b'Orb']
+    for pos in starts:
+        if pos+16>hi:raise ValueError('Truncated Shdr')
+        if data[pos+8]!=2:continue
+        count=data[pos+19]
+        stage=pos+16
+        usage=stage+0x3c
+        input_count=data[stage+0x38]
+        stage_size=(0x3c+count*4+input_count*2+3)&~3
+        code_start=stage+stage_size
+        if data[pos+9]*4!=stage_size:raise ValueError('Shdr stage/header mismatch')
+        declared=struct.unpack_from('<I',data,stage)[0]&0x7fffff
+        orb=code_start+declared-28
+        end=min([x for x in starts if x>pos]+[hi])
+        if orb+28>end or data[orb:orb+7]!=b'OrbShdr':raise ValueError('Shdr/OrbShdr boundary mismatch')
+        length=struct.unpack_from('<I',data,orb+8)[0]>>8
+        if length<=0 or code_start+length>orb:raise ValueError('Native code exceeds envelope')
+        slots=[]
+        for p in range(usage,usage+count*4,4):
+            kind,api,reg,flags=struct.unpack_from('<4B',data,p)
+            slots.append(dict(kind=kind,api=api,reg=reg,flags=flags))
+        code=data[code_start:code_start+length]
+        # Gnm layout: 8-byte ShaderCommonData (23-bit size, usage-slot count in the
+        # top byte, as read above), then PsStageRegisters from offset 8:
+        # PGM_LO, PGM_HI, RSRC1, RSRC2, Z_FORMAT, COL_FORMAT, INPUT_ENA, INPUT_ADDR, ...
+        rsrc1,=struct.unpack_from('<I',data,stage+16)
+        ena,addr=struct.unpack_from('<2I',data,stage+32)
+        result.append(dict(header_offset=pos,code_offset=code_start,code_size=len(code),
+            code_sha256=hashlib.sha256(code).hexdigest(),shader_id=f'0x{struct.unpack_from("<I",data,orb+16)[0]:08x}',
+            usage_slots=slots,code=code,ps_input_ena=ena,ps_input_addr=addr,vgpr_count=(rsrc1&63)*4+4))
+    return result
+
+
+# SPI_PS_INPUT_ADDR bits in order, with their VGPR widths; enabled inputs are
+# packed from VGPR 0 in this order.
+PS_INPUTS=(('PERSP_SAMPLE',2),('PERSP_CENTER',2),('PERSP_CENTROID',2),('PERSP_PULL_MODEL',3),
+           ('LINEAR_SAMPLE',2),('LINEAR_CENTER',2),('LINEAR_CENTROID',2),('LINE_STIPPLE',1),
+           ('POS_X',1),('POS_Y',1),('POS_Z',1),('POS_W',1),('FRONT_FACE',1),('ANCILLARY',1),
+           ('SAMPLE_COVERAGE',1),('POS_FIXED_PT',1))
+
+
+def ps_input_registers(addr,ena,vgpr_count=None):
+    """{VGPR: (input, component, loaded)} for an input-address word; {} if it cannot fit the program."""
+    layout={};reg=0
+    for bit,(name,width) in enumerate(PS_INPUTS):
+        if not (addr>>bit)&1:continue
+        for j in range(width):layout[reg+j]=(name,j if width>1 else None,bool((ena>>bit)&1))
+        reg+=width
+    if addr>>len(PS_INPUTS) or (vgpr_count is not None and reg>vgpr_count):return {}
+    return layout
+
+
+_SAMPLER_MODE=threading.local()
+# json.dumps with these options builds a new encoder per call; this is the same encoder, built once.
+_DIGEST_ENCODER=json.JSONEncoder(sort_keys=True,separators=(',',':'))
+
+
+def sampler_mode_hits():
+    """How often this thread's compilers have reached a texture/sampler API mismatch. A compile
+    that leaves it unchanged gave the same result with and without ``allow_independent_samplers``."""
+    return getattr(_SAMPLER_MODE,'hits',0)
+
+
+class Compiler:
+    def __init__(self,code,usage_slots,ps_input_addr=None,ps_input_ena=None,vgpr_count=None,*,allow_independent_samplers=False):
+        self.code=code;self.ir=DAG();self.v=Registers();self.s=Registers();self.descriptors={};self.exports={}
+        self.samples=[];self.diagnostics=[];self.current=0;self.scalar_bits={}
+        self.allow_independent_samplers=allow_independent_samplers
+        self.buffer_descriptor_taint=set()
+        self.exec=self.ir.const(1.);self.bp=self.ir.const(1.);self.masks={};self.scc=None;self.scc_source='program start'
+        self.pending={};self.premerged=set();self.exec_masked_export=False;self.export_exec={}
+        self.pred_tables={};self.pred_memo={};self.back=None;self.fetch_call=False;self.lane_checks={};self.runtime_conditions=False;self.lane_values=set()
+        if ps_input_addr is not None:
+            for reg,(name,j,loaded) in ps_input_registers(ps_input_addr,ps_input_ena or 0,vgpr_count).items():
+                label='ps.'+name+('' if j is None else f'.{j}')
+                self.v[reg]=(self.ir.node('input',name=label,kind='ps_input',input=name,component=j) if loaded
+                             else self.unknown(f'Uninitialized VGPR {reg} (PS input {label} not loaded)'))
+        self.slots=usage_slots
+        for slot in usage_slots:
+            if slot['reg']<16:
+                width=8 if slot['kind']==0 else 4 if slot['kind'] in (1,2) else 2
+                for j in range(width):self.descriptors[slot['reg']+j]=dict(slot,word=j)
+
+    def sampler_apis_differ(self,resource,sampler):
+        """Whether an indirect texture and its sampler name different APIs: the only place
+        ``allow_independent_samplers`` changes a compile, so it is counted (see ``sampler_mode_hits``)."""
+        differ=resource['api']!=sampler['api']
+        if differ:_SAMPLER_MODE.hits=getattr(_SAMPLER_MODE,'hits',0)+1
+        return differ
+
+    def unknown(self,reason,*args,**meta):
+        return self.ir.node('unsupported',args,reason=reason,offset=self.current,**meta)
+
+    def getv(self,i):
+        if i not in self.v:self.v[i]=self.unknown(f'Uninitialized VGPR {i}')
+        return self.v[i]
+
+    def gets(self,i):
+        if i not in self.s:self.s[i]=self.unknown(f'Uninitialized SGPR {i}')
+        return self.s[i]
+
+    # Lane and block predicates are 0/1 values built from atoms (comparisons,
+    # uniform conditions) with and (mul), or (max), not (1 - x) and select.
+    # Each result is folded by its truth table, held as a bitmask over atom
+    # assignments, so a restored exec mask is the constant 1 again and equal
+    # predicates share a node.
+    def predicate(self,value):
+        if value not in self.pred_memo:self.pred_memo[value]=self._predicate(value)
+        return self.pred_memo[value]
+
+    def _predicate(self,value):
+        nodes=self.ir.nodes
+        if nodes[value]['op']=='const' or nodes[value]['op'] not in PREDICATE_OPS:return value
+        atoms=set();pending=[value];seen=set()
+        while pending:
+            i=pending.pop()
+            if i in seen:continue
+            n=nodes[i]
+            if n['op']=='const':continue
+            seen.add(i)
+            if n['op'] in PREDICATE_OPS:pending.extend(n['args'])
+            else:atoms.add(i)
+        if len(atoms)>MAX_PREDICATE_ATOMS:return value
+        atoms=sorted(atoms);size=1<<len(atoms);full=(1<<size)-1
+        tables={a:atom_pattern(len(atoms),j) for j,a in enumerate(atoms)}
+        def table(i):
+            if i in tables:return tables[i]
+            constant=self.ir.value(i)
+            if constant is not None:
+                if constant not in (0,1):raise ValueError('non-boolean')
+                return full if constant else 0
+            n=self.ir.nodes[i];a=n['args']
+            if n['op']=='mul':r=table(a[0])&table(a[1])
+            elif n['op']=='max':r=table(a[0])|table(a[1])
+            elif n['op']=='sub' and self.ir.value(a[0])==1:r=full^table(a[1])
+            elif n['op']=='select':p=table(a[0]);r=(p&table(a[1]))|((full^p)&table(a[2]))
+            else:raise ValueError('non-boolean')
+            tables[i]=r;return r
+        try:result=table(value)
+        except ValueError:return value
+        if result in (0,full):return self.ir.const(float(result==full))
+        # Canonical key over the atoms the function depends on.
+        used=[j for j in range(len(atoms)) if ((result>>(1<<j))&full&~tables[atoms[j]])!=(result&full&~tables[atoms[j]])]
+        reduced=project_table(result,len(atoms),used)
+        key=(tuple(atoms[j] for j in used),reduced)
+        if len(used)==1 and reduced==0b10:return atoms[used[0]]
+        return self.pred_tables.setdefault(key,value)
+
+    def p_and(self,a,b):return self.predicate(self.ir.op('mul',a,b))
+
+    def p_not(self,a):return self.predicate(self.ir.op('sub',self.ir.const(1.),a))
+
+    def p_or(self,a,b):return self.predicate(self.ir.op('max',a,b))
+
+    def p_xor(self,a,b):
+        return self.predicate(self.ir.op('max',self.ir.op('mul',a,self.ir.op('sub',self.ir.const(1.),b)),
+                                         self.ir.op('mul',b,self.ir.op('sub',self.ir.const(1.),a))))
+
+    def p_select(self,p,a,b):return self.predicate(self.ir.op('select',p,a,b))
+
+    def mask_high(self,mask):
+        return self.ir.node('unsupported',[mask],reason='Lane mask high word')
+
+    def mask(self,raw):
+        """Lane predicate held by a 64-bit scalar operand, or None."""
+        if raw==126:return self.exec
+        if raw==128:return self.ir.const(0.)
+        if raw==193:return self.ir.const(1.)
+        m=self.masks.get(raw)
+        if m is not None and self.s.get(raw)==m and self.s.get(raw+1)==self.mask_high(m):return m
+        return None
+
+    def set_mask(self,dst,value):
+        old=self.mask(dst)
+        if old is not None:value=self.p_select(self.bp,value,old)
+        for reg in (dst,dst+1):self.descriptors.pop(reg,None);self.scalar_bits.pop(reg,None)
+        self.s[dst]=value;self.s[dst+1]=self.mask_high(value);self.masks[dst]=value
+        self.premerged.update((dst,dst+1))
+
+    def set_exec(self,value):
+        self.exec=self.p_select(self.bp,value,self.exec)
+
+    def mask_op(self,k,name,f):
+        """Exact lane-mask algebra for 64-bit scalar logic on known masks; False if not applicable."""
+        m=MASK_OP.fullmatch(name)
+        if not m:return False
+        op,saveexec=m.group(1),bool(m.group(2))
+        dst=f['dst'][0];raws=f['src'][:1 if k==0 else 2];srcs=[self.mask(r) for r in raws]
+        if any(x is None for x in srcs):return False
+        # Integer 64-bit constants (address or descriptor words) keep the scalar path.
+        if dst!=126 and not saveexec and all(r in (128,193) for r in raws):return False
+        binary={'AND':lambda a,b:self.p_and(a,b),'OR':self.p_or,'XOR':self.p_xor,
+                'ANDN2':lambda a,b:self.p_and(a,self.p_not(b)),'ORN2':lambda a,b:self.p_or(a,self.p_not(b)),
+                'NAND':lambda a,b:self.p_not(self.p_and(a,b)),'NOR':lambda a,b:self.p_not(self.p_or(a,b)),
+                'XNOR':lambda a,b:self.p_not(self.p_xor(a,b))}
+        if saveexec:
+            # D = EXEC; EXEC = S0 op EXEC; SCC = (EXEC != 0).
+            if op not in binary or dst==126:return False
+            old=self.exec;self.set_mask(dst,old);self.set_exec(binary[op](srcs[0],old));self.scc=('exec',)
+            return True
+        if k==0 and op in ('MOV','NOT'):
+            value=srcs[0] if op=='MOV' else self.p_not(srcs[0])
+        elif k==1 and op in binary:value=binary[op](*srcs)
+        else:return False
+        if dst==126:self.set_exec(value)
+        else:self.set_mask(dst,value)
+        if op!='MOV':
+            # SCC = (mask != 0) wave-wide: fixed (1) for any lane inside the mask.
+            self.scc=('exec',) if dst==126 else ('mask',value);self.scc_source=name+' (lane mask)'
+        return True
+
+    def scalar_operand_bits(self,raw,literal_bits):
+        if raw<=127:return self.scalar_bits.get(raw)
+        if raw==255:return literal_bits
+        return self.inline_bits(raw)
+
+    def trace_instruction_words(self,i):
+        """Exact words for a decoded instruction, including any consumed literal."""
+        start=i['relative'];length=i.get('length',4)
+        if length>=4 and start>=0 and start+length<=len(self.code):
+            return list(struct.unpack_from(f'<{length//4}I',self.code,start))
+        return [i['word']]+([i['wide']>>32] if i['kind'] in (7,11,12,13,14,15) else [])
+
+    def scalar_operand_trace(self,raw,literal_bits=None,width=1):
+        """Snapshot scalar provenance; values remain unsupported, never evaluated."""
+        words=[]
+        for j in range(width):
+            reg=raw+j if raw<=127 else None
+            known=self.scalar_operand_bits(raw,literal_bits) if j==0 else self.scalar_bits.get(reg)
+            node=self.s.get(reg) if reg is not None and reg<=127 else None
+            word=dict(sgpr=reg,bits=known)
+            if known is None:
+                if node is not None:
+                    word['expression'],word['expression_sha256']=self.buffer_expression(node)
+                else:word['unresolved']=f's{reg}' if reg is not None else f'encoded operand {raw} word {j}'
+            words.append(word)
+        return dict(encoded=raw,width_words=width,words=words)
+
+    def runtime_condition(self,i):
+        """Opaque diagnostic atom with operand provenance; never bound or evaluated."""
+        w=i['word'];name=i['name'].replace('GCN_','').replace('_E64','')
+        if i['kind']==2:
+            literal=struct.unpack_from('<I',self.code,i['relative']+4)[0] if i['length']>4 else None
+            widths=(2,1) if name.endswith('_B64') else (2,2) if name.endswith(('_U64','_I64')) else (1,1)
+            operands=[self.scalar_operand_trace(r,literal,width) for r,width in zip((w&255,(w>>8)&255),widths)]
+            immediate={}
+        else:
+            simm=w&0xffff;value=struct.unpack('<h',struct.pack('<H',simm))[0] if name.endswith('_I32') else simm
+            operands=[self.scalar_operand_trace((w>>16)&127),self.scalar_operand_trace(255,value&0xffffffff)]
+            immediate=dict(raw_simm16=simm,immediate_value=value)
+        predicate=dict(opcode=name,encoding='SOPC' if i['kind']==2 else 'SOPK',
+            instruction_offset=i['relative'],instruction_words=self.trace_instruction_words(i),
+            operands=operands,predicate_evaluated=False,memory_evaluated=False,**immediate)
+        identity=hashlib.sha256(json.dumps(predicate,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        return self.ir.node('input',name=f'runtime_flag@{i["relative"]}',kind='runtime_flag',
+                            predicate=dict(predicate,predicate_sha256=identity))
+
+    def describe_scalar(self,raw,literal_bits):
+        """Short provenance of a scalar operand, for diagnostics."""
+        known=self.scalar_operand_bits(raw,literal_bits)
+        if known is not None:return f'0x{known:x}'
+        node=self.s.get(raw) if raw<=127 else None
+        return f's{raw}' if node is None else f's{raw}='+self.ir.describe(node,2)[:120]
+
+    def uniform(self,raw,literal_bits):
+        """Uniform 32-bit scalar as an F32-bit-pattern node: known bits, a constant-buffer word or a uniform op."""
+        known=self.scalar_operand_bits(raw,literal_bits)
+        if known is not None:
+            value=from_bits(known)
+            return self.ir.const(value) if math.isfinite(value) else None
+        node=self.s.get(raw) if raw<=127 else None
+        if node is None:return None
+        n=self.ir.nodes[node]
+        return node if (n['op']=='input' and n.get('kind')=='cb') or n['op'] in UNIFORM_INT_OPS else None
+
+    def uniform_condition(self,name,a,b):
+        """SCC of S_CMP(K)/S_BITCMP on uniform operands, or None."""
+        if a is None or b is None:return None
+        if name.startswith('S_BITCMP'):
+            bit=self.ir.op('u_bit',a,b)
+            return bit if name.startswith('S_BITCMP1') else self.p_not(bit)
+        m=re.match(r'S_CMPK?_(EQ|LG|LT|LE|GT|GE)_([UI])32$',name)
+        if not m:return None
+        relation,kind=m.groups();lt,le=('u_lt','u_le') if kind=='U' else ('i_lt','i_le')
+        if relation in ('EQ','LG'):
+            c=self.ir.op('u_eq',a,b);return c if relation=='EQ' else self.p_not(c)
+        return {'LT':lambda:self.ir.op(lt,a,b),'LE':lambda:self.ir.op(le,a,b),
+                'GT':lambda:self.ir.op(lt,b,a),'GE':lambda:self.ir.op(le,b,a)}[relation]()
+
+    def uniform_sop(self,k,name,f,i):
+        """Exact SOP2 integer logic on uniform values; SCC = result != 0. False if not applicable."""
+        if k==1 and name in UNIFORM_SOP2:
+            literal_bits=struct.unpack_from('<I',self.code,i['relative']+4)[0] if i['length']>4 else None
+            a,b=(self.uniform(r,literal_bits) for r in f['src'][:2]);dst=f['dst'][0];op,scc=UNIFORM_SOP2[name]
+        elif k==3 and name in ('S_ADDK_I32','S_MULK_I32'):
+            dst=(w:=i['word'])>>16&127
+            a,b=self.uniform(dst,None),self.uniform(255,struct.unpack('<h',struct.pack('<H',w&0xffff))[0]&0xffffffff)
+            op,scc=('u_add',None) if name=='S_ADDK_I32' else ('u_mul','keep')
+        else:return False
+        if a is None or b is None:return False
+        value=self.ir.op(op,a,b);self.write_uniform(dst,value)
+        if scc=='nonzero':self.scc=('uniform',self.p_not(self.ir.op('u_eq',value,self.ir.const(0.))))
+        elif scc=='carry':self.scc=('uniform',self.ir.op('u_lt',value,a))
+        elif scc=='borrow':self.scc=('uniform',self.ir.op('u_lt',a,b))
+        elif scc is None:self.scc=None;self.scc_source=name
+        return True
+
+    def write_uniform(self,dst,value):
+        """Known words keep the integer form scalar moves use, for addressing."""
+        constant=self.ir.value(value);self.descriptors.pop(dst,None)
+        if constant is not None:
+            word=bits(constant);self.s[dst]=self.ir.const(word);self.scalar_bits[dst]=word
+        else:self.s[dst]=value;self.scalar_bits.pop(dst,None)
+
+    def unpack(self,value):
+        n=self.ir.nodes[value]
+        if n['op']=='pack':return list(n['args'])
+        if n['op']=='const' and isinstance(n['value'],float):
+            # A packed register written as one 32-bit word: two F16 halves, low first.
+            word=bits(n['value']);halves=struct.unpack('<2e',struct.pack('<I',word))
+            return [self.ir.const(h) for h in halves] if all(map(math.isfinite,halves)) else None
+        if n['op']=='select':
+            a,b=self.unpack(n['args'][1]),self.unpack(n['args'][2])
+            if a and b:return [self.ir.op('select',n['args'][0],x,y) for x,y in zip(a,b)]
+        return None
+
+    def guarded_by_vcc(self,target):
+        """The skipped region begins with S_AND_SAVEEXEC_B64 on VCC, before any vector work or VCC/EXEC write."""
+        for j in getattr(self,'instructions',[])[getattr(self,'position',0)+1:]:
+            if j['relative']>=target:return False
+            name=j['name'].replace('GCN_','').replace('_E64','')
+            if name=='S_AND_SAVEEXEC_B64':return j['fields']['src'][0]==106
+            if j['kind'] not in (0,1,2,3,4,10):return False
+            if any(r in (106,107,126,127) for r in j['fields'].get('dst',[]) or []):return False
+        return False
+
+    def wave_uniform(self,value):
+        """True when a value depends only on constants, constant-buffer words and values
+        held in scalar registers (one value per wave, even when unresolved)."""
+        scalar={v for r,v in self.s.items() if r<106}
+        if self.lane_values:
+            # The scalar path of a first-lane check holds the lane's own value in SGPRs.
+            scalar={v for v in scalar if not self.ir.reachable([v])&self.lane_values}
+        stack,seen=[value],set()
+        while stack:
+            j=stack.pop()
+            if j in seen or j in scalar:continue
+            seen.add(j);n=self.ir.nodes[j]
+            if n['op'] in ('texture','unsupported') or (n['op']=='input' and n.get('kind') not in ('cb','runtime_flag')):return False
+            stack.extend(n.get('args',[]))
+        return True
+
+    def branch(self,i,name,f):
+        target=i['relative']+f['branch_target_relative']
+        one=self.ir.const(1.);zero=self.ir.const(0.)
+        # For an active lane exec is nonzero, so exec tests have a fixed outcome,
+        # unless the mask is known to be empty for every lane (a finished loop).
+        any_exec=zero if self.ir.value(self.exec)==0 else one
+        if name=='S_BRANCH':condition=one
+        elif name=='S_CBRANCH_EXECZ':condition=self.p_not(any_exec)
+        elif name=='S_CBRANCH_EXECNZ':condition=any_exec
+        elif name in ('S_CBRANCH_SCC0','S_CBRANCH_SCC1'):
+            # A lane inside the tested mask sees SCC = 1. Lanes outside a non-exec
+            # mask (killed lanes, or lanes the region below masks off) are assumed
+            # not to depend on the branch, as for exec-skipped regions.
+            if self.scc==('exec',):condition=any_exec
+            elif self.scc and self.scc[0]=='mask':condition=zero if self.ir.value(self.scc[1])==0 else one
+            elif self.scc and self.scc[0]=='uniform':condition=self.scc[1]
+            else:raise ValueError(f'Control flow unsupported at {i["relative"]}: {name} on unresolved SCC from {self.scc_source}')
+            if name=='S_CBRANCH_SCC0':condition=self.p_not(condition)
+        elif name in ('S_CBRANCH_VCCZ','S_CBRANCH_VCCNZ'):
+            # VCCZ is wave-wide; it is a uniform branch only when VCC is the same in every lane.
+            vcc=self.mask(106)
+            if name=='S_CBRANCH_VCCZ' and vcc in self.lane_checks:
+                # Uniformity check: VCCZ takes the scalar path when every lane equals the
+                # first. The other path loops over distinct values to compute the same
+                # per-lane result, so one lane follows the scalar path with first = its own value.
+                first,lane=self.lane_checks[vcc];condition=one
+                for reg,value in list(self.s.items()):
+                    if value==first:self.s[reg]=lane;self.lane_values.add(lane)
+            elif vcc is not None and self.wave_uniform(vcc):
+                condition=vcc if name=='S_CBRANCH_VCCNZ' else self.p_not(vcc)
+            elif vcc is not None and name=='S_CBRANCH_VCCZ' and self.guarded_by_vcc(target):
+                # A skip over a region masked to the VCC lanes: lanes with VCC set
+                # fall through, the others are inactive in the region either way.
+                condition=zero
+            else:raise ValueError(f'Control flow unsupported at {i["relative"]}: {name} on lane-varying VCC')
+        else:raise ValueError(f'Control flow unsupported at {i["relative"]}: {name}')
+        taken=self.p_and(self.bp,condition)
+        if target<=i['relative']:self.back=(target,taken)  # unrolled by compile()
+        else:self.pending[target]=self.p_or(self.pending.get(target,zero),taken)
+        self.bp=self.p_and(self.bp,self.p_not(condition))
+
+    def clobber_s(self,start,count,reason,trace=None):
+        """Every SGPR write not modelled exactly must drop known bits/descriptors."""
+        for j,reg in enumerate(range(start,start+count)):
+            meta={} if trace is None else dict(scalar_instruction=dict(trace,component=j))
+            self.s[reg]=self.unknown(reason,**meta);self.descriptors.pop(reg,None);self.scalar_bits.pop(reg,None)
+
+    def float_bits(self,bits):
+        value=struct.unpack('<f',struct.pack('<I',bits&0xffffffff))[0]
+        return self.ir.const(value) if math.isfinite(value) else self.unknown(f'Non-finite F32 bits 0x{bits&0xffffffff:08x}')
+
+    @staticmethod
+    def inline_bits(raw):
+        """Raw 32-bit pattern of an inline constant (GCN2 has no 1/(2*pi))."""
+        if 128<=raw<=192:return raw-128
+        if 193<=raw<=208:return (192-raw)&0xffffffff
+        if 240<=raw<=247:return struct.unpack('<I',struct.pack('<f',(.5,-.5,1.,-1.,2.,-2.,4.,-4.)[raw-240]))[0]
+        return None
+
+    def operand(self,raw,literal):
+        """F32 operand. Integer inline constants are bit patterns, not values."""
+        if raw>=256:return self.getv(raw-256)
+        if raw<=127:
+            if raw in self.scalar_bits:return self.float_bits(self.scalar_bits[raw])
+            return self.gets(raw)
+        bits=self.inline_bits(raw)
+        if bits is not None:return self.float_bits(bits)
+        if raw==255:return self.ir.const(literal) if math.isfinite(literal) else self.unknown('Non-finite F32 literal')
+        return self.unknown(f'Unsupported encoded operand {raw}')
+
+    @staticmethod
+    def descriptor_identity(descriptor):
+        return {k:v for k,v in descriptor.items() if k not in ('word','guard')}
+
+    def texture_descriptor(self,base,kind,width):
+        """Complete descriptor words, with one identity on every active sample path.
+
+        Table pointers use the same check at width 2. Split loads can assemble a
+        descriptor, but a partial, shifted or conditionally stale word cannot.
+        """
+        first=self.descriptors.get(base)
+        if first is None or first.get('kind')!=kind:return None
+        identity=self.descriptor_identity(first)
+        active=self.p_and(self.bp,self.exec)
+        for word in range(width):
+            entry=self.descriptors.get(base+word)
+            if (entry is None or entry.get('word')!=word or
+                    self.descriptor_identity(entry)!=identity):return None
+            guard=entry.get('guard',self.ir.const(1.))
+            if self.p_and(active,guard)!=active:return None
+        return first
+
+    def merge_table_descriptors(self,bp,before,after,writes):
+        """Metadata obeys the same block predicate as scalar register writes.
+
+        Keep the new identity on its proven path, or combine guards when both
+        paths retain exactly the same identity. Distinct identities at a join
+        remain usable only inside a path that proves the chosen one applies.
+        """
+        for reg,_value in writes:
+            old,new=before.get(reg),after.get(reg)
+            table=lambda d:d is not None and (d.get('kind') in (0x13,0x15) or 'table_slot' in d)
+            if not (table(old) or table(new)):
+                # Direct descriptor metadata does not retain both identities
+                # at a conditional join. Do not present it as buffer proof.
+                if any(d is not None and d.get('kind') in (0,1,2,3) for d in (old,new)):
+                    if old is None or new is None or old!=new:self.buffer_descriptor_taint.add(reg)
+                continue
+            if new is not None:
+                guard=self.p_and(bp,new.get('guard',self.ir.const(1.)))
+                if old is not None and self.descriptor_identity(old)==self.descriptor_identity(new) and old.get('word')==new.get('word'):
+                    guard=self.p_or(guard,self.p_and(self.p_not(bp),old.get('guard',self.ir.const(1.))))
+                self.descriptors[reg]=dict(new,guard=guard)
+            elif old is not None:
+                self.descriptors[reg]=dict(old,guard=self.p_and(self.p_not(bp),old.get('guard',self.ir.const(1.))))
+
+    def load(self,i):
+        w=i['word'];name=i['name'];base=((w>>9)&63)*2;dst=(w>>15)&127
+        count=int(name.rsplit('X',1)[1]) if 'DWORDX'in name else 1
+        imm=bool(w&256)
+        # Register offsets are unsigned scalar words, not their F32 carriers.
+        offset=(w&255)*4 if imm else self.scalar_operand_bits(w&255,None)
+        origin=self.descriptors.get(base,{})
+        # A tainted direct descriptor join can make a later scalar load's
+        # destination metadata path-dependent too. Carry that diagnostic taint
+        # through every loaded word; never clear prior taint.
+        base_tainted=any(reg in self.buffer_descriptor_taint for reg in (base,base+1))
+        trace=None
+        if self.runtime_conditions:
+            width=4 if 'BUFFER_LOAD' in name else 2
+            proved=self.texture_descriptor(base,origin.get('kind'),width) if origin else None
+            if any(reg in self.buffer_descriptor_taint for reg in range(base,base+width)):proved=None
+            proof={k:proved[k] for k in ('kind','api','reg','flags','table_slot') if k in proved} if proved else None
+            trace=dict(kind='SMRD',opcode=name,instruction_offset=i.get('relative',self.current),
+                instruction_words=self.trace_instruction_words(i) if 'relative' in i else [w],
+                base_sgpr=base,descriptor_words=width,descriptor_proof=proof,
+                immediate_offset=imm,encoded_offset=w&255,byte_offset=offset,
+                offset_operand=None if imm else self.scalar_operand_trace(w&255),
+                memory_evaluated=False,bounds='unproven')
+        table_origin=None
+        if origin.get('kind') in (0x13,0x15):
+            table_origin=self.texture_descriptor(base,origin['kind'],2)
+        table_offset=(int(offset) if offset is not None and math.isfinite(offset)
+                      and offset==int(offset) and offset>=0 and int(offset)%4==0 else None)
+        for j in range(count):
+            reg=dst+j
+            if base_tainted:self.buffer_descriptor_taint.add(reg)
+            self.descriptors.pop(reg,None);self.scalar_bits.pop(reg,None)
+            if origin.get('kind')==2 and 'BUFFER_LOAD'in name and offset is not None:
+                dword=int(offset)//4+j
+                self.s[reg]=self.ir.node('input',name=f"CB{origin['api']}[{dword}]",kind='cb',api=origin['api'],dword=dword)
+            elif origin.get('kind')==0x1b and offset is not None:
+                slot=next((s for s in self.slots if s['reg']==16+int(offset)//4),None)
+                if slot:self.descriptors[reg]=dict(slot,word=j)
+                self.s[reg]=self.unknown('Extended descriptor value',word=j)
+            elif table_origin is not None and table_offset is not None:
+                is_resource=table_origin['kind']==0x13
+                width=8 if is_resource else 4
+                api,word=divmod(table_offset//4+j,width)
+                if api<32:
+                    slot=(table_origin['kind'],table_origin['api'],table_origin.get('reg'),table_origin.get('flags'))
+                    guard=self.p_and(table_origin.get('guard',self.ir.const(1.)),self.bp)
+                    self.descriptors[reg]=dict(kind=0 if is_resource else 1,api=api,word=word,
+                                               table_slot=slot,guard=guard)
+                self.s[reg]=self.unknown('Descriptor word',word=word)
+            # Each loaded dword is a distinct unknown: one node per instruction would make
+            # different words of a multi-dword load compare and cancel as equal.
+            else:
+                meta={} if trace is None else dict(scalar_memory_access=dict(trace,component=j))
+                self.s[reg]=self.unknown('Unresolved scalar memory load',word=j,base=base,
+                                        load_offset=None if offset is None else int(offset),**meta)
+
+    def buffer_expression(self,root,depth=4):
+        """Bounded diagnostic text with structural hashes instead of DAG IDs."""
+        memo=self.ir.__dict__.setdefault('_buffer_expression_hashes',{})
+        def digest(i):
+            if i not in memo:
+                n=self.ir.nodes[i]
+                record={k:v for k,v in n.items() if k!='args'}
+                record['args']=[digest(j) for j in n.get('args',[])]
+                memo[i]=hashlib.sha256(_DIGEST_ENCODER.encode(record).encode()).hexdigest()
+            return memo[i]
+        texts=self.ir.__dict__.setdefault('_buffer_expression_texts',{})
+        def text(i,left):
+            key=(i,left)
+            if key in texts:return texts[key]
+            n=self.ir.nodes[i]
+            if n['op']=='const':result=str(n['value'])
+            elif n['op']=='input':result=n['name']
+            elif left==0:result='expr:'+digest(i)[:16]
+            else:result=n['op']+'('+', '.join(text(j,left-1) for j in n.get('args',[]))+')'
+            texts[key]=result;return result
+        return text(root,depth),digest(root)
+
+    def buffer_load(self,i,name):
+        """Record an unresolved read, preserving its actual VGPR write span.
+
+        Descriptor/address strings are diagnostic snapshots, not executable
+        references or decoded buffer contents. Bounds remain unproved.
+        """
+        q=i['wide'];f=i['fields'];kind=i['kind'];dst=f['dst'][0]
+        width=BUFFER_LOAD_WORDS[name];tfe=bool((q>>55)&1)
+        if kind==12 and (q>>16)&1:raise ValueError('Buffer load to LDS is unsupported')
+        if dst+width+int(tfe)>256:raise ValueError('Buffer load destination span exceeds VGPR range')
+        vaddr,srsrc,soffset=f['src'][:3]
+        offen=bool((q>>12)&1);idxen=bool((q>>13)&1);addr64=kind==12 and bool((q>>15)&1)
+        if addr64 and (offen or idxen):raise ValueError('ADDR64 buffer loads require OFFEN and IDXEN disabled')
+        address_words=2 if addr64 else int(offen)+int(idxen)
+        if vaddr+address_words>256:raise ValueError('Buffer load address span exceeds VGPR range')
+        addresses=[self.buffer_expression(self.getv(vaddr+j)) for j in range(address_words)]
+        scalar_word=self.scalar_operand_bits(soffset,None)
+        scalar_node=self.s.get(soffset) if soffset<=127 else None
+        scalar=(f'0x{scalar_word:x}' if scalar_word is not None else
+                f's{soffset}='+self.buffer_expression(scalar_node,2)[0] if scalar_node is not None else f's{soffset}')
+        first=self.descriptors.get(srsrc,{})
+        proved=self.texture_descriptor(srsrc,first.get('kind'),4) if first else None
+        if any(r in self.buffer_descriptor_taint for r in range(srsrc,srsrc+4)):proved=None
+        descriptor={key:proved[key] for key in ('kind','api','reg','flags','table_slot') if key in proved} if proved else None
+        access=dict(kind='MUBUF' if kind==12 else 'MTBUF',opcode=name,tfe=tfe,
+            instruction_offset=i['relative'],instruction_words=[q&0xffffffff,q>>32],
+            operands=dict(vaddr=vaddr,vdata=dst,srsrc=srsrc,soffset=soffset),
+            controls=dict(offset=q&0xfff,offen=offen,idxen=idxen,addr64=addr64),
+            format=dict(source='instruction',data_format=(q>>19)&15,numeric_format=(q>>23)&7) if kind==13 else dict(source='descriptor',decoded=False),
+            descriptor_proof=descriptor,address_expressions=[t for t,h in addresses],
+            address_expression_sha256=[h for t,h in addresses],scalar_offset_expression=scalar,
+            data_words=width,memory_evaluated=False,bounds='unproven')
+        for j in range(width):
+            self.v[dst+j]=self.unknown(name,buffer_access=dict(access,role='data',component=j))
+        if tfe:
+            self.v[dst+width]=self.unknown(name,buffer_access=dict(access,role='tfe_status',component=None))
+
+    def instruction(self,i):
+        self.current=i['relative'];k=i['kind'];w=i['word'];q=i['wide'];f=i['fields']
+        name=i['name'].replace('GCN_','').replace('_E64','')
+        if k==3 and not f.get('dst'):
+            # The shared decoder exposes no SOPK fields; SDST is bits 22:16.
+            # Compares write only SCC and SETREG writes a hardware register.
+            f=dict(f,dst=[] if name.startswith(('S_CMPK','S_SETREG')) else [(w>>16)&127])
+        if k in (0,1) and self.mask_op(k,name,f):return
+        if name=='S_SWAPPC_B64' and self.fetch_call:
+            # Vertex fetch subroutine: its loads are pre-bound as vertex inputs by
+            # input semantic; only the return-address pair is written here.
+            self.clobber_s(f['dst'][0],2,name);return
+        if ('SAVEEXEC' in name or name in ('S_SETPC_B64','S_SWAPPC_B64') or
+            (k in (0,1,2,3) and name!='S_WQM_B64' and any(r in (126,127) for r in f.get('dst',[])))):
+            raise ValueError(f'Execution-mask/control flow unsupported at {i["relative"]}: {name}')
+        if k==2:
+            # SOPC: S0 bits 7:0, S1 bits 15:8; only SCC is written.
+            literal_bits=struct.unpack_from('<I',self.code,i['relative']+4)[0] if i['length']>4 else None
+            c=self.uniform_condition(name,*(self.uniform(r,literal_bits) for r in (w&255,(w>>8)&255)))
+            if c is None and self.runtime_conditions:c=self.runtime_condition(i)
+            self.scc=('uniform',c) if c is not None else None
+            if c is None:self.scc_source=name+' of '+', '.join(self.describe_scalar(r,literal_bits) for r in (w&255,(w>>8)&255))
+            return
+        if k==3 and name.startswith('S_CMPK_'):
+            simm=w&0xffff
+            if name.endswith('_I32'):simm=struct.unpack('<h',struct.pack('<H',simm))[0]&0xffffffff
+            c=self.uniform_condition(name,self.uniform((w>>16)&127,None),self.uniform(255,simm))
+            if c is None and self.runtime_conditions:c=self.runtime_condition(i)
+            self.scc=('uniform',c) if c is not None else None
+            if c is None:self.scc_source=name
+            return
+        if self.uniform_sop(k,name,f,i):return
+        if k==1 and name=='S_CSELECT_B32' and self.scc and self.scc[0]=='uniform':
+            literal_bits=struct.unpack_from('<I',self.code,i['relative']+4)[0] if i['length']>4 else None
+            a,b=(self.uniform(r,literal_bits) for r in f['src'][:2]);dst=f['dst'][0]
+            if a is not None and b is not None:
+                self.write_uniform(dst,self.ir.op('select',self.scc[1],a,b));return
+        if k in (0,1,3) and not name.startswith(('S_MOV','S_CMOV','S_GETPC')):self.scc=None;self.scc_source=name
+        literal=struct.unpack_from('<f',self.code,i['relative']+i['length']-4)[0] if i['length']>4 else 0.
+        if k==10:self.load(i);return
+        if k==9:
+            attr=(w>>10)&63;chan=(w>>8)&3
+            # P1 is P2's partial accumulator; flat V_INTERP_MOV is not a perspective interpolant.
+            self.v[f['dst'][0]]=(self.ir.node('input',name=f'attribute{attr}.{chan}',kind='attribute',attribute=attr,channel=chan)
+                if 'P2' in name else self.unknown(name))
+            return
+        if k==14:
+            resource_base=((q>>48)&31)*4;sampler_base=((q>>53)&31)*4
+            resource=self.descriptors.get(resource_base,{})
+            api=resource.get('api') if resource.get('kind')==0 else None
+            proof={};reason='Unresolved/unsupported image sample'
+            if 'table_slot' in resource:
+                resource=self.texture_descriptor(resource_base,0,8)
+                sampler=self.texture_descriptor(sampler_base,1,4)
+                if resource is None or sampler is None:
+                    api=None;reason='Incomplete or path-dependent indirect texture/sampler descriptor'
+                elif (resource['table_slot'][:2]!=(0x13,0) or sampler.get('table_slot',())[:2]!=(0x15,0)
+                        or resource['table_slot'][3]!=16 or sampler['table_slot'][3]!=16):
+                    api=None;reason='Unsupported indirect texture/sampler table origin'
+                elif self.sampler_apis_differ(resource,sampler) and not self.allow_independent_samplers:
+                    api=None;reason='Indirect texture/sampler APIs differ'
+                else:
+                    api=resource['api'];proof=dict(resource_table=True,sampler_table=True,sampler_api=sampler['api'])
+            elif any('guard' in self.descriptors.get(base+word,{}) or 'table_slot' in self.descriptors.get(base+word,{})
+                     for base,width in ((resource_base,8),(sampler_base,4)) for word in range(width)):
+                # A mixed join can carry a guarded direct identity too; it must
+                # not escape the indirect proof through the legacy direct path.
+                resource=self.texture_descriptor(resource_base,0,8)
+                sampler=self.texture_descriptor(sampler_base,1,4)
+                if resource is None or sampler is None or 'table_slot' in resource or 'table_slot' in sampler:
+                    api=None;reason='Incomplete, mixed or path-dependent texture/sampler descriptor'
+                else:api=resource['api']
+            mask=(q>>8)&15;coord=(q>>32)&255;dst=(q>>40)&255
+            sample=len(self.samples);uv=[self.getv(coord+j) for j in range(2)]
+            self.samples.append(dict(api=api,coordinates=uv,offset=i['relative'],opcode=name,**proof))
+            for j,ch in enumerate(c for c in range(4) if mask&(1<<c)):
+                # LZ forces mip 0 with the same u,v address; Blender samples the base level too.
+                self.v[dst+j]=(self.ir.node('texture',uv,api=api,sample=sample,channel=ch,**proof)
+                    if api is not None and name in ('IMAGE_SAMPLE','IMAGE_SAMPLE_LZ') else self.unknown(reason))
+            return
+        if k==15:
+            channels=[];masked=self.ir.value(self.exec)!=1
+            values=[self.getv(reg) for reg in f['src_registers']]
+            # Only lanes still in exec export, so inside them a select on the exec mask takes its live arm.
+            if masked:values=self.ir.replace(values,{self.exec:self.ir.const(1.)})
+            if f['compressed']:
+                for value in values:
+                    n=self.ir.nodes[value];pair=self.unpack(value)
+                    channels.extend(pair or [self.unknown('Unresolved packed export from '+(n.get('reason') or n['op']))]*2)
+            else:channels=values
+            if masked:self.exec_masked_export=True;self.export_exec[f['target']]=self.exec
+            self.exports[f['target']]=[v if f['enable_mask']&(1<<j) else None for j,v in enumerate(channels)]
+            return
+        if k==4:
+            if name=='S_ENDPGM':self.bp=self.ir.const(0.)
+            elif 'BRANCH'in name:self.branch(i,name,f)
+            return
+        if k in (0,1,2,3):
+            dst=f.get('dst',[None])[0]
+            if dst is None:return
+            count=2 if 'B64'in name else 1
+            if name in ('S_MOV_B32','S_MOV_B64'):
+                raw=f['src'][0]
+                if raw<=127:
+                    # Snapshot both values and taint before writes: B64 copies may
+                    # overlap their source words. Taint is historical and only grows.
+                    source_tainted=[raw+j in self.buffer_descriptor_taint for j in range(count)]
+                    rows=[(self.gets(raw+j),self.scalar_bits.get(raw+j),self.descriptors.get(raw+j)) for j in range(count)]
+                else:
+                    # Scalar words keep integer values for addressing and raw bits for F32 readers.
+                    bits=struct.unpack_from('<I',self.code,i['relative']+4)[0] if raw==255 else self.inline_bits(raw)
+                    if bits is None:value=self.unknown(f'Unsupported encoded operand {raw}')
+                    elif raw==255 or raw<=208:value=self.ir.const(bits if raw==255 else raw-128 if raw<=192 else 192-raw)
+                    else:value=self.float_bits(bits)
+                    rows=[(value,bits,None)]
+                    if count==2:
+                        # Integer inline constants sign-extend; float/literal 64-bit sources are not modelled.
+                        high=(0xffffffff if 193<=raw<=208 else 0) if 128<=raw<=208 else None
+                        rows.append((self.ir.const(-1 if high else 0),high,None) if high is not None
+                                    else (self.unknown('Unmodelled 64-bit scalar source'),None,None))
+                for j,(value,bits,descriptor) in enumerate(rows):
+                    self.s[dst+j]=value
+                    if bits is not None:self.scalar_bits[dst+j]=bits
+                    else:self.scalar_bits.pop(dst+j,None)
+                    if descriptor is not None:self.descriptors[dst+j]=dict(descriptor)
+                    else:self.descriptors.pop(dst+j,None)
+                    if raw<=127 and source_tainted[j]:self.buffer_descriptor_taint.add(dst+j)
+            elif name=='S_MOVK_I32':
+                simm=struct.unpack('<h',struct.pack('<H',w&0xffff))[0]
+                self.s[dst]=self.ir.const(simm);self.scalar_bits[dst]=simm&0xffffffff;self.descriptors.pop(dst,None)
+            elif name=='S_WQM_B64' and dst==126:pass  # whole-quad helpers do not change active lanes' values
+            else:
+                trace=None
+                if self.runtime_conditions and k==1 and name in UNIFORM_SOP2:
+                    literal_bits=struct.unpack_from('<I',self.code,i['relative']+4)[0] if i['length']>4 else None
+                    width=1  # The supported SOP2 table has 32-bit operands.
+                    trace=dict(opcode=name,instruction_offset=i['relative'],
+                        instruction_words=self.trace_instruction_words(i),
+                        operands=[self.scalar_operand_trace(r,literal_bits,width) for r in f.get('src',[])],
+                        memory_evaluated=False,operation_evaluated=False)
+                self.clobber_s(dst,count,name,trace)
+            return
+        if k in (12,13) and name in BUFFER_LOAD_WORDS:
+            self.buffer_load(i,name);return
+        if k in (11,12,13):
+            dst=f.get('dst',[0])[0]
+            for j in range(4):self.v[dst+j]=self.unknown(name)
+            return
+        if k not in (5,6,7,8):return
+        src=list(f['src'])
+        if k in (6,8):src[1]+=256
+        if name in ('V_MADMK_F32','V_MADAK_F32'):
+            # VOP2 embeds a literal while only its first source is a generic operand.
+            a=self.operand(src[0],0.);b=self.operand(src[1],0.);c=self.ir.const(literal)
+            args=[a,c,b] if name=='V_MADMK_F32' else [a,b,c]
+        else:args=[self.operand(r,literal) for r in src]
+        if k==7:
+            for j,m in enumerate(f['src_modifiers']):
+                if m['abs']:args[j]=self.ir.op('abs',args[j])
+                if m['neg']:args[j]=self.ir.op('neg',args[j])
+        d=f['dst'][0]
+        if name in ('V_READFIRSTLANE_B32','V_READLANE_B32'):
+            self.clobber_s(d,1,name)
+            # Kept as an unresolved scalar of the lane value, for the uniformity check below.
+            if name=='V_READFIRSTLANE_B32':self.s[d]=self.unknown(name,args[0])
+            return
+        if name in CARRY_OUT:
+            # VOP2 forms write VCC; VOP3b forms name their SGPR pair in bits 14:8.
+            self.clobber_s(106 if k==6 else (q>>8)&127,2,name)
+        if 'CMP'in name:
+            self.clobber_s(d,2,name)
+            value=self.compare(name,args[:2])
+            # Inactive lanes write 0; CMPX also writes the result to EXEC.
+            self.set_mask(d,self.p_and(value,self.exec))
+            if 'CMPX' in name:self.set_exec(self.p_and(self.exec,value))
+            return
+        name=FINITE_ALIASES.get(name,name)
+        if name in INTEGER_VALU:
+            # Integer results are exact on bit patterns; clamp/omod do not apply.
+            value=(self.unknown(name+' with clamp/omod',*args) if k==7 and (f['omod'] or f['clamp']
+                       or (name=='V_SAD_U32' and any(m['abs'] or m['neg'] for m in f['src_modifiers'])))
+                   else self.integer_valu(name,args))
+            self.v[d]=value;return
+        unary={'V_MOV_B32':None,'V_RSQ_F32':'rsqrt','V_RCP_F32':'rcp','V_SQRT_F32':'sqrt',
+               'V_LOG_F32':'log2','V_EXP_F32':'exp2','V_COS_F32':'cos','V_SIN_F32':'sin',
+               'V_FLOOR_F32':'floor','V_FRACT_F32':'fract'}
+        binary={'V_MUL_F32':'mul','V_ADD_F32':'add','V_SUB_F32':'sub','V_MIN_F32':'min','V_MAX_F32':'max'}
+        if name in ('V_COS_F32','V_SIN_F32'):
+            # GCN trigonometric operands are cycles, Blender/IR operands radians.
+            value=self.ir.op(unary[name],self.ir.op('mul',args[0],self.ir.const(2*math.pi)))
+        elif name in unary:value=args[0] if unary[name] is None else self.ir.op(unary[name],args[0])
+        elif name in binary:value=self.ir.op(binary[name],*args[:2])
+        elif name=='V_SUBREV_F32':value=self.ir.op('sub',args[1],args[0])
+        elif name=='V_MAC_F32':value=self.ir.op('add',self.getv(d),self.ir.op('mul',*args[:2]))
+        elif name in ('V_MAD_F32','V_FMA_F32','V_MADMK_F32','V_MADAK_F32'):
+            value=self.ir.op('add',self.ir.op('mul',*args[:2]),args[2])
+        elif name=='V_CEIL_F32':value=self.ir.op('neg',self.ir.op('floor',self.ir.op('neg',args[0])))
+        elif name=='V_TRUNC_F32':
+            value=self.ir.op('select',self.ir.op('ge',args[0],self.ir.const(0.)),self.ir.op('floor',args[0]),
+                             self.ir.op('neg',self.ir.op('floor',self.ir.op('neg',args[0]))))
+        elif name in ('V_MIN3_F32','V_MAX3_F32'):
+            op='min' if name=='V_MIN3_F32' else 'max'
+            value=self.ir.op(op,self.ir.op(op,args[0],args[1]),args[2])
+        elif name=='V_MED3_F32':
+            value=self.ir.op('max',self.ir.op('min',args[0],args[1]),
+                             self.ir.op('min',self.ir.op('max',args[0],args[1]),args[2]))
+        elif name=='V_CVT_PKRTZ_F16_F32':value=self.ir.op('pack',*args[:2])
+        elif name=='V_CVT_PKNORM_U16_F32':value=self.ir.op('pack',*(self.ir.op('sat',x) for x in args[:2]))
+        elif name=='V_CVT_PKNORM_I16_F32':
+            value=self.ir.op('pack',*(self.ir.op('max',self.ir.const(-1.),self.ir.op('min',self.ir.const(1.),x)) for x in args[:2]))
+        elif name=='V_CNDMASK_B32':
+            raw=src[2] if k==7 else 106
+            predicate=self.mask(raw)
+            if predicate is None:predicate=args[2] if k==7 else self.gets(106)
+            value=self.ir.op('select',predicate,args[1],args[0])
+        else:value=self.unknown(name,*args)
+        if k==7:
+            if f['omod']:value=self.ir.op('mul',value,self.ir.const({1:2,2:4,3:.5}[f['omod']]))
+            if f['clamp']:value=self.ir.op('sat',value)
+        self.v[d]=value
+
+    def compare(self,name,args):
+        """V_CMP(X) on F32 (ordered/negated forms) or exact 32-bit integers."""
+        m=re.match(r'V_CMPX?_([A-Z]+)_([FIU])32$',name)
+        if not m:return self.unknown(name,*args)
+        relation,kind=m.groups();a,b=args
+        if kind=='F':
+            # The IR holds finite values, where negated and ordered forms reduce to plain compares.
+            table={'EQ':('eq',a,b),'NE':('ne',a,b),'LG':('ne',a,b),'NEQ':('ne',a,b),'LT':('lt',a,b),'LE':('le',a,b),
+                   'GT':('gt',a,b),'GE':('ge',a,b),'NGE':('lt',a,b),'NGT':('le',a,b),'NLE':('gt',a,b),'NLT':('ge',a,b)}
+            if relation not in table:return self.unknown(name,*args)
+            op,x,y=table[relation];return self.ir.op(op,x,y)
+        lt,le=('u_lt','u_le') if kind=='U' else ('i_lt','i_le')
+        table={'EQ':('u_eq',a,b),'LT':(lt,a,b),'LE':(le,a,b),'GT':(lt,b,a),'GE':(le,b,a)}
+        # The VOP3 opcode table names integer not-equal LG, the VOPC table NE.
+        if relation in ('NE','LG'):
+            for first,lane in ((a,b),(b,a)):
+                n=self.ir.nodes[first]
+                if n['op']=='unsupported' and n.get('reason')=='V_READFIRSTLANE_B32' and n['args']==[lane]:
+                    # Lanes whose value differs from the first lane: a wave uniformity check.
+                    check=self.unknown('Lane differs from first lane',first);self.lane_checks[check]=(first,lane)
+                    return check
+            return self.p_not(self.ir.op('u_eq',a,b))
+        if relation not in table:return self.unknown(name,*args)
+        op,x,y=table[relation];return self.ir.op(op,x,y)
+
+    def integer_valu(self,name,a):
+        c=lambda word:self.ir.const(from_bits(word))
+        op=self.ir.op
+        if name=='V_SAD_U32':return op('u_sad',a[0],a[1],a[2])
+        if name=='V_ADD_I32':return op('u_add',a[0],a[1])
+        if name=='V_SUB_I32':return op('u_sub',a[0],a[1])
+        if name=='V_SUBREV_I32':return op('u_sub',a[1],a[0])
+        if name=='V_AND_B32':return op('u_and',a[0],a[1])
+        if name=='V_OR_B32':return op('u_or',a[0],a[1])
+        if name=='V_XOR_B32':return op('u_xor',a[0],a[1])
+        if name=='V_LSHLREV_B32':return op('u_shl',a[1],a[0])
+        if name=='V_LSHRREV_B32':return op('u_shr',a[1],a[0])
+        if name=='V_ASHRREV_I32':return op('i_shr',a[1],a[0])
+        if name=='V_LSHL_B32':return op('u_shl',a[0],a[1])
+        if name=='V_LSHR_B32':return op('u_shr',a[0],a[1])
+        if name=='V_ASHR_I32':return op('i_shr',a[0],a[1])
+        if name=='V_MUL_LO_I32' or name=='V_MUL_LO_U32':return op('u_mul',a[0],a[1])
+        if name=='V_MUL_U32_U24':return op('u_mul',op('u_and',a[0],c(0xffffff)),op('u_and',a[1],c(0xffffff)))
+        if name=='V_MAD_U32_U24':return op('u_add',op('u_mul',op('u_and',a[0],c(0xffffff)),op('u_and',a[1],c(0xffffff))),a[2])
+        if name=='V_BFE_U32':return op('u_bfe',a[0],a[1],a[2])
+        if name=='V_BFI_B32':return op('u_or',op('u_and',a[0],a[1]),op('u_andn2',a[2],a[0]))
+        if name=='V_CVT_F32_I32':return op('i2f',a[0])
+        if name=='V_CVT_F32_U32':return op('u2f',a[0])
+        if name=='V_CVT_I32_F32':return op('f2i',a[0])
+        if name=='V_CVT_U32_F32':return op('f2u',a[0])
+        n=int(name[-1])  # V_CVT_F32_UBYTE0..3
+        return op('u2f',op('u_bfe',a[0],c(8*n),c(8)))
+
+    def step(self,i):
+        """Execute one instruction and merge its writes under the active predicates."""
+        bp,live_exec=self.bp,self.exec
+        if self.ir.value(bp)==1 and self.ir.value(live_exec)==1:
+            self.instruction(i);return
+        # Logging register files record what the instruction overwrote; a plain dict (a caller
+        # may replace one) is compared against a copy instead. Both give the same writes in order.
+        files=[]
+        for registers in (self.v,self.s):
+            if isinstance(registers,Registers):registers.log={};files.append(None)
+            else:files.append(dict(registers))
+        e0={t:list(x) for t,x in self.exports.items()};self.premerged=set()
+        descriptors_before=dict(self.descriptors)
+        try:
+            self.instruction(i)
+        finally:
+            writes=[]
+            for registers,copy in zip((self.v,self.s),files):
+                if copy is None:
+                    log,registers.log=registers.log,None
+                    writes.append((log,[(reg,registers[reg]) for reg in sorted(log,key=registers.order.__getitem__)]))
+                else:writes.append((copy,self.changed(registers,copy)))
+        (v0,v_writes),(s0,s_writes)=writes
+        descriptors_after=dict(self.descriptors)
+        # Initial register contents (unwritten, or hardware PS inputs) are dead once a
+        # program reuses the register, so lanes that skip the write do not read them.
+        dont_care=lambda n:((self.ir.nodes[n]['op']=='unsupported' and self.ir.nodes[n].get('reason','').startswith('Uninitialized'))
+                            or self.ir.nodes[n].get('kind')=='ps_input')
+        live=self.p_and(bp,live_exec)
+        for reg,value in v_writes:
+            old=v0.get(reg)
+            if old is not None and old!=value and not dont_care(old):self.v[reg]=self.ir.op('select',live,value,old)
+        if self.ir.value(bp)!=1:
+            for reg,value in s_writes:
+                old=s0.get(reg)
+                if reg in self.premerged or old is None or old==value or dont_care(old):continue
+                self.s[reg]=self.ir.op('select',bp,value,old)
+                self.descriptors.pop(reg,None);self.scalar_bits.pop(reg,None)
+            for target,channels in list(self.exports.items()):
+                old=e0.get(target)
+                if old is None or old==channels:continue
+                self.exports[target]=[n if o is None else o if n is None else self.ir.op('select',bp,n,o)
+                                      for n,o in zip(channels,old)]
+
+        self.merge_table_descriptors(bp,descriptors_before,descriptors_after,s_writes)
+
+    def changed(self,registers,before):
+        """(register, value) pairs that differ from ``before``, in ``registers``' own order, for
+        a plain-dict register file (a Registers file logs its writes instead). Registers are
+        only ever added or reassigned, so a register's order is its first insertion."""
+        try:
+            keys={reg for reg,_value in registers.items()-before.items()}
+        except TypeError:   # unhashable values: compare every item
+            return list(registers.items())
+        if not keys:return []
+        memo=self.__dict__.setdefault('_register_order',{})
+        order=memo.get(id(registers))
+        if order is None or order[0] is not registers or len(order[1])>len(registers):
+            order=memo[id(registers)]=(registers,{})
+        positions=order[1]
+        if len(positions)<len(registers):
+            for reg in itertools.islice(registers,len(positions),None):positions[reg]=len(positions)
+        return [(reg,registers[reg]) for reg in sorted(keys,key=positions.__getitem__)]
+
+    @staticmethod
+    def export_note(instructions):
+        """Suffix for a loop diagnostic when the program is not a three-target deferred writer.
+        Loops seen so far are the forward-pass light-list loops of colour-only programs, which are
+        outside the deferred-writer contract whether or not their control flow could be translated."""
+        targets=sorted({i['fields']['target'] for i in instructions if i['kind']==15})
+        if {0,1,2}<=set(targets):return ''
+        return ' (forward-pass program: exports '+(', '.join(f'target {t}' for t in targets) or 'no target')+', not the three deferred targets)'
+
+    def run(self,instructions):
+        """Execute in address order; a taken backward branch re-runs its body under the
+        taken predicate (bounded unrolling) and resumes after the branch when every
+        iteration's exit has been merged."""
+        index={i['relative']:n for n,i in enumerate(instructions)};n=0;iterations=Counter()
+        self.instructions=instructions
+        while n<len(instructions):
+            i=instructions[n];self.position=n
+            if i['relative'] in self.pending:self.bp=self.p_or(self.bp,self.pending.pop(i['relative']))
+            if self.ir.value(self.bp)==0:n+=1;continue
+            self.step(i)
+            if self.back is not None:
+                target,taken=self.back;self.back=None
+                if self.ir.value(taken)!=0:
+                    iterations[target]+=1
+                    if iterations[target]>MAX_LOOP_ITERATIONS:
+                        raise ValueError(f'Loop at {target} not shown to end within {MAX_LOOP_ITERATIONS} iterations'
+                                         +self.export_note(instructions))
+                    if target not in index:raise ValueError(f'Branch target {target} is not an instruction')
+                    after=i['relative']+i['length']
+                    self.pending[after]=self.p_or(self.pending.get(after,self.ir.const(0.)),self.bp)
+                    self.bp=taken;n=index[target];continue
+            n+=1
+
+    def discard_note(self):
+        """Name what the keep predicate of a masked export reads that no frontend binds: constant-buffer
+        words other than the material's CB2, interpolants other than the UV0 pair, engine textures and
+        unresolved values. A predicate without any is the only kind a discard path could carry."""
+        blockers=set()
+        for i in self.ir.reachable(sorted(set(self.export_exec.values()))):
+            n=self.ir.nodes[i];op=n['op']
+            if op=='input':
+                if n.get('kind')=='cb' and n.get('api')==2:continue
+                if n.get('kind')=='attribute' and n.get('attribute')==0 and n.get('channel') in (0,1):continue
+                blockers.add(n['name'])
+            elif op=='texture':
+                if not isinstance(n.get('api'),int) or not 5<=n['api']<32:blockers.add(f"texture API {n.get('api')}")
+            elif op=='unsupported':blockers.add(n['reason'])
+        return '; discard predicate reads '+(', '.join(sorted(blockers)) if blockers else
+            'only material parameters, UV0 and material textures')
+
+    def compile(self):
+        instructions=decoder().decode_stream(self.code,0)
+        self.run(instructions)
+        if not all(t in self.exports and all(x is not None for x in self.exports[t]) for t in (0,1,2)):
+            raise ValueError('Not a complete three-target deferred writer')
+        if self.exec_masked_export:
+            # Fail closed until the discard predicate is carried to both frontends.
+            raise ValueError('Exec-masked exports (alpha test/discard) are not translated'+self.discard_note())
+        return dict(nodes=self.ir.nodes,exports={str(k):v for k,v in self.exports.items()},exec_masked_export=self.exec_masked_export,
+            samples=self.samples,instruction_count=len(instructions),opcode_counts=dict(Counter(i['name'] for i in instructions)))
+
+
+def compile_program(code,usage_slots,ps_input_addr=None,ps_input_ena=None,vgpr_count=None,*,allow_independent_samplers=False):
+    return Compiler(code,usage_slots,ps_input_addr,ps_input_ena,vgpr_count,
+        allow_independent_samplers=allow_independent_samplers).compile()
+
+
+def _terms(ir,index,coefficient=1.,result=None):
+    """Canonical additive terms; retain nonlinear subexpressions as atoms."""
+    result={} if result is None else result
+    n=ir.nodes[index];args=n['args'];op=n['op']
+    if op in ('add','sub'):
+        _terms(ir,args[0],coefficient,result)
+        _terms(ir,args[1],coefficient*(1 if op=='add' else -1),result)
+    elif op=='neg':_terms(ir,args[0],-coefficient,result)
+    elif op=='mul' and any(ir.value(i) is not None for i in args):
+        j=0 if ir.value(args[0]) is not None else 1
+        _terms(ir,args[1-j],coefficient*ir.value(args[j]),result)
+    else:
+        key='constant' if op=='const' else index
+        value=coefficient*(n['value'] if op=='const' else 1)
+        result[key]=result.get(key,0.)+value
+    return {k:v for k,v in result.items() if abs(v)>1e-12}
+
+
+def _gloss_without_aa(ir,index):
+    """Match the engine G-buffer encoding algebra, not a named shader.
+
+    -log2(1 - W*(1-exp2(-11*g)))/11 becomes g at W=1. Other
+    encodings are retained, and unresolved terms then block translation.
+    """
+    n=ir.nodes[index]
+    if n['op']!='mul':return None
+    args=n['args'];j=next((j for j,x in enumerate(args) if ir.value(x) is not None and abs(ir.value(x)+1/11)<1e-7),None)
+    if j is None:return None
+    log=ir.nodes[args[1-j]]
+    if log['op']!='log2':return None
+    arg=log['args'][0]
+    reachable=ir.reachable([arg])
+    for exp in reachable:
+        e=ir.nodes[exp]
+        if e['op']!='exp2':continue
+        m=ir.nodes[e['args'][0]]
+        if m['op']!='mul':continue
+        k=next((j for j,x in enumerate(m['args']) if ir.value(x) is not None and abs(ir.value(x)+11)<1e-6),None)
+        if k is None:continue
+        # Verify both algebraic endpoints; arbitrary unknown width is preserved
+        # as an atom, so a wrong encoding cannot pass just a numeric example.
+        endpoint=ir.replace([arg],{exp:ir.const(1.)})[0]
+        if _terms(ir,endpoint)!={'constant':1.}:continue
+        # Linear in exp only: no nonlinear term may enclose the exp node.
+        def linear(i):
+            if i==exp:return True
+            if exp not in ir.reachable([i]):return True
+            z=ir.nodes[i];a=z['args']
+            if z['op'] in ('add','sub','neg'):return all(linear(q) for q in a)
+            if z['op']=='mul':return sum(exp in ir.reachable([q]) for q in a)==1 and all(linear(q) for q in a)
+            return False
+        if linear(arg):return m['args'][1-k]
+    return None
+
+
+def _native_normal(ir,roots):
+    """Recover an actual encoded XY/Z normal slice before vertex TBN transport."""
+    for index in sorted(ir.reachable(roots)):
+        terms=_terms(ir,index)
+        if len(terms)!=3 or terms.get('constant')!=1.:continue
+        squares=[i for i,c in terms.items() if i!='constant' and c==-1.]
+        if len(squares)!=2:continue
+        xy=[];textures=[]
+        for square in squares:
+            n=ir.nodes[square]
+            if n['op']!='mul' or n['args'][0]!=n['args'][1]:break
+            x=n['args'][0];xy.append(x)
+            tex=[ir.nodes[i] for i in ir.reachable([x]) if ir.nodes[i]['op']=='texture']
+            if len(tex)!=1:break
+            textures.append(tex[0])
+        if len(textures)!=2:continue
+        if textures[0]['sample']!=textures[1]['sample'] or {t['channel'] for t in textures}!={0,1}:continue
+        if textures[0]['channel']==1:xy.reverse()
+        return dict(xyz=[*xy,index],sample=textures[0]['sample'],api=textures[0]['api'])
+    return None
+
+
+def lower_deferred(program):
+    """Apply only shared render-target ABI and explicit portability policies."""
+    ir=DAG(program['nodes']);exports=program['exports'];limitations=[]
+    gloss=exports['2'][3]
+    no_aa=_gloss_without_aa(ir,gloss)
+    if no_aa is not None:
+        gloss=no_aa;limitations.append('Derivative/geometric specular-AA width is 1; gloss is the native flat-surface value.')
+    normal=_native_normal(ir,exports['0'][:3])
+    if normal:
+        limitations.append('Native tangent-normal slice is used with Blender UV tangents; original packed vertex TBN is not reconstructed.')
+        samples={ir.nodes[i]['sample'] for i in ir.reachable(exports['0'][:3])
+            if ir.nodes[i]['op']=='texture'}
+        if samples-{normal['sample']}:
+            limitations.append('Normal recovery retains one decoded texture slice; composition involving other samples in the native normal output is not reproduced.')
+    else:limitations.append('No portable tangent-normal slice was recovered; geometry normal is used.')
+    alpha=exports['1'][3]
+    emission=ir.op('sub',ir.op('exp2',ir.op('mul',ir.const(5.),alpha)),ir.const(1.))
+    outputs=dict(albedo=exports['1'][:3],F0=exports['2'][:3],gloss=gloss,emission=emission)
+    roots=[*outputs['albedo'],*outputs['F0'],gloss,emission]
+    if normal:roots+=normal['xyz']
+    used=ir.reachable(roots)
+    unresolved=[dict(node=i,**ir.nodes[i]) for i in sorted(used) if ir.nodes[i]['op']=='unsupported']
+    return dict(nodes=ir.nodes,outputs=outputs,normal=normal,samples=program['samples'],
+        unresolved=unresolved,limitations=limitations,reachable_nodes=sorted(used))
+
+
+def compile_graph(data,*,allow_independent_samplers=False):
+    results=[]
+    for program in pixel_programs(data):
+        row={k:v for k,v in program.items() if k!='code'}
+        try:row.update(status='compiled',ir=compile_program(program['code'],program['usage_slots'],
+            program.get('ps_input_addr'),program.get('ps_input_ena'),program.get('vgpr_count'),
+            allow_independent_samplers=allow_independent_samplers))
+        except (ValueError,IndexError,KeyError,struct.error) as exc:row.update(status='unsupported',reason=str(exc))
+        results.append(row)
+    return dict(schema='rcps4-native-shader-ir-v1',translator_version=VERSION,
+        graph_sha256=hashlib.sha256(data).hexdigest(),programs=results,
+        limitations=['Deferred writers only; forward branches and exec masks are linearised by predication; loops require proven bounded termination, and forward light loops remain unsupported.',
+                    'Float16 target quantization is recorded at exports but the material DAG retains float precision.',
+                    'Compiled IR alone does not establish per-pass CB or resource binding, vertex TBN, or runtime selection.'])

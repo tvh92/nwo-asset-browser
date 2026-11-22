@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import unittest
 
-from rc2016.app import gallery as g
+from nwo.app import gallery as g
 
 
 @dataclass(frozen=True)

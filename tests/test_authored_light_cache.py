@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from rc2016.levels.viewport import LevelViewport
+from nwo.levels.viewport import LevelViewport
 
 
 def original(matrix_floats, all_lights):
@@ -46,7 +46,7 @@ class AuthoredLightCacheTests(unittest.TestCase):
             self.assertEqual(self.selection(matrix), original(matrix, self.lights))
 
     def test_sorts_once_per_modelview_and_light_list(self):
-        with patch('rc2016.levels.viewport.sorted', create=True, side_effect=sorted) as sort:
+        with patch('nwo.levels.viewport.sorted', create=True, side_effect=sorted) as sort:
             for _ in range(50):   # fifty shader switches in one frame
                 self.selection(self.matrix)
             self.assertEqual(sort.call_count, 1)

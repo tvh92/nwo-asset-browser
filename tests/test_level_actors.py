@@ -5,8 +5,8 @@ from pathlib import Path
 import struct
 import unittest
 
-from rc2016.levels import actor_format as af
-from rc2016.formats.container import game_crc32
+from nwo.levels import actor_format as af
+from nwo.formats.container import game_crc32
 
 
 ARCHIVE = Path(__file__).resolve().parents[1] / 'Research' / '2026-10-22_from-PS4-animation-pipeline'
@@ -181,8 +181,8 @@ class ComponentReaderTests(unittest.TestCase):
 class ActorCorpusTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('RC2016_RESEARCH'), 'requires research workspace')
     def test_recorded_corpus_and_live_airlock_control(self):
-        from rc2016.research.source import Corpus
-        from rc2016.levels.scene import asset_bytes
+        from nwo.research.source import Corpus
+        from nwo.levels.scene import asset_bytes
         report = ARCHIVE / 'levels/Actors/out/corpus_validation.json'
         if not report.is_file():
             self.skipTest('actor corpus evidence not available')

@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from rc2016.shaders import census
+from nwo.shaders import census
 
 
 class CensusTests(unittest.TestCase):

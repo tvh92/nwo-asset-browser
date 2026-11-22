@@ -7,7 +7,7 @@ import struct
 import unittest
 from unittest import mock
 
-from rc2016.formats import texture, texture_transport
+from nwo.formats import texture, texture_transport
 
 
 WIDTH, HEIGHT = 1920, 1080   # 480x270 block grid: 270 is not a multiple of 8

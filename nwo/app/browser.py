@@ -1,0 +1,1485 @@
+"""Tk asset/result browser added to the existing extractor; workers never touch Tk."""
+from __future__ import annotations
+from dataclasses import asdict
+import json
+from pathlib import Path
+import queue
+import threading
+import traceback
+import uuid
+from nwo.app import catalog
+from nwo.common import remember_var
+from nwo.app.clip_playback import DEFAULT_SPEED, SPEEDS, ClipPlayback, playback_options
+from nwo.app.layout import ScrollFrame, SplitLayout, Splitter, regrid
+from nwo.app.theme import color, track
+from nwo.viewer.loader import SourcePreviewLoader
+from nwo.viewer.viewport import ModelViewport
+from nwo.app.texture_tab import TextureTab
+from nwo.app.workers import LatestWork, ReviewProcess, open_local, review_command
+
+ROOT = Path(__file__).resolve().parents[2]
+REST_POSE = 'Rest pose (no animation)'
+LAYER_REST = 'Rest pose'   # the Over box: an additive layer on its own
+FOLDER_MIN, TABLE_MIN = 160, 300   # narrowest folder tree and model list when the divider between them is dragged
+
+
+def look_label(look, index=0):
+    """'index: name' of a look row, or the index alone when the model does not name it."""
+    index = look.get('index', index)
+    return f"{index}: {look['name']}" if look.get('name') else str(index)
+
+
+def source_details(payload, used_by='', native_translation=True):
+    """Details tab text for one decoded source model, read from the game files only."""
+    lines = [payload['source_path'], f"Asset ID: {payload['model_id']}"]
+    if used_by:
+        lines.append(f'Used by: {used_by}')
+    joints = payload.get('joint_count') or 0
+    lines.append(f"Geometry: skinned, {joints} joints" if joints else 'Geometry: static (no skeleton)')
+    looks = payload.get('looks') or []
+    look = payload.get('look', 0)
+    shown = look_label(looks[look], look) if isinstance(look, int) and 0 <= look < len(looks) else look
+    lines.append(f"Meshes: {payload.get('mesh_record_count', '?')} in the file · {len(looks)} looks · "
+                 f"showing look {shown}, {payload.get('lod', 'Highest')} LOD: "
+                 f"{len(payload.get('selected_mesh_indices') or [])} meshes, "
+                 f"{len(payload['vertices']):,} vertices, {len(payload['triangles']):,} triangles")
+    locators = payload.get('locators') or []
+    if locators:
+        named = [m['name'] + (f" (on {m.get('joint_name') or 'joint %d' % m['joint']})" if m.get('joint') is not None else '')
+                 for m in locators]
+        lines.append(f"Locators ({len(locators)}): " + ', '.join(named[:12]) + (', …' if len(named) > 12 else ''))
+    unread = payload.get('unread_sections') or {}
+    if unread:
+        lines.append(f'Sections not read ({len(unread)}): ' + '; '.join(f'{tag} {note}' for tag, note in unread.items()))
+    materials = payload.get('materials') or []
+    lines.append(f'Materials ({len(materials)}), with the viewer shading rule each one gets:')
+    for i, m in enumerate(materials):
+        lines.append(f"  {m.get('index', i)}: {m.get('name') or '(unnamed)'}" + (f" — {m['path']}" if m.get('path') else ' — no material file'))
+        if m.get('rule_kind'):
+            shown = m
+            if not native_translation and m.get('rule_kind') == 'native translation':
+                from nwo.formats.links import rule_coverage
+                kind, rule = rule_coverage(m.get('graphs') or [])
+                shown = dict(m, rule_kind=kind, rule=rule)
+            lines.append('      ' + rule_text(shown))
+            for limitation in m.get('native_limitations', ()):
+                lines.append('        ' + limitation)
+        entry = (payload.get('textures') or {}).get(m.get('index', i), {})
+        forward = entry.get('forward') or {}
+        sampling = forward.get('sampling') or {}
+        liquid = entry.get('lava_surface') or entry.get('liquid_flow') or sampling
+        notes = list(liquid.get('limitations') or ())
+        if sampling:
+            notes.insert(0, sampling['time_substitution'])
+            if not forward.get('surface'):
+                notes.append('Water normal combination, body colour, opacity, F0 and gloss use inferred presentation values.')
+        elif forward.get('kind') == 'water':
+            notes.append('Water family fallback: frozen-time mapping, normal combination and shading are inferred presentation choices.')
+        for note in dict.fromkeys(notes):
+            lines.append('        Preview limitation: ' + note)
+    textures = payload.get('texture_list') or []
+    graph = sum(1 for t in textures if t.get('via_graph'))
+    lines.append(f"Textures: {len(textures)}" + (f" ({graph} graph defaults)" if graph else '') + ' — listed in the Textures tab')
+    clips, animsets = payload.get('clips') or [], payload.get('animsets') or []
+    if clips:
+        lines.append(f"Animations: {len(clips)} clips from {len(animsets)} animation set{'s' if len(animsets) != 1 else ''}:")
+        lines += [f'  {a}' for a in animsets]
+    else:
+        lines.append('Animations: ' + (payload.get('animation_note') or ('none; static model' if not joints else 'none found')))
+    lines.append(f"Packed source SHA-256: {payload.get('source_packed_sha256', '?')} ({payload.get('codec', '?')})")
+    return '\n'.join(lines)
+
+
+def rule_text(material):
+    """'shading: exact rule (graph x)' and similar for a payload material with rule_kind."""
+    stem = lambda path: path.rsplit('/', 1)[-1].rsplit('.', 1)[0]
+    graphs = ', '.join(stem(g) for g in material.get('graphs') or []) or 'none'
+    kind = material['rule_kind']
+    if kind == 'native translation':
+        return f"shading: native translation — bounded deferred surface of graph {graphs}; game equivalence false"
+    if kind == 'exact rule':
+        return f'shading: exact rule — decoded writer of graph {graphs}'
+    if kind == 'family fallback':
+        return f"shading: family fallback ({material['rule'].rstrip('/')}*) — graph {graphs} has no rule of its own"
+    if kind == 'rift apart preview':
+        return f'shading: Rift Apart preview — base colour and normal from the material slots; graph {graphs} not decoded'
+    if kind == 'rift apart glass':
+        return f'shading: Rift Apart glass — decoded forward rule of graph {graphs}; light list, probes, fog and exposure are viewer stand-ins'
+    if kind == 'generic reading':
+        return f'shading: generic reading (coloured F0 + gloss alpha) — graph {graphs} has no decoded rule'
+    return 'shading: generic reading — the material names no material graph'
+
+
+def lod_choices_differ(looks, mesh_count, look=0):
+    """Whether Highest, Lowest and All select different meshes for ``look`` (else the LOD choice does nothing)."""
+    from nwo.formats.native_model import _selected_meshes
+    try:
+        return len({tuple(_selected_meshes(looks, mesh_count, mode, look)) for mode in ('Highest', 'Lowest', 'All')}) > 1
+    except ValueError:
+        return False
+
+
+def material_toggles(textures):
+    """(native translation applies, experimental preview applies) for a payload's per-slot material entries."""
+    entries = list((textures or {}).values())
+    return (any(e.get('native_translation') for e in entries), any(e.get('experimental_preview') for e in entries))
+
+
+def lighting_controls(ttk, parent, viewport, lighting_var, tonemap_var, note_parent=None):
+    """Lighting source selector; returns its combobox. The note about a pending HDRI goes in ``note_parent``."""
+    def lighting_changed(_event=None):
+        viewport.set_lighting(lighting_var.get(), tonemap_var.get())
+    box = ttk.Combobox(parent, textvariable=lighting_var, values=viewport.LIGHTINGS, state='readonly', width=12)
+    box.pack(side='left', padx=(4, 0)); box.bind('<<ComboboxSelected>>', lighting_changed)
+    note = ttk.Label(note_parent or parent, text='', style='Muted.TLabel')
+    note.pack(side='left', padx=4)
+    viewport.on_lighting_changed = lambda: note.configure(text=viewport.lighting_note or '')
+    return box
+
+
+MODEL_SUFFIX_TOKENS = ('enm', 'hero', 'npc', 'wpn')
+
+
+def clip_tokens(name):
+    """Grouping words of a clip name: its ``_`` parts, cut before a model suffix (``Idle_enm_X`` -> Idle)."""
+    parts = [part for part in name.split('_') if part]
+    for k in range(1, len(parts)):
+        if parts[k] in MODEL_SUFFIX_TOKENS:
+            return parts[:k]
+    return parts
+
+
+def record_model_path(record):
+    """Archive path of a model-list record for comparison: ``archive_path`` (pipeline records) or
+    ``relative_model`` (Model-list records), with '/' separators and case folded."""
+    path = getattr(record, 'archive_path', None) or getattr(record, 'relative_model', None) or ''
+    return path.replace('\\', '/').casefold()
+
+
+def cutscene_clips(labels, animsets):
+    """Indices of the real-time cutscene clips (``cinematic2``) among the clip ``labels``.
+
+    The library's ``animsets`` are the assets its clips come from: ``.animset`` files and ``.cinematic2``
+    cutscenes (``viewer.animation.AnimationLibrary.with_cinematic``). A label is ``stem: name`` only when
+    several assets hold clips, and a cutscene clip has no prefix when its name is unique. So an unprefixed
+    label is a cutscene clip whenever several assets are listed, or when the one asset is a cutscene.
+    """
+    cinematic = {Path(a).stem for a in animsets if a.casefold().endswith('.cinematic2')}
+    animset = {Path(a).stem for a in animsets} - cinematic
+    several = len(animsets) > 1
+    only_cutscene = len(animsets) == 1 and animsets[0].casefold().endswith('.cinematic2')
+    found = []
+    for index, label in enumerate(labels):
+        stem, sep, _name = label.rpartition(': ')
+        if (stem in cinematic and stem not in animset) if sep else (several or only_cutscene):
+            found.append(index)
+    return found
+
+
+def face_clips(labels, animsets):
+    """Indices of the face performances (voice-line lip sync) among the clip ``labels``: clips of the speakers'
+    ``localization/<speaker>/<speaker>_<group>.animset`` files (``AnimationLibrary.with_performances``)."""
+    face = {Path(a).stem for a in animsets if a.replace('\\', '/').casefold().startswith('localization/')}
+    other = {Path(a).stem for a in animsets} - face
+    return [index for index, label in enumerate(labels)
+            if (stem := label.rpartition(': ')[0]) and stem in face and stem not in other]
+
+
+def group_clips(labels, cutscene=(), face=()):
+    """Menu tree for clip labels: [(text, clip index | subtree)], sorted case-insensitively.
+
+    Labels are ``"animset: Name"`` when a model has several animsets, else ``"Name"``.
+    Clips group by animset, then word by word: a word shared by several clips becomes a folder
+    (Jetpack > One Hand > Fire), so the word that separates a clip's family is found wherever it sits.
+    Clips alone on their word go under Other. A folder whose only child is a folder is merged
+    into it (Aim > Vertical becomes Aim Vertical).
+    ``cutscene``: indices of the cutscene clips, ``face``: of the face performances. Given any, the menu has
+    sections, Animset animations, Cutscene animations and Face performances (an empty one is left out), each
+    grouped as above.
+    """
+    def ordered(items):
+        return sorted(items, key=lambda item: (item[0].lower(), item[1]))
+
+    def fold(label, children):
+        while len(children) == 1 and isinstance(children[0][1], list):
+            label, children = f'{label} {children[0][0]}', children[0][1]
+        return (label, children)
+
+    def build(items):
+        """items: (words left, name, index) -> menu nodes."""
+        groups, alone, folders = {}, [], []
+        for words, name, index in sorted(items, key=lambda item: (item[1].lower(), item[2])):
+            if words:
+                groups.setdefault(words[0].casefold(), []).append((words[0], words[1:], name, index))
+            else:
+                alone.append((name, index))
+        for members in groups.values():
+            if len(members) == 1:
+                alone.append((members[0][2], members[0][3]))
+            else:
+                folders.append(fold(members[0][0], build([(rest, name, index) for _word, rest, name, index in members])))
+        folders.sort(key=lambda node: node[0].lower())
+        if not folders:
+            return ordered(alone)
+        return folders + ([('Other', ordered(alone))] if alone else [])
+
+    def tree(indices):
+        sets = {}
+        for index in indices:
+            animset, _sep, name = labels[index].rpartition(': ')
+            sets.setdefault(animset, []).append((clip_tokens(name), name, index))
+        if len(sets) <= 1:
+            return build(next(iter(sets.values()), []))
+        return [(animset, build(items)) for animset, items in sorted(sets.items(), key=lambda s: s[0].lower())]
+
+    if not cutscene and not face:
+        return tree(range(len(labels)))
+    cut, faces = set(cutscene), set(face) - set(cutscene)
+    sections = (('Animset animations', [i for i in range(len(labels)) if i not in cut and i not in faces]),
+                ('Cutscene animations', [i for i in range(len(labels)) if i in cut]),
+                ('Face performances', [i for i in range(len(labels)) if i in faces]))
+    return [(text, tree(indices)) for text, indices in sections if indices]
+
+
+def count_clips(tree):
+    return sum(1 if isinstance(node, int) else count_clips(node) for _text, node in tree)
+
+
+# What a clip note means, shown beside the clip when copies and layers are listed (AnimationLibrary.clip_notes).
+NOTE_TEXT = {'duplicate': 'copy of another clip', 'layer': 'additive layer', 'unplayable': 'does not play on this model'}
+
+
+def clip_leaves(nodes):
+    """Clip positions of a ``group_clips`` tree, in the order the list shows them."""
+    for _text, node in nodes:
+        if isinstance(node, int):
+            yield node
+        else:
+            yield from clip_leaves(node)
+
+
+# Clip lists play the row the arrow keys stop on, this long after the last key, so a held key loads only one clip.
+PREVIEW_DELAY_MS = 250
+STEP_KEYS = ('Up', 'Down', 'Prior', 'Next', 'Home', 'End')
+
+
+def clip_length(seconds):
+    """A clip's length for a list column: '1.3 s', '1:05' from a minute up, '' when unknown."""
+    if seconds is None or not seconds >= 0:   # also NaN
+        return ''
+    if seconds < 60:
+        return f'{seconds:.1f} s'
+    minutes, rest = divmod(round(seconds), 60)
+    return f'{minutes}:{rest:02d}'
+
+
+def step_clip(order, current, offset):
+    """The entry ``offset`` (-1 or 1) places from ``current`` in ``order``, wrapping round; from an entry not in
+    ``order`` (the rest pose), 1 gives the first and -1 the last. None for an empty ``order``."""
+    if not order:
+        return None
+    if current not in order:
+        return order[0] if offset > 0 else order[-1]
+    return order[(order.index(current) + offset) % len(order)]
+
+
+def normalize_details(details):
+    d=asdict(details)
+    blend=d.get('blend') or {}
+    d.update(blend_path=blend.get('path'),blend_sha256=blend.get('declared_sha256'),blend_hash_status='hash_verified' if blend.get('hash_status')=='match' else blend.get('hash_status','missing'))
+    status=d.get('status','UNKNOWN')
+    support=('unsupported' if status=='UNSUPPORTED' else 'failed' if status=='FAILED' else
+             'limited' if 'LIMITATION' in status or status=='ARMATURE_ANIMATIONS_ONLY' else
+             'supported' if status.startswith('COMPLETE_') else 'unknown')
+    validation=d.get('validation') or {}
+    d['integrity_verified']=d['blend_hash_status']=='hash_verified' and validation.get('hash_status')=='match'
+    d['support_status']=support
+    d.setdefault('animation_status','available' if d.get('supported_clips') else 'none' if support!='unknown' else 'unknown')
+    summaries=list(d.get('summary') or [])
+    summaries.insert(0,'Build: '+status.replace('_',' ').lower())
+    summaries.append('Master integrity: '+d['blend_hash_status'].replace('_',' '))
+    summaries.append(f"Source clips: {len(d.get('supported_clips',[]))} supported, {len(d.get('unsupported_clips',[]))} unsupported, {len(d.get('unknown_clips',[]))} unknown")
+    summaries.append('Backend reuse rechecks source and implementation fingerprints. Browsing does not certify reuse.')
+    summaries.append('COMPLETE describes delivery coverage. Visual review and game equivalence are separate.')
+    d['summary']=summaries
+    return d
+
+
+class AssetBrowser:
+    ASSET_TYPES=('Model','Level','Flash UI','Texture')
+
+    def __init__(self, app, parent, type_host=None, model_view=None):
+        """``parent``: the model Panedwindow (model list | this review frame). ``type_host``: the
+        frame where the asset-type views swap (default ``parent.master``); ``model_view``: the
+        widget holding the model list and this frame (default ``parent``)."""
+        self.app, self.tk, self.ttk = app, app.tk, app.ttk
+        self.meta_work, self.detail_work, self.artifact_work = LatestWork(), LatestWork(), LatestWork()
+        self.source_work=LatestWork()
+        # Clip libraries load after the mesh is shown (SourcePreviewLoader.load_animation).
+        self.clip_list_work=LatestWork();self.source_output_root=None
+        # Materials load after the geometry is shown (SourcePreviewLoader.load_materials), translating in parallel.
+        self.material_work=LatestWork()
+        self.source_loader=SourcePreviewLoader()
+        self.source_loader.parallel_translation=True
+        self.source_selection=None
+        self.source_payload=None
+        self.refs, self.metadata, self.details = [], {}, None
+        self.active_ref = None
+        self.review = None
+        self.review_report = None
+        self.review_worker = None
+        self.review_events = queue.Queue()
+        self.selected_identity = None
+        self.closed = False
+        self.generation = 0
+        self.selected_record = None
+        self.source_text = ''
+        self.build_text = ''
+        self.placement_text = ''
+        from nwo.app.links import LinkService
+        self.links = LinkService(app)   # archive-wide links: texture users, level placements, coverage
+        tk, ttk = self.tk, self.ttk
+        self.layout = getattr(app, 'split_layout', None) or SplitLayout()
+        self.frame = ttk.LabelFrame(parent, text='Asset and result review', padding=8)
+        parent.add(self.frame, weight=2)
+        self.frame.columnconfigure(0,weight=1)
+        self.frame.rowconfigure(1,weight=1)
+        self.status_var=tk.StringVar(value='Select an asset to load its geometry. Blender is optional.')
+        ttk.Label(self.frame,textvariable=self.status_var,wraplength=410).grid(row=0,column=0,sticky='ew',pady=3)
+        # Model sub-tabs only; Level and Flash UI are separate asset types (_build_type_views).
+        self.notebook=notebook=ttk.Notebook(self.frame);notebook.grid(row=1,column=0,sticky='nsew')
+        result=ttk.Frame(notebook,padding=6);controls=ttk.Frame(notebook,padding=6)
+        view=ttk.Frame(notebook,padding=6)
+        textures=ttk.Frame(notebook,padding=6)
+        notebook.add(view,text='3D model');notebook.add(textures,text='Textures')
+        notebook.add(result,text='Details')
+        from nwo.app.gallery import Gallery   # thumbnail grid of the selected or searched models: the list's Grid view
+        self.gallery=Gallery(self,app.list_host)
+        self._folder_divider()
+        self.model_textures=TextureTab(self,textures,archive=False)
+        self._build_type_views(type_host if type_host is not None else parent.master,model_view if model_view is not None else parent)
+        # The viewport is the big pane and grows with the window; the controls sit beside it (Vertical layout)
+        # or below it in two columns (Horizontal, see _arrange_view_controls). Drag the sash to resize either.
+        view.columnconfigure(0,weight=1);view.rowconfigure(0,weight=1)
+        self.view_split=split=Splitter(view,side=430,stacked=180);split.grid(row=0,column=0,sticky='nsew')
+        self.layout.register(split)
+        holder=split.first;holder.columnconfigure(0,weight=1);holder.rowconfigure(0,weight=1)
+        # The controls scroll when the divider leaves them less room than they need (ScrollFrame), so none is cut off.
+        split.second.columnconfigure(0,weight=1);split.second.rowconfigure(0,weight=1)
+        scroll=ScrollFrame(split.second);scroll.grid(row=0,column=0,sticky='nsew')
+        self.view_side=side=scroll.inner
+        side.configure(padding=(8,0,0,0));side.columnconfigure(0,weight=1);side.rowconfigure(8,weight=1)
+        self.viewport=ModelViewport(holder,width=380,height=560)
+        self.viewport.grid(row=0,column=0,sticky='nsew')
+        tip=app._tip
+        # View: camera and draw mode.
+        viewrow=ttk.Frame(side);viewrow.grid(row=0,column=0,sticky='ew',pady=(0,4))
+        ttk.Label(viewrow,text='View').pack(side='left')
+        self.view_mode=self.tk.StringVar(value='Shaded')
+        self.mode_box=mode_box=ttk.Combobox(viewrow,textvariable=self.view_mode,values=self.viewport.MODES,state='readonly',width=16)
+        mode_box.pack(side='left',padx=4)
+        mode_box.bind('<<ComboboxSelected>>',self._mode_changed)
+        reset_button=ttk.Button(viewrow,text='Reset view',style='Compact.TButton',command=self.viewport._reset_camera)
+        reset_button.pack(side='left',padx=4)
+        tip('Shaded: the game BRDF (_c base colour, _g gloss, _n normals, self-lit) under the chosen lighting. It predicts the Blender review render, not game lighting.\nTextured: base colour only. Solid and Wireframe: geometry only.',mode_box)
+        tip('Frame the whole model again.\nDrag orbits, right-drag pans, the wheel zooms.',reset_button)
+        # Source: which meshes of the file are drawn. Shown only when the model has a choice (see _update_source_controls).
+        self.source_row=lodrow=ttk.Frame(side);lodrow.grid(row=1,column=0,sticky='ew',pady=(0,4))
+        self.native_look=self.tk.StringVar(value='0')
+        self.native_look_label=ttk.Label(lodrow,text='Look')
+        self.native_look_box=ttk.Combobox(lodrow,textvariable=self.native_look,values=(),state='disabled',width=18)
+        self.native_look_box.bind('<<ComboboxSelected>>',lambda _e:self._reload_source())
+        self.native_lod=self.tk.StringVar(value='Highest')
+        self.native_lod_label=ttk.Label(lodrow,text='LOD')
+        self.native_lod_label.pack(side='left')
+        self.native_lod_box=ttk.Combobox(lodrow,textvariable=self.native_lod,values=('Highest','Lowest','All'),state='disabled',width=9)
+        self.native_lod_box.pack(side='left',padx=4)
+        self.native_lod_box.bind('<<ComboboxSelected>>',lambda _e:self._reload_source())
+        tip("Detail level of the meshes shown. Highest and Lowest use the model's own LOD membership; All also draws meshes no look references (a diagnostic).\nOnly shown for models whose LODs differ.",self.native_lod_box)
+        tip('Source look: a model can hold several alternative mesh sets. Only shown when it does.',self.native_look_label,self.native_look_box)
+        lodrow.grid_remove()
+        # Shading: lighting, then the tonemap that turns its output into screen colours.
+        self.lighting_var=remember_var(self.tk.StringVar(value='Shared HDRI'),'model.lighting',self.viewport.LIGHTINGS)
+        self.lighting_enabled_var=remember_var(self.tk.BooleanVar(value=True),'model.lighting_enabled')
+        self.lighting_group=lighting_group=ttk.LabelFrame(side,text='Shading',padding=(4,2))
+        lighting_group.grid(row=2,column=0,sticky='ew',pady=(0,4))
+        self.lighting_enabled_check=ttk.Checkbutton(
+            lighting_group,text='Lighting',variable=self.lighting_enabled_var,
+            command=lambda:self.viewport.set_lighting_enabled(self.lighting_enabled_var.get()))
+        self.lighting_enabled_check.grid(row=0,column=0,sticky='w')
+        self.lighting_controls=ttk.Frame(lighting_group)
+        self.lighting_controls.grid(row=0,column=1,sticky='w')
+        self.tonemap_var=remember_var(self.tk.StringVar(value='Game (captured)'),'model.tonemap',self.viewport.TONEMAPS)
+        lighting_note_row=ttk.Frame(lighting_group);lighting_note_row.grid(row=2,column=0,columnspan=2,sticky='w')
+        lighting_box=lighting_controls(ttk,self.lighting_controls,self.viewport,self.lighting_var,self.tonemap_var,note_parent=lighting_note_row)
+        tonemap_label=ttk.Label(lighting_group,text='Tonemap')
+        tonemap_label.grid(row=1,column=0,sticky='w',pady=(2,0))
+        tonemap_box=ttk.Combobox(lighting_group,textvariable=self.tonemap_var,values=self.viewport.TONEMAPS,state='readonly',width=19)
+        tonemap_box.grid(row=1,column=1,sticky='w',padx=4,pady=(2,0))
+        tonemap_box.bind('<<ComboboxSelected>>',lambda _e:self.viewport.set_lighting(tonemap=self.tonemap_var.get()))
+        tip('Master switch for lighting. Off shows the unlit surface colour; self-lit emission stays.',self.lighting_enabled_check)
+        tip('Viewer rig: fixed key, fill and sky light that turns with the camera (what the gallery thumbnails use).\nShared HDRI: the shared review HDRI, as the Blender review render uses (the default).',lighting_box)
+        tip('Maps the lit HDR result to screen colours.\nACES fit: filmic, desaturates highlights.\nKhronos PBR Neutral: keeps base colours accurate until highlights.\nGame (captured, the default, also for gallery thumbnails): the game\'s exposure and tone curve from one Veldin frame, no level colour grade.\nThe lighting is still the viewer\'s, so overall brightness is not the game\'s.',tonemap_label,tonemap_box)
+        self.viewport.set_lighting(self.lighting_var.get(),self.tonemap_var.get())   # the defaults or the remembered choice
+        # Materials: only the toggles that change something for this model (see _update_source_controls).
+        self.native_translation_var=remember_var(self.tk.BooleanVar(value=True),'model.native_translation')
+        self.experimental_materials_var=remember_var(self.tk.BooleanVar(value=False),'model.experimental_materials')
+        self.materials_group=materials=ttk.LabelFrame(side,text='Materials',padding=(4,2))
+        materials.grid(row=3,column=0,sticky='ew',pady=(0,4))
+        self.native_check=ttk.Checkbutton(materials,text='Native translation',variable=self.native_translation_var,
+                                          command=self._native_translation_changed)
+        self.experimental_check=ttk.Checkbutton(materials,text='Experimental previews',variable=self.experimental_materials_var,
+                                                command=self._experimental_materials_changed)
+        self.vertex_motion_var=remember_var(self.tk.BooleanVar(value=False),'model.vertex_animation')
+        self.vertex_motion_check=ttk.Checkbutton(materials,text='Vertex animation',variable=self.vertex_motion_var,
+                                                 command=self._vertex_motion_changed)
+        self.motion_work=LatestWork();self.motion_job=None;self.motion_busy=False;self.motion_start=0.0
+        tip('Play the vertex programs that move this model\'s vertices over time (crowds and other vertex-animation '
+            'textures, flags, wind sway, rotating parts) on the shader clock, from time 0. The 3D view shows the newest '
+            'frame the worker has finished, so a heavy model steps (the stadium crowd: about 10 frames a second). Off '
+            'shows time 0. Wind, force fields and other engine inputs stay at rest. Shown only for models with such '
+            'programs (Rift Apart).',self.vertex_motion_check)
+        tip('Shade materials from their translated game shader program instead of the generic reading. Replaces the fallback rules only; exact hand-decoded rules stay.\nShown when a material of this model has a translation; Shaded mode only.',self.native_check)
+        tip('Best-effort material previews: pinned Novalis mountain and terrain materials, plus a generic adapter that substitutes viewer geometry for inputs that are not bound (matte lighting; paint and UVs inferred, runtime unverified).\nReplaces the native translation where one exists. Not game-equivalent.\nShown when a material of this model has such a preview; Shaded mode only.',self.experimental_check)
+        materials.grid_remove()
+        self.native_applicable=self.experimental_applicable=False
+        self.viewport.set_lighting_enabled(self.lighting_enabled_var.get())
+        self.viewport.set_native_translation(self.native_translation_var.get())
+        self.viewport.set_experimental_materials(False)
+        self.anim_box=anim=ttk.Frame(side);anim.grid(row=4,column=0,sticky='ew',pady=(0,6))
+        anim.columnconfigure(1,weight=1)
+        # Row 0: the clip picker. Row 1: play/pause and the scrubber, which takes the whole width. Row 2: frame readout.
+        # Row 3: speed and loop. Rows 4 and 5: what the clip list offers. One control per row, so a narrow column needs no more than its widest.
+        ttk.Label(anim,text='Animation').grid(row=0,column=0,sticky='w',padx=(0,6))
+        self.clip_choice=tk.StringVar(value=REST_POSE)
+        # A themed button that opens a searchable clip list (_open_clip_picker), not a Tk menu. It takes the column's
+        # width, whatever the divider leaves, and shortens a longer clip name with an ellipsis (_show_clip_choice).
+        # It sits in a frame that sets the request (a fixed ``width`` would shrink the label area to that many characters).
+        clip_holder=tk.Frame(anim,width=1)
+        self.clip_button=ttk.Menubutton(clip_holder,text=REST_POSE,state='disabled')
+        clip_holder.configure(height=self.clip_button.winfo_reqheight())
+        self.clip_button.place(x=0,y=0,relwidth=1,relheight=1)
+        self.clip_button.bind('<ButtonPress-1>',self._open_clip_picker)
+        self.clip_button.bind('<KeyPress-space>',self._open_clip_picker)
+        self.clip_button.bind('<Configure>',lambda _e:self._show_clip_choice(),add='+')
+        self.clip_choice.trace_add('write',lambda *_a:self._show_clip_choice())
+        clip_holder.grid(row=0,column=1,columnspan=2,sticky='ew')
+        # Previous and next clip, in the list's order; [ and ] do the same over the viewport and these controls.
+        self.clip_steps=[]
+        for column,(text,offset) in enumerate((('\u25c0',-1),('\u25b6',1)),start=3):
+            step=ttk.Button(anim,text=text,width=3,state='disabled',command=lambda offset=offset:self._step_clip(offset))
+            step.grid(row=0,column=column,padx=(4 if column==3 else 2,0));self.clip_steps.append(step)
+            tip('Previous clip in the list ([).' if offset<0 else 'Next clip in the list (]).',step)
+        for widget in (self.viewport,self.clip_button,*self.clip_steps):
+            widget.bind('<bracketleft>',lambda _e:self._step_clip(-1))
+            widget.bind('<bracketright>',lambda _e:self._step_clip(1))
+        self.viewport.bind('<ButtonPress-1>',lambda _e:self.viewport.focus_set(),add='+')   # so [ and ] reach it
+        self.clip_labels=[];self.clip_notes=[];self.clip_cutscene=[];self.clip_face=[];self.clip_index=-1;self.clip_popup=None
+        self.clip_open_folders=set();self.clip_search=''   # what the Animation list shows again when reopened
+        self.clip_seconds=[]
+        self.play_button=ttk.Button(anim,text='Pause',width=8,state='disabled')
+        self.play_button.grid(row=1,column=0,sticky='ew',padx=(0,6),pady=(4,0))
+        self.frame_pos=tk.DoubleVar(value=0)
+        self.frame_slider=ttk.Scale(anim,from_=0,to=1,variable=self.frame_pos,state='disabled')
+        self.frame_slider.grid(row=1,column=1,columnspan=4,sticky='ew',pady=(4,0))
+        self.hide_clips_var=remember_var(self.tk.BooleanVar(value=True),'model.hide_extra_clips')
+        self.hide_clips_check=ttk.Checkbutton(anim,text='Hide copies and layers',variable=self.hide_clips_var,
+                                              command=self._clip_filter_changed)
+        self.hide_clips_check.grid(row=4,column=0,columnspan=5,sticky='w',pady=(2,0))
+        tip('Leave out of the clip list the clips that add nothing on their own: copies of a clip another animset also holds, '
+            'additive layers (aim offsets, head looks, leans and twitches, shown here on the rest pose) and clips that do not '
+            'drive this skeleton. The animation picker of an export starts them unticked.',self.hide_clips_check)
+        self.borrowed_var=remember_var(self.tk.BooleanVar(value=False),'model.borrowed_animsets')
+        self.borrowed_check=ttk.Checkbutton(anim,text='Borrowed animsets',variable=self.borrowed_var,command=self._reload_clips)
+        self.borrowed_check.grid(row=5,column=0,columnspan=5,sticky='w',pady=(2,0))
+        tip('Also offer animsets the game pairs with another model whose rest rig matches this one (the Blender build\'s --borrow-animset rule). The first use reads every actor, so it is slow.',self.borrowed_check)
+        self.root_motion_var=remember_var(self.tk.BooleanVar(value=False),'model.root_motion')
+        self.root_motion_check=ttk.Checkbutton(anim,text='Root motion',variable=self.root_motion_var,command=self._root_motion_changed)
+        self.root_motion_check.grid(row=6,column=0,columnspan=5,sticky='w',pady=(2,0))
+        tip('Move the model along the clip\'s own root motion, from where the clip starts: a walk travels forward, a turn '
+            'on the spot turns the whole body, a cutscene shot follows its path through the scene (it may leave the view). '
+            'Off, clips play in place, as their joint tracks store them. Rift Apart only; an additive layer moves only with its base clip.',
+            self.root_motion_check)
+        over=ttk.Frame(anim);over.grid(row=7,column=0,columnspan=5,sticky='ew',pady=(2,0));over.columnconfigure(1,weight=1)
+        ttk.Label(over,text='Over').grid(row=0,column=0,sticky='w',padx=(0,6))
+        self.layer_base_var=tk.StringVar(value=LAYER_REST)
+        self.layer_base_box=ttk.Combobox(over,textvariable=self.layer_base_var,state='disabled',values=(LAYER_REST,))
+        self.layer_base_box.grid(row=0,column=1,sticky='ew')
+        self.layer_base_box.bind('<<ComboboxSelected>>',self._layer_base_chosen)
+        self.layer_bases={};self.layer_base_items=[]   # clip -> chosen base (-1 rest pose); the box's clip indices
+        tip('What an additive layer (an aim, look, lean or twitch) plays over. The clips listed first share an '
+            'animation graph node with the layer in the game\'s animset, best name match first, and the first of them '
+            'is the default; the game picks among them at run time. Rest pose shows the layer on its own. Only for '
+            'layers; other clips play as they are.',self.layer_base_box)
+        self._fill_clip_menu([])
+        self.anim_box.grid_remove()   # shown only for a model with clips (_show_animation)
+        self.frame_text=tk.StringVar(value='')
+        ttk.Label(anim,textvariable=self.frame_text,anchor='e').grid(row=2,column=0,columnspan=5,sticky='e',pady=(2,0))
+        tip('Play or pause the clip. At the rest pose, Play all plays every clip in the list\'s order, naming the one '
+            'playing on the Animation button; Loop then wraps round the whole list.',self.play_button)
+        tip('Drag to scrub through the clip frame by frame; in Play all, through every clip in the list.',self.frame_slider)
+        tip('Pick a clip to play on the rest pose. Skinned models only.\nOver the viewport: Space plays or pauses, '
+            'Left and Right step a frame, [ and ] change clip.',self.clip_button)
+        self.anim_work=LatestWork()
+        self.playback=ClipPlayback(self.viewport,self.app.root,self.play_button,self.frame_slider,self.frame_pos,self.frame_text,
+                                   request=self._request_clip,on_clip=self._show_sequence_clip)
+        self.play_button.configure(command=self.playback.toggle);self.frame_slider.configure(command=self.playback.scrub)
+        self.clip_speed_var=remember_var(tk.StringVar(value=DEFAULT_SPEED),'model.clip_speed',tuple(SPEEDS))
+        self.clip_loop_var=remember_var(tk.BooleanVar(value=True),'model.clip_loop')
+        options=playback_options(tk,ttk,anim,self.playback,self.clip_speed_var,self.clip_loop_var)
+        options.grid(row=3,column=0,columnspan=5,sticky='w',pady=(2,0))
+        tip('Playback speed. Every source frame is still shown; only the frame clock changes.',options.speed_box)
+        tip('Play the clip round and round. Unticked, it stops on its last frame and Play starts it again.',options.loop_check)
+        # Over the viewport (click it first): Space plays or pauses, Left and Right step a frame, [ and ] change clip.
+        self.playback.bind_keys(self.viewport)
+        # Load errors and shader warnings only; the model's counts and ID are in Details.
+        self.model_info=self.tk.StringVar(value='Select one source model. It loads directly; no Blender is needed.')
+        self.info_label=ttk.Label(side,textvariable=self.model_info,wraplength=400)
+        side.bind('<Configure>',lambda e:self.info_label.configure(wraplength=max(120,e.width-16)),add='+')
+        self.info_label.grid(row=5,column=0,sticky='ew')
+        self.model_info.trace_add('write',lambda *_a:self.info_label.grid() if self.model_info.get() else self.info_label.grid_remove())
+        self.view_hint=ttk.Label(side,text='Drag: orbit · Right drag: pan · Wheel: zoom',style='Muted.TLabel');self.view_hint.grid(row=6,column=0,sticky='w',pady=5)
+        self.layout.listen(self._arrange_view_controls)
+        result.columnconfigure(0,weight=1);result.rowconfigure(0,weight=1)
+        self.description=app.ScrolledText(result,height=8,wrap='word',state='disabled',font='TkDefaultFont')
+        self.description.grid(row=0,column=0,sticky='nsew')
+        links=ttk.Frame(result);links.grid(row=3,column=0,sticky='ew')
+        for text, fn in [('Open Blender',self._open_blend),('Artifacts / logs',self._open_folder)]:
+            ttk.Button(links,text=text,command=fn).pack(side='left',padx=2)
+        controls.columnconfigure(1,weight=1)
+        self.inspect_button=ttk.Button(controls,text='Load saved scene controls',command=lambda:self.start_review('inspect'),state='disabled')
+        self.inspect_button.grid(row=0,column=0,columnspan=2,sticky='ew',pady=(0,8))
+        self.clip_var=tk.StringVar(value='Saved pose');self.variant_var=tk.StringVar(value='Saved visibility');self.lod_var=tk.StringVar(value='Saved LOD')
+        self.clip_box=self._selector(controls,1,'Clip',self.clip_var)
+        self.frame_var=tk.StringVar(value='1')
+        ttk.Label(controls,text='Source frame').grid(row=2,column=0,sticky='w')
+        self.frame_box=ttk.Spinbox(controls,textvariable=self.frame_var,from_=1,to=1,state='disabled',width=12)
+        self.frame_box.grid(row=2,column=1,sticky='ew',pady=5)
+        self.timing_var=tk.StringVar(value='Load the scene to read supported source timing.')
+        ttk.Label(controls,textvariable=self.timing_var,wraplength=390).grid(row=3,column=0,columnspan=2,sticky='ew')
+        self.variant_box=self._selector(controls,4,'Variant',self.variant_var)
+        self.lod_box=self._selector(controls,5,'Look / LOD',self.lod_var)
+        self.selector_note=tk.StringVar(value='Variants and LODs are available only when source identities are recorded in this saved scene.')
+        ttk.Label(controls,textvariable=self.selector_note,wraplength=390).grid(row=6,column=0,columnspan=2,sticky='ew',pady=6)
+        ttk.Button(controls,text='Cancel review',command=self.cancel_review).grid(row=8,column=0,columnspan=2,sticky='ew')
+        ttk.Label(controls,text='Shared review HDRI · Cycles OptiX RTX 3060\nSource timing; additive clips are standalone previews.',wraplength=390,style='Muted.TLabel').grid(row=9,column=0,columnspan=2,sticky='ew',pady=8)
+        self.clip_box.bind('<<ComboboxSelected>>',lambda _e:self._clip_changed())
+        self.reload()
+        app.root.after(100,self._drain)
+
+    def _folder_divider(self):
+        """Draggable divider between the folder tree and the model list. Both sit in ``app.list_host``, a grid
+        rather than a Panedwindow, so the folder column gets a fixed width that a sash in the gap sets."""
+        tk,ttk,host,folder=self.tk,self.ttk,self.app.list_host,self.app.folder_frame
+        folder.grid_propagate(False);folder.configure(width=230)
+        sash=tk.Frame(host,width=6,borderwidth=0,highlightthickness=0,cursor='sb_h_double_arrow')
+        track(sash,background='sash')
+        def place(width):
+            folder.configure(width=width);host.columnconfigure(0,minsize=width)
+            host.update_idletasks()
+            folder.grid(row=0,column=0,sticky='nsew',padx=(0,6))   # re-grids the column at the new width
+            sash.place(x=width,y=0,width=6,relheight=1)
+        def drag(event):
+            width=event.x_root-host.winfo_rootx()-3
+            place(max(FOLDER_MIN,min(width,host.winfo_width()-6-TABLE_MIN)))
+        sash.bind('<B1-Motion>',drag)
+        sash.bind('<Enter>',lambda _e:sash.configure(background=color('accent')))
+        sash.bind('<Leave>',lambda _e:sash.configure(background=color('sash')))
+        place(230)
+
+    def _arrange_view_controls(self,stacked):
+        """Vertical layout: one column of controls. Horizontal (stacked) layout: two columns, so the viewport keeps the height."""
+        side=self.view_side
+        side.configure(padding=(0,6,0,0) if stacked else (8,0,0,0))
+        side.columnconfigure(1,weight=1 if stacked else 0,uniform='controls' if stacked else '')
+        side.columnconfigure(0,uniform='controls' if stacked else '')
+        # Stacked: the animation controls sit beside the view/shading column, spanning its first rows so no row stretches.
+        for widget,vrow,srow,sticky in ((self.mode_box.master,0,0,'new'),(self.source_row,1,1,'new'),(self.lighting_group,2,2,'new'),(self.view_hint,6,3,'nw')):
+            regrid(widget,row=srow if stacked else vrow,column=0,rowspan=1,sticky=sticky,padx=(0,12) if stacked else 0)
+        for widget,vrow,srow,span in ((self.anim_box,4,0,3),(self.materials_group,3,3,1),(self.info_label,5,4,1)):
+            regrid(widget,row=srow if stacked else vrow,column=1 if stacked else 0,rowspan=span if stacked else 1,sticky='new',padx=0)
+
+    # Asset types (Model / Level / Flash UI) --------------------------------
+    def _level_fullscreen(self,level_list,full):
+        """Full screen in the level viewer also hides the level list pane."""
+        if full:
+            self.level_view.forget(level_list)
+        else:
+            self.level_view.insert(0,level_list,weight=1)
+
+    def _build_type_views(self,host,model_view):
+        """Level and Flash UI views: a file list on the left, the viewer on the right. They are
+        built once and only hidden on a switch, so loaded levels and UI files keep their state."""
+        tk,ttk,app=self.tk,self.ttk,self.app
+        info=model_view.grid_info()
+        self._type_grid={k:info[k] for k in ('row','column','rowspan','columnspan','sticky','padx','pady') if k in info} or dict(row=1,column=0,sticky='nsew')
+        self.asset_type=self.ASSET_TYPES[0]
+        self._types_shown={self.asset_type}
+        # Level viewer (level_panel.py): own archive instance and worker; lists levels on first show.
+        from nwo.levels.panel import LevelPanel
+        self.level_view=ttk.Panedwindow(host,orient='horizontal')
+        level_list=ttk.LabelFrame(self.level_view,text='Levels',padding=6)
+        level_right=ttk.LabelFrame(self.level_view,text='Level viewer',padding=6)
+        self.level_view.add(level_list,weight=1);self.level_view.add(level_right,weight=4)
+        level_right.columnconfigure(0,weight=1);level_right.rowconfigure(0,weight=1)
+        self.level_panel=LevelPanel(level_right,tk,ttk,lambda:app.source_var.get().strip(),list_parent=level_list,
+                                    on_open_model=self.open_model,layout=self.layout,remember=True,
+                                    on_fullscreen=lambda full:self._level_fullscreen(level_list,full))
+        self.level_panel.frame.grid(row=0,column=0,sticky='nsew')
+        # Flash UI (flash_tab.py): the .gfx/.swf list on the left; reads the list on first show.
+        from nwo.flash.tab import FlashTab
+        self.flash_view=ttk.Panedwindow(host,orient='horizontal')
+        flash_list=ttk.LabelFrame(self.flash_view,text='Flash UI files',padding=6)
+        flash_right=ttk.LabelFrame(self.flash_view,text='Flash UI viewer',padding=6)
+        self.flash_view.add(flash_list,weight=1);self.flash_view.add(flash_right,weight=4)
+        self.flash_tab=FlashTab(app,flash_right,self.source_loader,list_parent=flash_list,layout=self.layout)
+        # Texture (whole archive): its own viewer, with its own list, filter and preview.
+        self.texture_view_host=ttk.Frame(host)
+        self.archive_textures=TextureTab(self,self.texture_view_host,archive=True)
+        self.type_views={'Model':model_view,'Level':self.level_view,'Flash UI':self.flash_view,'Texture':self.texture_view_host}
+
+    def show_asset_type(self,kind):
+        """Show one asset type's list and viewer; the others are hidden, not destroyed."""
+        if kind not in self.type_views:raise ValueError(f'Unknown asset type: {kind}')
+        for name,widget in self.type_views.items():
+            if name!=kind:widget.grid_remove()
+        self.type_views[kind].grid(**self._type_grid)
+        self.asset_type=kind
+        app=self.app
+        tools=getattr(app,'model_tools',None)
+        if tools is not None:
+            tools.grid() if kind in ('Model','Texture') else tools.grid_remove()
+        for widget in getattr(app,'model_only_tools',()):
+            widget.grid_remove() if kind=='Texture' else widget.grid()
+        # The List|Grid switch shows the visible list's own mode; the model list keeps its mode while Texture is shown.
+        if kind=='Texture':app.list_view_var.set(self.archive_textures.texture_view.get())
+        elif kind=='Model':app.show_list_view(app.model_list_view)
+        if kind=='Model' and getattr(app,'model_filter_stale',False):   # Search was changed on the Texture type
+            app.model_filter_stale=False;app.refresh_table()
+        first=kind not in self._types_shown
+        self._types_shown.add(kind)
+        if kind=='Level' and not self.level_panel.levels:
+            self.level_panel.list_levels()
+        elif kind=='Flash UI' and not self.flash_tab.files:
+            self.flash_tab.load_files()
+        elif kind=='Texture':   # refills the list too, so a Search typed on the Model type shows here
+            self.archive_textures.activate()
+        if first and kind in ('Level','Flash UI'):
+            pane=self.type_views[kind]
+            def place_sash():
+                width=pane.winfo_width()
+                if width>1:pane.sashpos(0,max(220,int(width*0.24)))
+            self.app.root.after(50,place_sash)
+
+    def open_model(self,path):
+        """Show an archive model in the Model asset type: select it in the tree (which loads it) and
+        bring up the 3D model tab. Clears the search and filters when they hide it."""
+        app=self.app
+        wanted=path.replace('\\','/').casefold()
+        record=next((r for r in app.records if record_model_path(r)==wanted),None)
+        if record is None:
+            self.app._append_log(f'{path} is not in the model list; scan the game folder first.','error');return False
+        app.asset_type_var.set('Model');self.show_asset_type('Model')
+        item=next((i for i,r in app.item_by_record.items() if r is record),None)
+        if item is None:
+            app.filter_var.set('');app.state_var.set('All');app.folder_scope=''
+            if hasattr(app,'shading_var'):app.shading_var.set('All')
+            kind=app._variant_kinds().get(id(record)) if hasattr(app,'hide_variant_vars') else None
+            if kind:app.hide_variant_vars[kind].set(False)   # a hidden variant kind shows again
+            app.refresh_table()
+            item=next((i for i,r in app.item_by_record.items() if r is record),None)
+        if item is None:return False
+        app.table.selection_set(item);app.table.focus(item);app.table.see(item)
+        self.notebook.select(0)
+        return True
+
+    def _selector(self,parent,row,label,variable):
+        self.ttk.Label(parent,text=label).grid(row=row,column=0,sticky='w',padx=(0,6))
+        box=self.ttk.Combobox(parent,textvariable=variable,state='disabled')
+        box.grid(row=row,column=1,sticky='ew',pady=5)
+        return box
+
+    def reload(self):
+        # Saved results come only from the output root; they fill Result details for the selected source.
+        roots=[]
+        if self.app.output_var.get().strip():roots.append(Path(self.app.output_var.get()))
+        self.status_var.set('Reading saved reports…')
+        self.meta_work.submit(self._load_results,roots)
+
+    @staticmethod
+    def _load_results(roots):
+        refs=catalog.discover_results(roots)
+        priority={str(Path(r).resolve()):i for i,r in enumerate(roots)}
+        refs.sort(key=lambda ref:(priority.get(str(ref.root_path),len(roots)),ref.report_kind!='aggregate',ref.label,str(ref.report_path)))
+        return refs,{}   # per-ref inspection is lazy: see _choose_result
+
+    def select_asset(self,record):
+        identity=(getattr(record,'model_id',None),getattr(record,'archive_path',None))
+        if identity == self.selected_identity and self.source_payload is not None and self.source_selection and str(self.app.source_var.get()) == self.source_selection[0]:return
+        self.selected_identity=identity
+        self.selected_record=record
+        self._load_source(record)
+        found=next((i for i,r in enumerate(self.refs) if (r.model_id,r.source_path)==identity),None)
+        if found is not None:
+            self._choose_result(found)
+        else:
+            self._reset('No build of this model in the output root.')
+
+
+    @staticmethod
+    def _recorded_source_root(ref):
+        # Result summaries point at deliveries below a run directory; reports are parsed once (catalog cache).
+        try:
+            paths=[catalog._report(ref.report_path)[0]]
+            case=catalog.report_row(ref) if ref.report_kind=='aggregate' else None
+            if case:
+                blend=case.get('delivery',{}).get('blend',{}).get('path')
+                if blend:paths.append(catalog._report(Path(blend).parent.parent/'reports'/'manifest.json')[0])
+            for data in paths:
+                if data.get('source_root'):return data['source_root']
+        except (OSError,ValueError,AttributeError):pass
+        return ''
+
+    def _source_root(self,ref):
+        # First ref per identity wins; computed on selection instead of for every saved result.
+        entry=self.metadata.setdefault((ref.model_id,ref.source_path),{})
+        if 'source_root' not in entry:entry['source_root']=self._recorded_source_root(ref)
+        return entry['source_root']
+
+    def _load_source(self,record):
+        if getattr(record,'model_id',None):
+            self._load_source_identity(record.model_id,record.archive_path,self.app.source_var.get())
+        else:
+            self.source_work.submit(lambda:None)
+            self.source_selection=None
+            self.model_textures._clear_texture_list('Loose-file transform mode has no archive textures to list.')
+            self.viewport.clear('Loose-file transform mode has no archive geometry identity. Use the full archive browser to preview native models.')
+
+    def _load_source_identity(self,model_id,source_path,source_root):
+        selection=(str(source_root),model_id,source_path)
+        if selection==self.source_selection and self.source_payload is not None:return
+        self.source_selection=selection
+        self.source_payload=None
+        self.source_text=''
+        self.model_textures._clear_texture_list('Loading the selected model\'s textures…')
+        self.native_look.set('0');self.native_lod.set('Highest')
+        self.viewport.clear('Loading selected source geometry…')
+        self.native_look_box.configure(state='disabled');self.native_lod_box.configure(state='disabled')
+        self.source_row.grid_remove();self.materials_group.grid_remove()   # re-shown for the model that loads
+        if not source_root:
+            self.source_work.submit(lambda:None)
+            self.viewport.clear('Choose the extracted source archive to load this model. No Blender is required.')
+            return
+        self._stop_animation(reset=True)
+        self.clip_list_work.submit(lambda:None)   # drop the previous model's pending clip list
+        self.material_work.submit(lambda:None)    # and its materials
+        self.source_output_root=self._output_root()
+        self.source_work.submit(self._load_geometry,source_root,model_id,source_path,'Highest',0,self.source_output_root)
+
+    def _output_root(self):
+        # The pipeline's reference index there links models to their animsets.
+        text=self.app.output_var.get().strip()
+        return text or None
+
+    def _reload_source(self):
+        if not self.source_selection:return
+        root,ident,path=self.source_selection
+        self._stop_animation(reset=True)
+        self.viewport.clear('Loading source look/LOD…')
+        self.clip_list_work.submit(lambda:None)
+        self.material_work.submit(lambda:None)
+        self.source_output_root=self._output_root()
+        self.source_work.submit(self._load_geometry,root,ident,path,self.native_lod.get(),self._look_index(),self.source_output_root)
+
+    def _load_geometry(self,root,ident,path,lod,look,output_root):
+        """The source worker's load: geometry first; animations and materials follow on their own workers."""
+        return self.source_loader.load(root,ident,path,lod,look,output_root,True,defer_materials=True)
+
+    def _model_info_text(self,pending=False):
+        notes=[self.viewport.shading_error,getattr(self.viewport,'shading_warning','')]
+        if pending:notes.append('Loading materials… (neutral preview until they are ready)')
+        return '\n'.join(t for t in notes if t)
+
+    def _apply_materials(self,payload):
+        """A model's materials (load_materials) for the model still shown: textures, rules and the texture list."""
+        current=self.source_payload
+        if current is None or (current['model_id'],current['source_path'])!=(payload['model_id'],payload['source_path']):return
+        current.update({key:payload[key] for key in self.viewport.MATERIAL_KEYS},materials_pending=False)
+        self.viewport.set_materials(payload)
+        self._update_source_controls(current)
+        self.model_textures._set_texture_list(current)
+        self.source_text=source_details(current,getattr(self.selected_record,'used_by','') or '',self.viewport.native_translation)
+        self._render_details()
+        self.model_info.set(self._model_info_text())
+
+    # Animation playback -------------------------------------------------
+    def _set_clips(self,payload):
+        clips=payload.get('clips') or []
+        self._fill_clip_menu(clips,payload.get('animsets') or [],payload.get('clip_notes') or [],payload.get('clip_seconds') or [])
+        self.clip_choice.set(REST_POSE)
+        self._show_animation(bool(clips))
+        usable=bool(clips) and self.viewport.can_animate
+        self._enable_clip_controls(usable)
+        game=getattr(self.source_loader,'game',None)
+        self.root_motion_check.configure(state='normal' if usable and game is not None and game.has('root_motion') else 'disabled')
+        if usable:self._offer_all()
+        if not clips:
+            self.frame_text.set(payload.get('animation_note') or ('Static model' if payload.get('kind')=='static' else ''))
+        elif not self.viewport.can_animate:
+            self.frame_text.set('Needs shader support')
+        else:
+            self._show_clip_count()
+
+    def _shown_clips(self):
+        """Indices of the clips the list offers: all of them, or without the noted ones (copies, layers, unplayable)."""
+        hide=self.hide_clips_var.get()
+        return [i for i in range(len(self.clip_labels)) if not (hide and i<len(self.clip_notes) and self.clip_notes[i])]
+
+    def _show_clip_count(self):
+        shown=len(self._shown_clips())
+        self.frame_text.set(f'{shown} clips' if shown==len(self.clip_labels) else f'{shown} of {len(self.clip_labels)} clips')
+
+    def _clip_filter_changed(self):
+        """Hide copies and layers changed: the open list and the clip count follow; the clip playing keeps playing,
+        and Play all keeps its clip when the new list still has it, else goes back to the rest pose."""
+        self._close_clip_picker()
+        if self.playback.sequence is not None and not self.playback.reorder(*self._sequence_lists()):
+            self.clip_choice.set(REST_POSE);self.clip_index=-1
+            self._offer_all()
+        if self.clip_labels and self.clip_index<0 and self.viewport.can_animate:
+            self._show_clip_count()
+
+    def _sequence_lists(self):
+        """Play all's clips in the list's order, with their header lengths and names."""
+        order=self._clip_order()
+        seconds=[self.clip_seconds[i] if i<len(self.clip_seconds) else None for i in order]
+        return order,seconds,[self.clip_labels[i] for i in order]
+
+    def _offer_all(self):
+        """The rest pose of a model with clips: Play plays them all in order (ClipPlayback.offer_all)."""
+        self.playback.offer_all(*self._sequence_lists())
+
+    def _request_clip(self,index):
+        self.anim_work.submit(self._decode_clip,index,self._root_motion(),self.layer_bases.get(index))
+
+    def _root_motion(self):
+        """Whether clips play with their root motion: the box is ticked and the game decodes it."""
+        game=getattr(self.source_loader,'game',None)
+        return bool(self.root_motion_var.get()) and game is not None and game.has('root_motion')
+
+    def _root_motion_changed(self):
+        """Root motion was switched: the clip shown is decoded again; Play all drops the clips it read ahead."""
+        if self.playback.sequence is not None:
+            self.playback.sequence.cache.clear()
+        elif 0<=self.clip_index<len(self.clip_labels):
+            self._choose_clip(self.clip_index,self.clip_choice.get())
+
+    def _decode_clip(self,index,root_motion=False,chosen=None):
+        """Worker side: the clip's pose, or the reason it does not decode, tagged with the clip. An additive layer
+        plays over ``chosen`` (a clip index; -1 the rest pose), by default over its first partner clip."""
+        try:
+            partners=self.source_loader.layer_partners(index)
+            base=(partners[0] if partners else None) if chosen is None else (None if chosen<0 else chosen)
+            return dict(clip=index,pose=self.source_loader.pose(index,root_motion,base),partners=partners,base=base)
+        except Exception as error:
+            return dict(clip=index,error=str(error))
+
+    def _show_layer_base(self,payload):
+        """The Over box for the clip shown: its base choices when it is an additive layer, else disabled."""
+        layer=payload.get('pose',{}).get('kind')=='relative/additive-style layer'
+        if not layer or self.playback.sequence is not None or payload.get('clip')!=self.clip_index:
+            self.layer_base_box.configure(state='disabled',values=(LAYER_REST,));self.layer_base_var.set(LAYER_REST)
+            self.layer_base_items=[];return
+        partners=[i for i in payload.get('partners') or () if 0<=i<len(self.clip_labels)]
+        others=[i for i in range(len(self.clip_labels))
+                if i not in partners and i!=self.clip_index and not (i<len(self.clip_notes) and self.clip_notes[i])]
+        self.layer_base_items=[-1]+partners+others
+        labels=[LAYER_REST]+[f'\u2605 {self.clip_labels[i]}' for i in partners]+[self.clip_labels[i] for i in others]
+        self.layer_base_box.configure(state='readonly',values=labels)
+        base=payload.get('base')
+        self.layer_base_var.set(labels[self.layer_base_items.index(base)] if base in self.layer_base_items else LAYER_REST)
+
+    def _layer_base_chosen(self,_event=None):
+        """A base was picked in the Over box: the layer plays again over it (remembered for this model's clip)."""
+        place=self.layer_base_box.current()
+        if place<0 or place>=len(self.layer_base_items) or not 0<=self.clip_index<len(self.clip_labels):return
+        self.layer_bases[self.clip_index]=self.layer_base_items[place]
+        self._choose_clip(self.clip_index,self.clip_choice.get())
+
+    def _show_sequence_clip(self,index):
+        """Play all moved to clip ``index``: the Animation button and the list's play mark follow it."""
+        self.clip_index=index
+        self.clip_choice.set(self.clip_labels[index] if 0<=index<len(self.clip_labels) else REST_POSE)
+
+    def _clip_decoded(self,payload):
+        self._show_layer_base(payload)
+        if 'error' in payload:
+            if not self.playback.fail(payload['clip'],payload['error']):
+                self.frame_text.set('Cannot play');self.model_info.set(payload['error'])
+        elif not self.playback.receive(payload['clip'],payload['pose']):
+            self.playback.start(payload['pose'])
+
+    def _show_clip_choice(self):
+        """The chosen clip's name on the Animation button, cut with an ellipsis when the button is narrower than it."""
+        from tkinter import font as tkfont
+        from nwo.app.gallery import elide
+        text,button=self.clip_choice.get(),self.clip_button
+        room=button.winfo_width()-30   # the drop-down arrow and the padding
+        if room>0:
+            font=tkfont.nametofont(self.ttk.Style(button).lookup('TMenubutton','font') or 'TkDefaultFont',root=button)
+            text=elide(text,font.measure,room)
+        if button.cget('text')!=text:button.configure(text=text)
+
+    def _reload_clips(self):
+        """The Borrowed animsets box changed: rebuild the clip list of the model shown."""
+        payload=self.source_payload
+        if not payload or not self.source_selection:return
+        self._stop_animation(reset=True)
+        self.clip_list_work.submit(self.source_loader.load_animation,self.source_selection[0],
+                                   payload['model_id'],payload['source_path'],self.source_output_root,self.borrowed_var.get())
+
+    def _apply_clip_list(self,clips):
+        """Clips that finished loading after the mesh: only for the model still shown."""
+        payload=self.source_payload
+        if not payload or (payload['model_id'],payload['source_path'])!=(clips['model_id'],clips['source_path']):return
+        payload.update(clips=clips['clips'],clip_notes=clips.get('clip_notes') or [],
+                       clip_seconds=clips.get('clip_seconds') or [],animsets=clips['animsets'],
+                       animation_note=clips['animation_note'],animation_pending=False)
+        self._set_clips(payload)
+        self.source_text=source_details(payload,getattr(self.selected_record,'used_by','') or '',self.viewport.native_translation)
+        self._render_details()
+
+    def _show_animation(self,shown):
+        """The Animation controls are hidden, not disabled, for a model without clips."""
+        if shown:self.anim_box.grid()
+        else:self.anim_box.grid_remove()
+
+    def _fill_clip_menu(self,clips,animsets=(),notes=(),seconds=()):
+        """Clip labels for the picker: rest pose, then folders by animset -> action prefix. ``notes``: clip_notes;
+        ``seconds``: clip_seconds."""
+        self._close_clip_picker()
+        self.clip_labels=list(clips)
+        self.clip_notes=list(notes)
+        self.clip_seconds=list(seconds)
+        self.clip_cutscene=cutscene_clips(self.clip_labels,list(animsets))
+        self.clip_face=face_clips(self.clip_labels,list(animsets))
+        self.clip_open_folders=set();self.clip_search=''   # a new clip list starts with every folder closed
+
+    def _enable_clip_controls(self,usable):
+        for widget in (self.clip_button,*self.clip_steps):widget.configure(state='normal' if usable else 'disabled')
+
+    def _clip_order(self):
+        """Clip indices in the order the Animation list shows them (folders open, no search)."""
+        shown=self._shown_clips();cutscene=set(self.clip_cutscene);face=set(self.clip_face)
+        nodes=group_clips([self.clip_labels[i] for i in shown],[n for n,i in enumerate(shown) if i in cutscene],
+                          [n for n,i in enumerate(shown) if i in face])
+        return [shown[n] for n in clip_leaves(nodes)]
+
+    def _step_clip(self,offset):
+        """Play the clip before (-1) or after (1) the one playing, in the Animation list's order; in Play all, move
+        through the sequence without leaving it."""
+        if self.clip_button.instate(['disabled']) or self.clip_popup is not None:return 'break'
+        if self.playback.jump_clip(offset):return 'break'
+        index=step_clip(self._clip_order(),self.clip_index,offset)
+        if index is not None:self._choose_clip(index,self.clip_labels[index])
+        return 'break'
+
+    def _open_clip_picker(self,_event=None):
+        """Drop-down list under the Animation button: a search box over a folder tree of clips. Choosing a clip plays
+        it and leaves the list open, so clips can be tried one after another; the playing clip is marked. The list
+        closes on a click outside it, on the Animation button or on Escape, and reopens with the folders and the
+        search it had."""
+        if self.clip_button.instate(['disabled']):return 'break'
+        if self.clip_popup is not None:
+            self._close_clip_picker();return 'break'
+        tk,ttk,button=self.tk,self.ttk,self.clip_button
+        top=self.clip_popup=tk.Toplevel(button);top.wm_overrideredirect(True)
+        frame=ttk.Frame(top,padding=4,relief='solid',borderwidth=1);frame.pack(fill='both',expand=True)
+        search=tk.StringVar(value=self.clip_search)
+        entry=ttk.Entry(frame,textvariable=search);entry.pack(fill='x',pady=(0,4))
+        tree=ttk.Treeview(frame,show='tree',selectmode='browse',columns=('length',))
+        tree.column('#0',stretch=True);tree.column('length',width=56,minwidth=44,stretch=False,anchor='e')
+        scroll=ttk.Scrollbar(frame,orient='vertical',command=tree.yview);tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right',fill='y');tree.pack(side='left',fill='both',expand=True)
+
+        names={}   # clip row -> its text without the playing mark
+
+        def mark(item):
+            return f'▶  {names[item]}' if item==f'clip:{self.clip_index}' else names[item]
+
+        def add_clip(parent,item,text):
+            index=int(item[5:])
+            length=clip_length(self.clip_seconds[index]) if 0<=index<len(self.clip_seconds) else ''
+            note=self.clip_notes[index] if 0<=index<len(self.clip_notes) else None
+            if note:text=f'{text}   ({NOTE_TEXT[note]})'   # listed only while copies and layers are shown
+            names[item]=text;tree.insert(parent,'end',iid=item,text=mark(item),values=(length,))
+
+        def fill(*_args):
+            tree.delete(*tree.get_children());names.clear()
+            add_clip('','clip:-1',REST_POSE)
+            terms=search.get().casefold().split()
+            shown=self._shown_clips()
+            if terms:   # flat list of matches while searching
+                for i in sorted(shown,key=lambda i:self.clip_labels[i].lower()):
+                    label=self.clip_labels[i]
+                    if all(t in label.casefold() for t in terms):add_clip('',f'clip:{i}',label)
+            else:
+                def add(parent,nodes):
+                    for text,node in nodes:
+                        if isinstance(node,int):
+                            add_clip(parent,f'clip:{shown[node]}',text)
+                        else:
+                            # Named by its path, so the folder stays the same one when the list is reopened.
+                            iid=f'{parent or "group"}/{text}'
+                            while tree.exists(iid):iid+="'"
+                            tree.insert(parent,'end',iid=iid,text=f'{text}  ({count_clips(node)})',
+                                        open=iid in self.clip_open_folders)
+                            add(iid,node)
+                cutscene=set(self.clip_cutscene);face=set(self.clip_face)
+                add('',group_clips([self.clip_labels[i] for i in shown],[n for n,i in enumerate(shown) if i in cutscene],
+                                   [n for n,i in enumerate(shown) if i in face]))
+            current=f'clip:{self.clip_index}'
+            if tree.exists(current):
+                tree.see(current);tree.selection_set(current);tree.focus(current)
+
+        def choose(item):
+            if item.startswith('clip:'):
+                index=int(item[5:]);before=f'clip:{self.clip_index}'
+                if index!=self.clip_index or self.playback.sequence is not None:   # a clip picked in Play all leaves it
+                    self._choose_clip(index,REST_POSE if index<0 else self.clip_labels[index])
+                for row in {before,item}:   # move the playing mark; the list stays open and scrolled where it was
+                    if tree.exists(row):tree.item(row,text=mark(row))
+                tree.focus(item);tree.selection_set(item)
+            elif item:
+                tree.item(item,open=not tree.item(item,'open'));place()
+
+        def click(event):
+            inside=(0<=event.x_root-top.winfo_rootx()<top.winfo_width() and
+                    0<=event.y_root-top.winfo_rooty()<top.winfo_height())
+            if not inside:   # the grab sends outside clicks here: close the list
+                self._close_clip_picker();return 'break'
+
+        pressed=[None]   # row the current press started on
+
+        def press(event):
+            pressed[0]=tree.identify_row(event.y)
+
+        def release(event):
+            # A click counts only on the row it started on, so a press dragged off a row does nothing.
+            row,pressed[0]=pressed[0],None
+            if event.widget is tree and row and row==tree.identify_row(event.y) and tree.identify_element(event.x,event.y)!='Treeitem.indicator':
+                choose(row)
+
+        preview=[None]   # the pending arrow-key play
+
+        def preview_later(_event=None):
+            if preview[0] is not None:top.after_cancel(preview[0])
+            preview[0]=top.after(PREVIEW_DELAY_MS,preview_focus)
+
+        def preview_focus():
+            preview[0]=None
+            item=tree.focus()
+            if self.clip_popup is top and item.startswith('clip:') and item!=f'clip:{self.clip_index}':choose(item)
+
+        def first_match(_event=None):
+            leaves=[i for i in tree.get_children() if i.startswith('clip:') and i!='clip:-1']
+            if search.get().strip():
+                choose((leaves or ['clip:-1'])[0])
+            else:
+                choose((tree.selection() or ('clip:-1',))[0])
+
+        def into_list(_event=None):
+            tree.focus_set()
+            item=tree.focus() or next(iter(tree.get_children()),'')
+            if item:tree.focus(item);tree.selection_set(item)
+
+        # Below the button, at least 380 px wide, flipped above it at the bottom of the screen.
+        # The height follows the rows currently shown (resized on search and folder open/close);
+        # a flipped list keeps its bottom edge on the button.
+        top.update_idletasks()
+        row_height=int(ttk.Style(top).lookup('Treeview','rowheight') or 20)
+        from tkinter import font as tkfont
+        tree_font=tkfont.nametofont(ttk.Style(top).lookup('Treeview','font') or 'TkDefaultFont',root=top)
+        longest=max([tree_font.measure(REST_POSE),*(tree_font.measure(label+(f'   ({NOTE_TEXT[note]})' if note else ''))
+                                                    for label,note in zip(self.clip_labels,[*self.clip_notes,*[None]*len(self.clip_labels)]))])
+        # The longest name plus three folder indents, the length column, the scrollbar and the frame padding.
+        width=min(max(button.winfo_width(),380,longest+170),top.winfo_screenwidth()-40)
+        x=max(0,min(button.winfo_rootx(),top.winfo_screenwidth()-width))
+        below=button.winfo_rooty()+button.winfo_height()
+        max_height=top.winfo_screenheight()//2
+        flip=below+max_height>top.winfo_screenheight()
+
+        def visible_rows(parent=''):
+            return sum(1+(visible_rows(i) if tree.item(i,'open') else 0) for i in tree.get_children(parent))
+
+        pinned=[None]   # a flipped list keeps the top edge it opened with
+
+        def open_folders(parent=''):
+            for i in tree.get_children(parent):
+                if tree.item(i,'open'):yield i;yield from open_folders(i)
+
+        def place(_event=None):
+            if self.clip_popup is not top:return
+            if not search.get().strip():self.clip_open_folders=set(open_folders())
+            top.update_idletasks()
+            rows=max(4,min(18,visible_rows()))
+            height=min(rows*row_height+entry.winfo_reqheight()+16,max_height)
+            if flip:
+                # Growing downward from a fixed top edge keeps every row under the pointer when a folder
+                # opens; the list may cover the button while it is open.
+                if pinned[0] is None:pinned[0]=max(0,button.winfo_rooty()-height)
+                y=pinned[0];height=min(height,top.winfo_screenheight()-y)
+            else:y=below
+            top.geometry(f'{width}x{height}+{x}+{y}')
+
+        def refill(*_args):
+            self.clip_search=search.get();fill();place()
+
+        # <<TreeviewOpen>> fires before the item opens: measure after it.
+        tree.bind('<<TreeviewOpen>>',lambda _e:top.after_idle(place))
+        tree.bind('<<TreeviewClose>>',lambda _e:top.after_idle(place))
+        search.trace_add('write',refill);fill()
+        top.bind('<ButtonPress-1>',click,add='+')
+        tree.bind('<ButtonPress-1>',press)
+        # The second press of a double-click must not toggle or choose: the first click already acted.
+        tree.bind('<Double-ButtonPress-1>',lambda _e:'break')
+        tree.bind('<ButtonRelease-1>',release)
+        tree.bind('<Return>',lambda _e:choose(tree.focus()))
+        for key in STEP_KEYS:tree.bind(f'<KeyRelease-{key}>',preview_later,add='+')
+        entry.bind('<Return>',first_match)
+        entry.bind('<Down>',into_list)
+        top.bind('<Escape>',lambda _e:self._close_clip_picker())
+        place()
+        top.lift();top.grab_set();entry.focus_set();entry.select_range(0,'end')   # typing replaces a kept search
+        return 'break'
+
+    def _close_clip_picker(self):
+        top,self.clip_popup=self.clip_popup,None
+        if top is not None:
+            try:
+                top.grab_release();top.destroy()
+            except self.tk.TclError:
+                pass
+
+    def _choose_clip(self,index,label):
+        self._stop_animation(reset=False)
+        self.clip_choice.set(label)
+        self.clip_index=index
+        if index<0:
+            self._offer_all()   # the rest pose again, with Play all
+            self.frame_text.set('Rest pose');return
+        self.playback.leave_all()
+        self.frame_text.set('Decoding…')
+        self._request_clip(index)
+
+    def _stop_animation(self,reset):
+        self.playback.pause()
+        self.anim_work.submit(lambda:None)   # drop a pending decode for the old model
+        if reset:
+            self.layer_bases={};self._show_layer_base({})
+            self._fill_clip_menu([]);self._enable_clip_controls(False);self.clip_choice.set(REST_POSE)
+            self._show_animation(False)
+            self.clip_index=-1
+            self.playback.clear()
+
+    def _reset(self,message):
+        self.generation+=1
+        self.detail_work.submit(lambda:None)
+        self.artifact_work.submit(lambda:None)
+        self.active_ref,self.details,self.review_report=None,None,None
+        self.inspect_button.configure(state='disabled')
+        for box,var,value in [(self.clip_box,self.clip_var,'Saved pose'),(self.variant_box,self.variant_var,'Saved visibility'),(self.lod_box,self.lod_var,'Saved LOD')]:
+            box.configure(values=(),state='disabled');var.set(value)
+        self.frame_box.configure(state='disabled')
+        self.status_var.set(message)
+        self.build_text=message
+        self._render_details()
+
+    def _request_placements(self,path):
+        from nwo.app.links import placement_lines
+        self.placement_text='Placed in levels: reading asset links…'
+        def show(links):
+            if not self.source_payload or self.source_payload['source_path']!=path:return
+            self.placement_text=('\n'.join(placement_lines(links.model_placements(path))) if links is not None
+                                 else 'Placed in levels: '+self.links.message)
+            self._render_details()
+        self.links.request(show,key='placements')
+
+    def _choose_result(self,index):
+        if index<0 or index>=len(self.refs):return
+        self._reset('Checking selected result receipts and files…')
+        self.active_ref=self.refs[index]
+        ref=self.active_ref
+        self._load_source_identity(ref.model_id,ref.source_path,self.app.source_var.get().strip() or self._source_root(ref))
+        self.detail_work.submit(lambda ref:catalog.inspect_result(ref,verify_blend=True),self.active_ref)
+
+    def _describe(self,message):
+        self.description.configure(state='normal');self.description.delete('1.0','end')
+        self.description.insert('1.0',message);self.description.configure(state='disabled')
+
+    def _native_translation_changed(self):
+        self.viewport.set_native_translation(self.native_translation_var.get())
+        if self.source_payload:
+            self.source_text = source_details(self.source_payload, getattr(self.selected_record,'used_by','') or '',
+                                              self.viewport.native_translation)
+            self._render_details()
+
+    def _experimental_materials_changed(self):
+        self.viewport.set_experimental_materials(self.experimental_materials_var.get())
+
+    def _mode_changed(self,_event=None):
+        self.viewport.set_mode(self.view_mode.get())
+        self._sync_material_state()
+
+    def _sync_material_state(self):
+        """Material toggles only change Shaded mode, so they are inert in the other modes."""
+        state='normal' if self.view_mode.get()=='Shaded' else 'disabled'
+        self.native_check.configure(state=state);self.experimental_check.configure(state=state)
+
+    def _look_index(self):
+        """The chosen look's index: the Look box shows 'index: name' where the model names its looks."""
+        try:return int(self.native_look.get().split(':')[0] or 0)
+        except ValueError:return 0
+
+    def _update_source_controls(self,payload):
+        """Show the LOD, look and material toggles only where they change something for this model."""
+        looks=payload.get('looks') or []
+        look=self._look_index()
+        multi_look=len(looks)>1
+        lod=lod_choices_differ(looks,payload.get('mesh_record_count',0),look) if looks else False
+        self.native_look_box.configure(values=[look_label(r) for r in looks],state='readonly' if multi_look else 'disabled')
+        if multi_look and look<len(looks):self.native_look.set(look_label(looks[look]))
+        self.native_lod_box.configure(state='readonly' if lod else 'disabled')
+        for widget in (self.native_look_label,self.native_look_box):
+            if multi_look:widget.pack(side='left',padx=(0,4),before=self.native_lod_label)
+            else:widget.pack_forget()
+        self.source_row.grid() if (lod or multi_look) else self.source_row.grid_remove()
+        self.native_applicable,self.experimental_applicable=material_toggles(payload.get('textures'))
+        self.native_check.grid_remove();self.experimental_check.grid_remove()
+        if self.native_applicable:self.native_check.grid(row=0,column=0,sticky='w')
+        if self.experimental_applicable:self.experimental_check.grid(row=0,column=1,sticky='w',padx=(8,0))
+        motion=payload.get('vertex_motion') is not None
+        self.vertex_motion_check.grid(row=1,column=0,columnspan=2,sticky='w') if motion else self.vertex_motion_check.grid_remove()
+        self._vertex_motion_changed()
+        applicable=self.native_applicable or self.experimental_applicable or motion
+        self.materials_group.grid() if applicable else self.materials_group.grid_remove()
+        # A toggle that is hidden must not keep changing the picture.
+        self.viewport.set_experimental_materials(self.experimental_applicable and self.experimental_materials_var.get())
+        self._sync_material_state()
+
+    def _vertex_motion_changed(self):
+        """Vertex animation switched, or another model shown: run the shader clock from 0 for a model with vertex
+        motion while the box is ticked, else stop it and show time 0."""
+        import time
+        if self.motion_job is not None:
+            self.app.root.after_cancel(self.motion_job);self.motion_job=None
+        payload=self.source_payload
+        if payload is not None and payload.get('vertex_motion') is not None and self.vertex_motion_var.get():
+            self.motion_start=time.monotonic();self.motion_busy=False
+            self._motion_tick()
+        else:
+            self.motion_work.submit(lambda:None);self.motion_busy=False
+            self.viewport.set_vertex_motion(None)
+
+    def _motion_tick(self):
+        """Ask the worker for the vertices at the shader time now, unless it is still on the last one."""
+        import time
+        self.motion_job=None
+        payload=self.source_payload
+        if self.closed or payload is None or payload.get('vertex_motion') is None or not self.vertex_motion_var.get():return
+        if not self.motion_busy:
+            self.motion_busy=True
+            self.motion_work.submit(self._motion_frame,payload,time.monotonic()-self.motion_start)
+        self.motion_job=self.app.root.after(33,self._motion_tick)
+
+    def _motion_frame(self,payload,seconds):
+        """Worker side: the payload's vertex motion at ``seconds`` (texture reads share the archive's lock)."""
+        try:
+            with self.source_loader.texture_lock:
+                return dict(payload=payload,frame=payload['vertex_motion'](seconds))
+        except Exception:   # a time that does not evaluate keeps the frame shown; the clock goes on
+            return dict(payload=None,frame=None)
+
+    def _motion_done(self,result):
+        self.motion_busy=False
+        if result.get('payload') is self.source_payload and self.vertex_motion_var.get():
+            self.viewport.set_vertex_motion(result['frame'])
+
+    def _render_details(self):
+        # Source facts from the game files first; a saved build in the output root, when present, below.
+        parts=[self.source_text or 'Loading the model from the game files…']
+        if self.source_text and self.placement_text:parts.append(self.placement_text)
+        if self.build_text:parts.append('Build in the output root\n'+self.build_text)
+        self._describe('\n\n'.join(parts))
+
+    def _show_details(self,details):
+        self.details=normalize_details(details)
+        d=self.details
+        self.status_var.set(f"{d.get('kind','unknown').title()} · {d.get('support_status','unknown').title()}")
+        self.build_text='\n'.join([*d.get('summary',[]),*d.get('limitations',[])])
+        self._render_details()
+        okay=d.get('integrity_verified') and bool(d.get('blend_path'))
+        self.inspect_button.configure(state='normal' if okay and self.review is None else 'disabled')
+
+    def _open_blend(self):
+        if self.details and self.details.get('blend_path'):
+            blender=self.app.blender_var.get().strip()
+            if not blender or not Path(blender).is_file():
+                self.status_var.set('Choose Blender to open this optional saved scene. The 3D model tab works without it.')
+                return
+            self._open(self.details['blend_path'],blender=blender)
+
+    def _open_folder(self):
+        if self.details and self.details.get('blend_path'):self._open(Path(self.details['blend_path']).parent)
+        elif self.active_ref:self._open(self.active_ref.root_path)
+
+    def _open(self,path,blender=None):
+        try:open_local(path,blender)
+        except Exception as error:self.app.messagebox.showerror('Open artifact',str(error))
+
+    def _clip_changed(self):
+        index=self.clip_box.current()-1
+        rows=(self.review_report or {}).get('clips',[])
+        if index<0:
+            self.frame_box.configure(state='disabled');self.timing_var.set('Saved pose and frame are retained.');return
+        row=rows[index]
+        self.frame_box.configure(from_=row['frame_start'],to=row['frame_end'],state='normal')
+        self.frame_var.set(str(row['frame_start']))
+        self.timing_var.set(f"Frames {row['frame_start']}–{row['frame_end']} at {row['fps']:g} source fps · {row.get('kind') or 'source clip'}")
+
+    def start_review(self,mode):
+        if self.review or self.app.runner or (self.app.worker and self.app.worker.is_alive()):
+            self.status_var.set('Wait for the active scan, batch or review to finish.');return
+        if not self.details or not self.details.get('integrity_verified'):return
+        blender=Path(self.app.blender_var.get())
+        if not blender.is_file():self.status_var.set('Choose a valid Blender executable.');return
+        request={'schema':'rcps4-asset-review-request-v1','mode':mode,
+                 'master_blend':str(self.details['blend_path']),'master_sha256':self.details['blend_sha256']}
+        run_dir=ROOT/'.cache'/'reviews'/uuid.uuid4().hex
+        run_dir.mkdir(parents=True)
+        request.update(output_dir=str(run_dir),report_path=str(run_dir/'report.json'))
+        request_path=run_dir/'request.json';request_path.write_text(json.dumps(request,indent=2),encoding='utf8')
+        token=self.generation
+        self.review=ReviewProcess(review_command(blender,ROOT/'nwo'/'pipeline'/'review.py',request_path),run_dir/'report.json',ROOT,event=lambda kind,**v:self.review_events.put((kind,v)))
+        self.status_var.set('Reading saved scene…')
+        self.inspect_button.configure(state='disabled')
+        self.app.start_button.configure(state='disabled')
+        def work():
+            try:
+                report=self.review.run()
+                self.review_events.put(('review_done',{'report':report,'token':token,'mode':mode}))
+            except Exception as error:self.review_events.put(('review_error',{'message':str(error),'token':token}))
+        self.review_worker=threading.Thread(target=work,daemon=True);self.review_worker.start()
+
+    def cancel_review(self):
+        if self.review:
+            self.status_var.set('Stopping the owned review process…')
+            threading.Thread(target=self.review.cancel,daemon=True).start()
+
+    def _show_controls(self,report):
+        self.review_report=report
+        for key,box,var,first in [('clips',self.clip_box,self.clip_var,'Saved pose'),('variants',self.variant_box,self.variant_var,'Saved visibility'),('lods',self.lod_box,self.lod_var,'Saved LOD')]:
+            rows=report.get(key,[])
+            values=[first]+[r.get('selector') or r.get('label') for r in rows]
+            box.configure(values=values,state='readonly' if rows else 'disabled');box.current(0)
+        self._clip_changed()
+        self.selector_note.set('\n'.join(filter(None,[report.get('variants_unavailable_reason'),report.get('lods_unavailable_reason')])))
+
+    def _drain(self):
+        if self.closed:return
+        try:
+            self._drain_once()
+        except Exception as error:   # a failed handler must not stop the pump the later results need
+            traceback.print_exc()
+            self.status_var.set(f'Internal error: {type(error).__name__}: {error}')
+        self.app.root.after(100,self._drain)
+
+    def _drain_once(self):
+        for worker,kind in [(self.meta_work,'metadata'),(self.detail_work,'details'),(self.artifact_work,'artifact'),(self.source_work,'source'),(self.material_work,'materials'),(self.anim_work,'animation'),(self.clip_list_work,'clip_list'),(self.motion_work,'motion')]:
+            try:
+                while True:
+                    generation,payload,error=worker.events.get_nowait()
+                    if generation!=worker.generation:continue
+                    if error:
+                        if kind=='animation':
+                            self.frame_text.set('Cannot play');self.model_info.set(error);continue
+                        if kind=='clip_list':
+                            self.frame_text.set('Animations unavailable');self.status_var.set(error);continue
+                        if kind=='materials':
+                            self.model_info.set('Materials unavailable: '+error);self.status_var.set(error);continue
+                        self.status_var.set(error)
+                        if kind=='source':
+                            self.viewport.clear(error);self.model_info.set(error)
+                            self.model_textures._clear_texture_list(error)
+                            path,ident=(self.source_selection or ('','',''))[2],(self.source_selection or ('','',''))[1]
+                            self.source_text=f'{path}\nAsset ID: {ident}\nThis model could not be loaded from the game files:\n{error}'
+                            self._render_details()
+                        continue
+                    if payload is None:continue
+                    if kind=='metadata':
+                        self.refs,self.metadata=payload
+                        if self.source_payload is not None:
+                            identity=(self.source_payload['model_id'],self.source_payload['source_path'])
+                            self.metadata.setdefault(identity,{})['kind']=self.source_payload['kind']
+                        self.status_var.set(f'{len(self.refs)} saved results in the output root.')
+                        self.app.refresh_table()
+                    elif kind=='details':self._show_details(payload)
+                    elif kind=='source':
+                        self.source_payload=payload
+                        self.viewport.set_mesh(payload)
+                        self.model_info.set('')
+                        self._update_source_controls(payload)
+                        identity=(payload['model_id'],payload['source_path'])
+                        self.metadata.setdefault(identity,{})['kind']=payload['kind']
+                        self._set_clips(payload)
+                        if payload.get('animation_pending') and self.source_selection:
+                            self.clip_list_work.submit(self.source_loader.load_animation,self.source_selection[0],
+                                                       payload['model_id'],payload['source_path'],self.source_output_root,
+                                                       self.borrowed_var.get())
+                        pending=bool(payload.get('materials_pending'))
+                        if pending and self.source_selection:
+                            self.material_work.submit(self.source_loader.load_materials,self.source_selection[0],
+                                                      payload['model_id'],payload['source_path'],self.source_output_root)
+                        else:
+                            self.model_textures._set_texture_list(payload)
+                        self.source_text=source_details(payload,getattr(self.selected_record,'used_by','') or '',self.viewport.native_translation)
+                        self._request_placements(payload['source_path'])
+                        self._render_details()
+                        self.model_info.set(self._model_info_text(pending))
+                    elif kind=='animation':self._clip_decoded(payload)
+                    elif kind=='clip_list':self._apply_clip_list(payload)
+                    elif kind=='materials':self._apply_materials(payload)
+                    elif kind=='motion':self._motion_done(payload)
+                    elif kind=='artifact':self._open(payload)
+            except queue.Empty:pass
+        self.model_textures.drain();self.archive_textures.drain()
+        self.links.drain()
+        self.flash_tab.drain()
+        try:
+            while True:
+                kind,values=self.review_events.get_nowait()
+                if kind=='log':self.app._append_log(str(values['message']))
+                else:
+                    self.review=None
+                    self.app._set_busy()
+                    if self.details and self.details.get('integrity_verified'):
+                        self.inspect_button.configure(state='normal')
+                    if values.get('token')!=self.generation:continue
+                    self.inspect_button.configure(state='normal')
+                    if kind=='review_error':self.status_var.set(values['message']);self.app._append_log(values['message'],'error')
+                    else:
+                        report=values['report']
+                        if report.get('status')=='cancelled':self.status_var.set('Review cancelled. Master was not saved.');continue
+                        self._show_controls(report);self.status_var.set('Saved scene controls loaded. Choose a source frame or keep the saved pose.')
+        except queue.Empty:pass
+
+    def close(self):
+        self._close_clip_picker()   # release the grabbed Animation list before anything below can wait
+        self.closed=True
+        self.playback.close()
+        self.meta_work.close();self.detail_work.close();self.artifact_work.close();self.source_work.close();self.material_work.close();self.anim_work.close();self.clip_list_work.close();self.motion_work.close()
+        self.model_textures.close();self.archive_textures.close();self.flash_tab.close();self.level_panel.close()
+        self.gallery.close()
+        self.links.close()
+        self.cancel_review()
+        self.source_loader.close_translation_pool()

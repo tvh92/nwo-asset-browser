@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.shaders.bindings import (
+from nwo.shaders.bindings import (
     CONSTRUCTO_BUTTON_SOURCE_PREVIEW as RULE,
     _source_preview_policy,
     validate_source_preview_inputs,
@@ -55,7 +55,7 @@ class ConstructorButtonArchiveTests(unittest.TestCase):
         if not research:raise unittest.SkipTest('RC2016_RESEARCH is required')
         root=Path(os.environ.get('RC2016_GAME_ROOT',str(Path(research).parents[1]/'Ratchet & Clank (EUR)'/'Image0')))
         if not root.exists():raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive=open_archive(root)
 
     @classmethod
@@ -63,11 +63,11 @@ class ConstructorButtonArchiveTests(unittest.TestCase):
         if hasattr(cls,'archive'):cls.archive.close()
 
     def test_source_material_and_both_writer_contracts_translate_with_explicit_limits(self):
-        from rc2016.formats.index import references
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.bindings import pass_contracts,prepare_translation
-        from rc2016.viewer.native_glsl import evaluate_surface
+        from nwo.formats.index import references
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.bindings import pass_contracts,prepare_translation
+        from nwo.viewer.native_glsl import evaluate_surface
         graph_path=RULE['graph_path'];material_path=RULE['material_path']
         graph_data=asset_bytes(self.archive,graph_path);material_data=asset_bytes(self.archive,material_path)
         graph_paths=[r['path'] for r in references(material_data) if r['path'].endswith('.materialgraph')]
@@ -99,7 +99,7 @@ class ConstructorButtonArchiveTests(unittest.TestCase):
         self.assertNotEqual(result['emission'],0.0)
         self.assertEqual(result['F0'],[0.0,0.0,0.0])
         self.assertEqual(result['gloss'],0.0)
-        from rc2016.viewer.native_glsl import selected_translation
+        from nwo.viewer.native_glsl import selected_translation
         viewer=selected_translation(self.archive,material_path)
         self.assertEqual(viewer['status'],'ready')
         self.assertEqual(viewer['source_preview_inputs'],translation['source_preview_inputs'])

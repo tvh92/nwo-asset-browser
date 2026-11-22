@@ -5,7 +5,7 @@ Synthetic containers only; no game bytes are embedded.
 import struct
 import unittest
 
-from rc2016.levels import zone_format as zf
+from nwo.levels import zone_format as zf
 
 
 def dat1(sections):

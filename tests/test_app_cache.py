@@ -1,10 +1,10 @@
-"""The app's disk cache: size and Clear cache (rc2016.app.cache)."""
+"""The app's disk cache: size and Clear cache (nwo.app.cache)."""
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from rc2016.app import cache
+from nwo.app import cache
 
 
 class CacheTests(unittest.TestCase):

@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rc2016.app.browser import rule_text
-from rc2016.games.rcra import material as rmat
-from rc2016.viewer import shading
+from nwo.app.browser import rule_text
+from nwo.games.rcra import material as rmat
+from nwo.viewer import shading
 from tests.test_rcra_texture import FakeSource, dat1, texture_asset
 
 GAME = os.environ.get('RCRA_GAME')
@@ -80,7 +80,7 @@ class GlassReaderTests(unittest.TestCase):
             self.assertAlmostEqual(got, want, places=6)
 
     def test_slot_rows_follow_the_engine_binding(self):
-        from rc2016.games.rcra import shaders as rshaders
+        from nwo.games.rcra import shaders as rshaders
         rows = rmat.graph_slot_rows(self.graph)
         self.assertEqual([(row[0], row[3], row[4]) for row in rows], [(3, True, 0x49A7866B), (2, True, 0x49A7866B),
                                                                        (0, True, 0x49A7866B), (1, True, 0x49A7866B)])
@@ -183,7 +183,7 @@ class GlassEntryTests(unittest.TestCase):
 class RealGlassTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 
@@ -208,7 +208,7 @@ class RealGlassTests(unittest.TestCase):
 
     def test_serialized_header_words(self):
         """Every installed material's header: values, switches and textures follow each other, words 8 and 9 are 0."""
-        from rc2016.games.rcra.toc import sections
+        from nwo.games.rcra.toc import sections
         checked = 0
         for key in self.source.ids_of_type('material'):
             data = bytes(self.source.asset_data(key))
@@ -230,7 +230,7 @@ class RealGlassTests(unittest.TestCase):
         self.assertGreater(checked, 5000)
 
     def test_swarmer_dome_is_glass_and_its_other_materials_are_not(self):
-        from rc2016.games.rcra.model import decode_model
+        from nwo.games.rcra.model import decode_model
         path = 'characters/enemy/enm_neo_nefarious_swarmer/enm_neo_nefarious_swarmer.model'
         decoded = decode_model(path, data=self.source.asset_data(self.source.resolve(path)[0]), as_arrays=True)
         entries = rmat.material_textures(self.source, decoded['materials'], {})

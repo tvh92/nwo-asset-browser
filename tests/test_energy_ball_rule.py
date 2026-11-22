@@ -8,9 +8,9 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, frame_fade, glass_uniforms
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, frame_fade, glass_uniforms
 
 ROOT = Path(__file__).resolve().parents[1]
 GRAPH = 'materialgraph/character/enemy/enm_test_dummy_energy_ball/enm_test_dummy_energy_ball.materialgraph'
@@ -54,7 +54,7 @@ class RuleBindingTests(unittest.TestCase):
 
     def test_loader_uploads_every_forward_window_role(self):
         self.assertEqual(tp.FORWARD_WINDOW_ROLES, ('_window_mask', '_window_n1', '_window_n2', '_window_c', '_window_g'))
-        from rc2016.viewer.viewport import GL_TEXTURE_ROLES
+        from nwo.viewer.viewport import GL_TEXTURE_ROLES
         self.assertTrue(set(tp.FORWARD_WINDOW_ROLES) <= set(GL_TEXTURE_ROLES))
 
 
@@ -73,7 +73,7 @@ class UniformTests(unittest.TestCase):
                           (0.0,) * 4))
         animated = glass_uniforms(dict(kind='energy_ball', params=p), 2.5)[1]
         self.assertEqual(animated[1:3], (2.5, frame_fade(2.5, 30.0)))   # the effect clock and the per-frame CB0[107] stand-in
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         self.assertIn('energy_ball', ModelViewport.EFFECT_KINDS)
         self.assertIn('energy_ball', ModelViewport.HDR_FORWARD_KINDS)
 
@@ -118,7 +118,7 @@ class BlenderFrontEndTests(unittest.TestCase):
         names, roles = validation._viewer_required(rule, False)
         self.assertTrue(set(names) <= set(validation._viewer_expected_constants(rule)))
         self.assertEqual(roles, ['_window_mask', '_window_n1', '_window_n2'])
-        text = (ROOT / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (ROOT / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         self.assertIn("'energy_ball'", text.split('GLASS_VIEWER_KINDS =')[1].split('\n')[0])
         body = text.split("elif key == 'energy_ball':")[1].split("elif key == 'flat_incandescent':")[0]
         for name in ['glass ' + n for n in validation.GLASS_CONSTANTS['energy_ball']] + ["'electricity'", "'noise 1'", "'noise 2'",
@@ -134,7 +134,7 @@ class ArchiveRuleTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -160,7 +160,7 @@ class ArchiveRuleTests(unittest.TestCase):
         self.assertTrue(all(entries[1].get(role) for role in ('_window_mask', '_window_n1', '_window_n2', '_window_c', '_pick')))
 
     def test_blender_rule(self):
-        from rc2016.formats.materials import viewer_graph_rule
+        from nwo.formats.materials import viewer_graph_rule
         rule = viewer_graph_rule(self.archive, MATERIAL)
         self.assertTrue(rule['applies'])
         self.assertEqual((rule['ported'], rule['unported']), (['energy_ball'], []))

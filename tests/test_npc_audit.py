@@ -1,7 +1,7 @@
 """Pure helpers of the character audit (idle suggestion, material decode categories)."""
 import unittest
 
-from rc2016.research.npc_audit import category, suggested_idle
+from nwo.research.npc_audit import category, suggested_idle
 
 
 class AuditHelperTests(unittest.TestCase):

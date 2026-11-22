@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.viewer.native_glsl import TranslationDiskCache, prepare_material_translation
+from nwo.viewer.native_glsl import TranslationDiskCache, prepare_material_translation
 
 
 def translation():
@@ -48,7 +48,7 @@ class TranslationDiskCacheTests(unittest.TestCase):
 
     def test_variant_key_is_separate_and_default_is_unchanged(self):
         import hashlib
-        from rc2016.viewer import native_glsl
+        from nwo.viewer import native_glsl
         key = self.disk.key(b'material', [b'graph'])
         self.assertEqual(key, self.disk.key(b'material', [b'graph'], variant=''))
         legacy = hashlib.sha256(repr((native_glsl.TRANSLATION_DISK_CACHE_VERSION, native_glsl._TRANSLATION_CODE_SHA256,
@@ -80,10 +80,10 @@ class TranslationDiskCacheTests(unittest.TestCase):
         def prepare(graphs, material, instance, **context):
             calls.append((graphs, material, context))
             return translation()
-        with patch('rc2016.formats.archive.asset_data', side_effect=lambda archive, i: b'material' if i == 1 else b'graph'), \
-             patch('rc2016.formats.archive.asset_references', return_value=[dict(path='g.materialgraph')]), \
-             patch('rc2016.formats.materials.extract_material_parameters', return_value={}), \
-             patch('rc2016.shaders.bindings.prepare_translation', side_effect=prepare):
+        with patch('nwo.formats.archive.asset_data', side_effect=lambda archive, i: b'material' if i == 1 else b'graph'), \
+             patch('nwo.formats.archive.asset_references', return_value=[dict(path='g.materialgraph')]), \
+             patch('nwo.formats.materials.extract_material_parameters', return_value={}), \
+             patch('nwo.shaders.bindings.prepare_translation', side_effect=prepare):
             for _session in range(2):
                 archive = Archive()
                 archive.translation_disk_cache = self.disk
@@ -92,16 +92,16 @@ class TranslationDiskCacheTests(unittest.TestCase):
             source_graph_paths=['g.materialgraph'],source_material_path='m.material'))])
 
     def test_world_position_translation_is_reused_across_sessions(self):
-        from rc2016.viewer.experimental_materials import world_position_translation
+        from nwo.viewer.experimental_materials import world_position_translation
         calls = []
 
         def prepare(graphs, material, instance, world_position=False):
             calls.append((graphs, material, world_position))
             return translation()
-        with patch('rc2016.formats.archive.asset_data', side_effect=lambda archive, i: b'material' if i == 1 else b'graph'), \
-             patch('rc2016.formats.archive.asset_references', return_value=[dict(path='g.materialgraph')]), \
-             patch('rc2016.formats.materials.extract_material_parameters', return_value={}), \
-             patch('rc2016.shaders.bindings.prepare_translation', side_effect=prepare):
+        with patch('nwo.formats.archive.asset_data', side_effect=lambda archive, i: b'material' if i == 1 else b'graph'), \
+             patch('nwo.formats.archive.asset_references', return_value=[dict(path='g.materialgraph')]), \
+             patch('nwo.formats.materials.extract_material_parameters', return_value={}), \
+             patch('nwo.shaders.bindings.prepare_translation', side_effect=prepare):
             for _session in range(2):
                 archive = Archive()
                 archive.translation_disk_cache = self.disk
@@ -113,9 +113,9 @@ class TranslationCodeKeyTests(unittest.TestCase):
     def test_excluded_modules_are_not_imported_by_the_translator(self):
         """A module outside the code hash must not be reachable from prepare_translation."""
         import ast
-        from rc2016.viewer.native_glsl import TRANSLATION_CODE_EXCLUDED
+        from nwo.viewer.native_glsl import TRANSLATION_CODE_EXCLUDED
         root = Path(__file__).resolve().parents[1]
-        shaders = root / 'rc2016' / 'shaders'
+        shaders = root / 'nwo' / 'shaders'
         seen, stack = set(), ['bindings']
         while stack:
             name = stack.pop()
@@ -123,19 +123,19 @@ class TranslationCodeKeyTests(unittest.TestCase):
                 continue
             seen.add(name)
             for node in ast.walk(ast.parse((shaders / f'{name}.py').read_text(encoding='utf-8'))):
-                if isinstance(node, ast.ImportFrom) and node.module == 'rc2016.shaders':
+                if isinstance(node, ast.ImportFrom) and node.module == 'nwo.shaders':
                     stack.extend(a.name for a in node.names if (shaders / f'{a.name}.py').exists())
-                elif isinstance(node, ast.ImportFrom) and (node.module or '').startswith('rc2016.shaders.'):
+                elif isinstance(node, ast.ImportFrom) and (node.module or '').startswith('nwo.shaders.'):
                     stack.append(node.module.split('.')[2])
                 elif isinstance(node, ast.Import):
-                    stack.extend(a.name.split('.')[2] for a in node.names if a.name.startswith('rc2016.shaders.'))
+                    stack.extend(a.name.split('.')[2] for a in node.names if a.name.startswith('nwo.shaders.'))
         self.assertIn('translator', seen)
         self.assertEqual({f'{n}.py' for n in seen} & TRANSLATION_CODE_EXCLUDED, set())
         for name in TRANSLATION_CODE_EXCLUDED:
             self.assertTrue((shaders / name).exists(), name)
 
     def test_hash_ignores_the_excluded_modules_and_native_glsl(self):
-        from rc2016.viewer import native_glsl
+        from nwo.viewer import native_glsl
         self.assertIsNotNone(native_glsl._TRANSLATION_CODE_SHA256)
         sources = Path(native_glsl.__file__).resolve().parents[1]
         with patch.object(Path, 'read_bytes', autospec=True,
@@ -146,15 +146,15 @@ class TranslationCodeKeyTests(unittest.TestCase):
 
 
 def _rc2016_imports(path, package):
-    """Package-relative files of the rc2016 modules ``path`` imports anywhere (module level or in functions)."""
+    """Package-relative files of the nwo modules ``path`` imports anywhere (module level or in functions)."""
     import ast
     found = set()
     for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
         names = []
-        if isinstance(node, ast.ImportFrom) and (node.module or '').startswith('rc2016'):
+        if isinstance(node, ast.ImportFrom) and (node.module or '').startswith('nwo'):
             names = [node.module] + [node.module + '.' + a.name for a in node.names]
         elif isinstance(node, ast.Import):
-            names = [a.name for a in node.names if a.name.startswith('rc2016')]
+            names = [a.name for a in node.names if a.name.startswith('nwo')]
         for name in names:
             relative = Path(*name.split('.')[1:])
             if (package / relative).with_suffix('.py').exists():
@@ -166,7 +166,7 @@ class RcraReceiptKeyTests(unittest.TestCase):
     """The Rift Apart receipt cache key (viewer_materials.CODE_FILES) covers the code a translation runs and reads."""
 
     def test_key_files_import_only_keyed_readers_or_listed_modules(self):
-        from rc2016.games.rcra import viewer_materials as vm
+        from nwo.games.rcra import viewer_materials as vm
         package = Path(vm.__file__).resolve().parents[2]
         known = set(vm.CODE_FILES) | set(vm.READERS) | set(vm.NOT_TRANSLATION)
         for name in vm.CODE_FILES + vm.READERS + vm.NOT_TRANSLATION:
@@ -180,8 +180,8 @@ class RcraReceiptKeyTests(unittest.TestCase):
     def test_translation_runs_only_keyed_code(self):
         """Every function that runs while materials translate (cache off) is in CODE_FILES or READERS."""
         import sys
-        from rc2016.games.rcra import viewer_materials as vm
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra import viewer_materials as vm
+        from nwo.games.rcra.source import RcraSource
         package = Path(vm.__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as folder:
             source = RcraSource(os.environ['RCRA_GAME'], Path(folder) / 'out')

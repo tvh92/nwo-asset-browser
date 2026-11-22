@@ -3,17 +3,17 @@ import hashlib,importlib.util,json,math,os,unittest
 from pathlib import Path
 from unittest.mock import patch
 from tests.test_two_color_metal import SourceAssetFakeArchive,source_value
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT,PARALLAX_HEIGHT_TEXTURE_UNIT
-from rc2016.formats.materials import viewer_graph_rule,_viewer_rule_wins_translation
-from rc2016.shaders.families import graph_parameter_tables
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT,PARALLAX_HEIGHT_TEXTURE_UNIT
+from nwo.formats.materials import viewer_graph_rule,_viewer_rule_wins_translation
+from nwo.shaders.families import graph_parameter_tables
 GRAPH='materialgraph/global/basic_parallax_occlusion/basic_parallax_occlusion.materialgraph'
 SLOTS={'_c':0x49A7866BABDAD780,'_g':0x49A7866B1576D848,'_n':0x49A7866B7AE34E7A,'_parallax_height':0x49A7866BB521DFCB}
 ARCHIVE = Path(__file__).resolve().parents[1] / 'Research' / '2026-10-22_from-PS4-animation-pipeline'
 
 class RouteTests(unittest.TestCase):
  def test_explicit_exceptional_parameter_policy(self):
-  from rc2016.viewer.viewport import parallax_preview_parameters_valid
+  from nwo.viewer.viewport import parallax_preview_parameters_valid
   self.assertTrue(parallax_preview_parameters_valid({'height_scale':-.2,'steps_front':8,'steps_grazing':16}))
   self.assertTrue(parallax_preview_parameters_valid({'height_scale':0.}))
   for key,val in [('height_scale',float('nan')),('fade',float('inf')),('steps_front',0.),('steps_grazing',-1.),('steps_front',2147483648.)]:

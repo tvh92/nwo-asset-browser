@@ -6,9 +6,9 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT, OPAQUE_UNIFORMS
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT, OPAQUE_UNIFORMS
 from tests.test_clank_antenna import extract as clank_extract
 from tests.test_viewer_textures import FakeArchive, dat1
 
@@ -26,8 +26,8 @@ def extract(graph, rows):
         dict(key_hash=k, size=4 * len(v) if isinstance(v, tuple) else 4,
              raw_hex=struct.pack('<%df' % (len(v) if isinstance(v, tuple) else 1), *(v if isinstance(v, tuple) else (v,))).hex())
         for k, v in rows.items()])
-    with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in rows]], {})),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+    with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in rows]], {})),
+          patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
         return tp.material_texture_paths(archive, 'm/a.material')
 
 

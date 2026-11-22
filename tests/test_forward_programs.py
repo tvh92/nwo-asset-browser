@@ -9,7 +9,7 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.research.forward_programs import forward_resource_usage, split_material_apis
+from nwo.research.forward_programs import forward_resource_usage, split_material_apis
 
 BASIC_SKIN = 'materialgraph/global/basic_skin/basic_skin.materialgraph'
 NEWSSS = 'materialgraph/global/basic_skin/test_basic_skin_05_newsss_03.materialgraph'
@@ -39,7 +39,7 @@ class ForwardProgramArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', research))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -48,15 +48,15 @@ class ForwardProgramArchiveTests(unittest.TestCase):
             cls.archive.close()
 
     def data(self, path):
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         return asset_bytes(self.archive, path)
 
     def graphs_of(self, material_path):
-        from rc2016.formats.index import references
+        from nwo.formats.index import references
         return [r['path'] for r in references(self.data(material_path)) if r['path'].endswith('.materialgraph')]
 
     def shader_ids(self, graph_path):
-        from rc2016.shaders.translator import pixel_programs
+        from nwo.shaders.translator import pixel_programs
         return [p['shader_id'] for p in pixel_programs(self.data(graph_path))]
 
     def test_f0cd85ff_belongs_to_basic_skin_only_not_to_the_ratchet_body_or_head(self):
@@ -81,9 +81,9 @@ class ForwardProgramArchiveTests(unittest.TestCase):
                          ['0xa36a97cb', '0x11408de9', '0xe3f59633', '0xae044d65', '0xf900d315', '0x55a74034'])
 
     def test_fur_shell_materials_name_no_graph_no_slots_no_parameters_and_carry_the_fur_flag(self):
-        from rc2016.formats.index import references
-        from rc2016.formats.materials import MATERIAL_TEXTURE_SLOTS, extract_material_parameters, texture_slot_records
-        from rc2016.viewer.textures import FUR_SHELL_FLAG, material_flags
+        from nwo.formats.index import references
+        from nwo.formats.materials import MATERIAL_TEXTURE_SLOTS, extract_material_parameters, texture_slot_records
+        from nwo.viewer.textures import FUR_SHELL_FLAG, material_flags
         for path in FUR:
             with self.subTest(material=path):
                 data = self.data(path)
@@ -119,8 +119,8 @@ class ForwardProgramArchiveTests(unittest.TestCase):
 
     def test_face_parts_material_slots_versus_the_contract(self):
         # API 7 (sss normal) and API 8 (sss map) are bound by default_pink_shader textures; API 13 is a graph default.
-        from rc2016.formats.materials import GRAPH_TEXTURE_SLOTS, MATERIAL_TEXTURE_SLOTS, texture_slot_records
-        from rc2016.shaders.bindings import pass_contracts
+        from nwo.formats.materials import GRAPH_TEXTURE_SLOTS, MATERIAL_TEXTURE_SLOTS, texture_slot_records
+        from nwo.shaders.bindings import pass_contracts
         contract = pass_contracts(self.data(NEWSSS))[0]
         material = {r['slot_key']: r['path'] for r in texture_slot_records(self.data(FACE_PARTS), MATERIAL_TEXTURE_SLOTS)}
         by_api = {5 + i: (r['slot_key'], r['flag'], material.get(r['slot_key'])) for i, r in enumerate(contract['resources'])}

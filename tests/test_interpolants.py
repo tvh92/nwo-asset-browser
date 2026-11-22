@@ -2,9 +2,9 @@
 import struct
 import unittest
 
-from rc2016.shaders import gcn
-from rc2016.shaders.interpolants import interpolant_sources, shader_headers
-from rc2016.shaders.translator import SHADER_SECTION
+from nwo.shaders import gcn
+from nwo.shaders.interpolants import interpolant_sources, shader_headers
+from nwo.shaders.translator import SHADER_SECTION
 
 
 def opcode(table, name):
@@ -70,7 +70,7 @@ class RotatedStreamAttributeTests(unittest.TestCase):
     """Only a per-draw matrix applied to one vertex stream is read as a transformed stream."""
 
     def setUp(self):
-        from rc2016.shaders.ir import DAG
+        from nwo.shaders.ir import DAG
         self.ir = DAG()
 
     def stream(self, s):
@@ -96,7 +96,7 @@ class RotatedStreamAttributeTests(unittest.TestCase):
 
     def check(self, channels):
         from unittest import mock
-        from rc2016.shaders import interpolants
+        from nwo.shaders import interpolants
         headers = [dict(type=interpolants.PIXEL, inputs=[dict(semantic=15), dict(semantic=17)]),
                    dict(type=1, header_offset=0, layout='verified', exports=[dict(semantic=17, slot=2)])]
         with mock.patch.object(interpolants, 'shader_headers', return_value=headers), \
@@ -157,8 +157,8 @@ class RotatedStreamAttributeTests(unittest.TestCase):
 class SquaredStreamTests(unittest.TestCase):
     def test_flag_path_to_a_squared_vertex_stream_is_found(self):
         from unittest import mock
-        from rc2016.shaders import interpolants
-        from rc2016.shaders.ir import DAG
+        from nwo.shaders import interpolants
+        from nwo.shaders.ir import DAG
         ir = DAG()
         w = ir.node('input', name='vertex.semantic5.w', kind='vertex_input', semantic=5, channel=3)
         flag = ir.node('input', name='runtime_flag@8', kind='runtime_flag')
@@ -180,7 +180,7 @@ class VectorIdentityTests(unittest.TestCase):
     """Linear forms say which stream and matrix make a normalised vector, per flag path."""
 
     def setUp(self):
-        from rc2016.shaders.ir import DAG
+        from nwo.shaders.ir import DAG
         self.ir = ir = DAG()
         self.stream = lambda s: [ir.node('input', name=f'vertex.semantic{s}.{c}', kind='vertex_input',
                                          semantic=s, channel=j) for j, c in enumerate('xyz')]
@@ -202,7 +202,7 @@ class VectorIdentityTests(unittest.TestCase):
         return [ir.op('mul', scale, v) for v in vector]
 
     def test_matrix_and_stream_are_named_before_normalisation(self):
-        from rc2016.shaders.interpolants import vector_identity
+        from nwo.shaders.interpolants import vector_identity
         groups = vector_identity(self.ir, self.normalise(self.transform(self.stream(1), 16)))
         self.assertEqual(len(groups), 1)
         settings, parts, atoms = groups[0]
@@ -212,13 +212,13 @@ class VectorIdentityTests(unittest.TestCase):
         self.assertTrue(any(a.startswith('rsqrt#') for a in atoms))
 
     def test_two_normalised_vectors_from_different_streams_differ(self):
-        from rc2016.shaders.interpolants import vector_identity
+        from nwo.shaders.interpolants import vector_identity
         first = vector_identity(self.ir, self.normalise(self.transform(self.stream(1), 16)))[0][1]
         second = vector_identity(self.ir, self.normalise(self.transform(self.stream(2), 16)))[0][1]
         self.assertNotEqual(first, second)
 
     def test_runtime_flag_paths_are_reported_separately(self):
-        from rc2016.shaders.interpolants import vector_identity
+        from nwo.shaders.interpolants import vector_identity
         ir = self.ir
         flag = ir.node('input', name='runtime_flag@40', kind='runtime_flag')
         world = self.transform(self.stream(1), 16)
@@ -231,14 +231,14 @@ class VectorIdentityTests(unittest.TestCase):
         self.assertIn('CB1[32]', forms['40=0'])
 
     def test_report_lists_inputs_and_attribute_forms(self):
-        from rc2016.shaders.interpolants import attribute_report
+        from nwo.shaders.interpolants import attribute_report
         lines = attribute_report(graph([(5, 4, 4)], [(9, 0), (10, 1)], [10, 9]))
         self.assertIn('vertex 0x1234abcd: inputs semantic5[4]; exports semantic9->param0, semantic10->param1', lines)
         self.assertIn('attribute1 (PS semantics [9])', lines)
         self.assertIn('    x = vertex.semantic5.x', lines)
 
     def test_unresolved_loads_are_named_by_register_and_byte(self):
-        from rc2016.shaders.interpolants import linear_form, format_form
+        from nwo.shaders.interpolants import linear_form, format_form
         ir = self.ir
         words = [ir.node('unsupported', [], reason='Unresolved scalar memory load', offset=40, word=j,
                          base=8, load_offset=64) for j in range(2)]
@@ -246,7 +246,7 @@ class VectorIdentityTests(unittest.TestCase):
                          'mem(s8+64)@40 - mem(s8+68)@40')
 
     def test_many_flags_expand_symbolically_to_the_same_paths(self):
-        from rc2016.shaders.interpolants import vector_identity
+        from nwo.shaders.interpolants import vector_identity
         ir = self.ir
         flag = ir.node('input', name='runtime_flag@40', kind='runtime_flag')
         world = self.transform(self.stream(1), 16)
@@ -257,7 +257,7 @@ class VectorIdentityTests(unittest.TestCase):
         self.assertEqual(enumerated, symbolic)
 
     def test_flag_logic_is_exact_on_zero_one_values(self):
-        from rc2016.shaders.interpolants import linear_form, format_form
+        from nwo.shaders.interpolants import linear_form, format_form
         ir = self.ir
         f, g = (ir.node('input', name=f'runtime_flag@{k}', kind='runtime_flag') for k in (1, 2))
         either = ir.op('max', f, g)

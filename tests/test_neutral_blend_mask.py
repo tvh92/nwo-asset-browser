@@ -1,9 +1,9 @@
 """Explicit neutral-mask review inputs never make native materials ready."""
 import unittest
 from unittest.mock import patch
-from rc2016.shaders import bindings
-from rc2016.shaders.ir import DAG
-from rc2016.viewer.native_glsl import evaluate_surface
+from nwo.shaders import bindings
+from nwo.shaders.ir import DAG
+from nwo.viewer.native_glsl import evaluate_surface
 
 def fixture(*,experimental=True,channel=0,key=bindings.BLEND_MASK_SLOT[0],type_hash=bindings.BLEND_MASK_SLOT[1],override=True,path=None):
     ir=DAG();u=ir.node('input',name='attribute0.0',kind='attribute',attribute=0,channel=0);v=ir.node('input',name='attribute0.1',kind='attribute',attribute=0,channel=1)
@@ -13,7 +13,7 @@ def fixture(*,experimental=True,channel=0,key=bindings.BLEND_MASK_SLOT[0],type_h
     program={'_lowered':dict(nodes=ir.nodes,outputs=dict(albedo=[root]*3,F0=[zero]*3,gloss=zero,emission=zero),normal=None,limitations=[])}
     graphrow=dict(slot_key=key,type_hash=type_hash,flag=1,path=path)
     overrides=[dict(graphrow)] if override else []
-    with patch('rc2016.formats.materials.texture_slot_records',return_value=overrides),patch.object(bindings,'_parameter_values',return_value=({},[])):
+    with patch('nwo.formats.materials.texture_slot_records',return_value=overrides),patch.object(bindings,'_parameter_values',return_value=({},[])):
         return bindings._bind(program,dict(resources=[graphrow],index=0),b'material',{},experimental,(),{(3,3):(5,3)})
 
 class NeutralMaskTests(unittest.TestCase):

@@ -1,8 +1,8 @@
 """Shadow casters stay complete when camera culling compacts instance buffers."""
 import unittest
 
-from rc2016.viewer.shading import LIGHTING_UNIFORMS
-from rc2016.levels.viewport import LevelViewport, BASIS
+from nwo.viewer.shading import LIGHTING_UNIFORMS
+from nwo.levels.viewport import LevelViewport, BASIS
 from tests.test_perf_wp5 import bare_view, translation_rows, FakeGL
 
 

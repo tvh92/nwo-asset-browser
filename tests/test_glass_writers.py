@@ -8,11 +8,11 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.formats.links import EXACT, rule_coverage
-from rc2016.formats.materials import final_shader_status, viewer_graph_rule
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.formats.links import EXACT, rule_coverage
+from nwo.formats.materials import final_shader_status, viewer_graph_rule
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 from tests.test_viewer_textures import FakeArchive, dat1, flags
 
 BASIC = 'materialgraph/global/basic_glass/basic_glass.materialgraph'
@@ -40,8 +40,8 @@ def extract(graph, defaults, material_rows, flag_word, opacity=255):
     mat = dat1([graph], lambda at: [(tp.MATERIAL_FLAGS_SECTION, state[:22] + bytes((opacity,)) + state[23:])])
     archive = FakeArchive({'m/glass.material': ('material', mat), graph: ('materialgraph', dat1([], lambda at: []))})
     params = dict(parameters=[], unsupported_parameters=material_rows)
-    with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+    with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+          patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
         return archive, tp.material_texture_paths(archive, 'm/glass.material'), params
 
 
@@ -211,8 +211,8 @@ class GlassRuleTests(unittest.TestCase):
                  (CG02, CG02_DEFAULTS, [row(P3, 0.8)], 0x39, 'glass_cg02'))
         for graph, defaults, rows, flag_word, key in cases:
             archive, _, params = extract(graph, defaults, rows, flag_word)
-            with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-                  patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+            with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+                  patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
                 rule = viewer_graph_rule(archive, 'm/glass.material', set())
             self.assertTrue(rule['applies'], key)
             self.assertEqual((rule['ported'], rule['unported']), ([key], []))
@@ -274,7 +274,7 @@ class GlassValidationTests(unittest.TestCase):
 
     def test_blender_front_end_builds_the_nodes_the_validator_requires(self):
         import pathlib
-        text = (pathlib.Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (pathlib.Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_glass')[1].split('def apply_viewer_graph_rule')[0]
         for key, graph, defaults, flag_word in (('glass_basic', BASIC, BASIC_DEFAULTS, 0x3a), ('glass_jn', JN, JN_DEFAULTS, 0x36),
                                                 ('glass_cg02', CG02, CG02_DEFAULTS, 0x39)):
@@ -290,7 +290,7 @@ class GlassValidationTests(unittest.TestCase):
 
     def test_character_glass_group_uses_the_game_fresnel(self):
         import pathlib
-        text = (pathlib.Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (pathlib.Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def build_character_glass_group')[1].split('GLASS_BLEND_BY_FLAGS')[0]
         for term in ('F90 = saturate(60*F0)', 'ShaderNodeBsdfPrincipled', 'Reflection weight = F90', 'Glass tinted reflection R'):
             self.assertIn(term, body)

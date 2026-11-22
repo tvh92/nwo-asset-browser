@@ -1,6 +1,6 @@
 import unittest
 
-from rc2016.app.browser import lod_choices_differ, material_toggles
+from nwo.app.browser import lod_choices_differ, material_toggles
 
 
 def looks(*lod_meshes):
@@ -29,8 +29,8 @@ class BrowserControlsTest(unittest.TestCase):
 class StateFilterTests(unittest.TestCase):
     def test_every_state_a_backend_produces_is_offered(self):
         from pathlib import Path
-        from rc2016.app.batch import PipelineModelCandidate
-        from rc2016.app.window import STATE_FILTERS, AssetBrowserApp
+        from nwo.app.batch import PipelineModelCandidate
+        from nwo.app.window import STATE_FILTERS, AssetBrowserApp
         pipeline = {AssetBrowserApp.record_status(PipelineModelCandidate("id", "a/b.model", previous), Path("out"), exported)[0]
                     for previous in ("", "COMPLETE") for exported in (set(), {"b"})}
         self.assertLessEqual(pipeline, set(STATE_FILTERS["pipeline"]))

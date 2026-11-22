@@ -3,8 +3,8 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.viewer.native_glsl import fragment_source
-from rc2016.viewer.textures import HEALTH_CRATE_GRAPH_SHA256, HEALTH_PANE_DISCARD
+from nwo.viewer.native_glsl import fragment_source
+from nwo.viewer.textures import HEALTH_CRATE_GRAPH_SHA256, HEALTH_PANE_DISCARD
 
 BASE = 'material/environment/global/gameplay/gbl_gp_Crate_Nanotech_01/'
 BODY, PANE = BASE + 'gbl_gp_Crate_Nanotech_01.material', BASE + 'gbl_gp_Crate_Nanotech_Alpah_01.material'
@@ -19,7 +19,7 @@ class HealthCratePaneTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -28,7 +28,7 @@ class HealthCratePaneTests(unittest.TestCase):
             cls.archive.close()
 
     def test_only_the_alpha_over_material_is_a_pane(self):
-        from rc2016.viewer.textures import material_texture_paths
+        from nwo.viewer.textures import material_texture_paths
         pane = material_texture_paths(self.archive, PANE).get('alpha_pane')
         self.assertEqual(pane['graph_sha256'], HEALTH_CRATE_GRAPH_SHA256)
         self.assertEqual((pane['alpha_api'], pane['discard'], pane['opacity']), (5, HEALTH_PANE_DISCARD, 1.0))
@@ -40,7 +40,7 @@ class HealthCratePaneTests(unittest.TestCase):
         self.assertNotIn('alpha_pane', material_texture_paths(self.archive, BODY))
 
     def test_pane_program_writes_c_alpha_and_body_stays_opaque(self):
-        from rc2016.viewer.native_glsl import prepare_material_translation
+        from nwo.viewer.native_glsl import prepare_material_translation
         translation = prepare_material_translation(self.archive, PANE)
         self.assertEqual(translation['status'], 'ready')
         opaque = fragment_source(translation)['source']
@@ -53,8 +53,8 @@ class HealthCratePaneTests(unittest.TestCase):
             fragment_source(translation, alpha_api=9)
 
     def test_rule_does_not_change_the_native_status(self):
-        from rc2016.formats.materials import final_shader_status, viewer_graph_rule
-        from rc2016.viewer.native_glsl import prepare_material_translation
+        from nwo.formats.materials import final_shader_status, viewer_graph_rule
+        from nwo.viewer.native_glsl import prepare_material_translation
         translation = prepare_material_translation(self.archive, PANE)
         bound = {b['path'] for b in translation['texture_bindings']}
         rule = viewer_graph_rule(self.archive, PANE, bound)
@@ -66,7 +66,7 @@ class HealthCratePaneTests(unittest.TestCase):
 
 class HdrResolveBackgroundTests(unittest.TestCase):
     def test_window_puts_the_background_behind_the_glass_in_linear(self):
-        from rc2016.viewer.shading import HDR_RESOLVE_FRAGMENT, HDR_RESOLVE_UNIFORMS
+        from nwo.viewer.shading import HDR_RESOLVE_FRAGMENT, HDR_RESOLVE_UNIFORMS
         self.assertIn('uHdrBackground', HDR_RESOLVE_UNIFORMS)
         # Partly covered pixels: the background enters before the tonemap, not added on top of it.
         self.assertIn('displayBloom(P + (1.0 - cover) * B, bloom)', HDR_RESOLVE_FRAGMENT)

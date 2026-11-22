@@ -2,7 +2,7 @@
 import json,os,struct,unittest
 from pathlib import Path
 from unittest.mock import patch
-from rc2016.viewer import textures as tp
+from nwo.viewer import textures as tp
 from tests.test_viewer_textures import FakeArchive,dat1,slot_rows
 GRAPH='materialgraph/environment/global/gbl_color_tint_01/jn_color_tint_detail_parallax.materialgraph'
 ARCHIVE = Path(__file__).resolve().parents[1] / 'Research' / '2026-10-22_from-PS4-animation-pipeline'
@@ -18,7 +18,7 @@ class TintParallaxTests(unittest.TestCase):
   arc=FakeArchive({GRAPH:('materialgraph',gd),'m/material.material':('material',md)})
   defaults={0xEE0F9FF8:1.,0x93F9F959:.25,0x62835AF9:1.,0x24F4CA4C:1.,0x3BBC1444:.75}
   params=dict(parameters=[],unsupported_parameters=[dict(key_hash=k,size=4,raw_hex=struct.pack('<f',v).hex()) for k,v in [(0xEE0F9FF8,0.),(0x93F9F959,0.),(0x3BBC1444,0.),(0x47F581F6,99.),(0x66EFA55B,20.)]])
-  with patch('rc2016.shaders.families.graph_parameter_tables',return_value=([[dict(key_hash=k) for k in defaults]],defaults)),patch('rc2016.formats.materials.extract_material_parameters',return_value=params):
+  with patch('nwo.shaders.families.graph_parameter_tables',return_value=([[dict(key_hash=k) for k in defaults]],defaults)),patch('nwo.formats.materials.extract_material_parameters',return_value=params):
    e=tp.material_texture_paths(arc,'m/material.material')
   self.assertEqual(e['_g'],'t/real_spec_c.texture');self.assertEqual(e['_parallax_height'],paths[0]);self.assertEqual(e['_tint_detail'],paths[4]);self.assertEqual(e['_h'],paths[5])
   self.assertEqual((e['k'],e['g_mode']),(0.,'grey'));self.assertEqual(e['parallax']['kind'],2);self.assertEqual(e['parallax']['height_scale'],0.);self.assertEqual((e['parallax']['steps_front'],e['parallax']['steps_grazing']),(16.,64.));self.assertEqual(e['tint']['detail_scale'],0.);self.assertEqual(e['tint']['detail_strength'],1.);self.assertEqual(e['tint']['mask_b'],1.);self.assertEqual(e['tint']['palette_blend'],0.)
@@ -33,7 +33,7 @@ class TintParallaxTests(unittest.TestCase):
     h=next(v['value'][0] for v in row['values'] if v['key']=='0xEE0F9FF8');self.assertAlmostEqual(e['parallax']['height_scale'],h)
     self.assertEqual((e['k'],e['g_mode'],e['parallax']['writer']),(0.,'grey','4E4D7894'))
  def test_shared_sampler_and_tint_uv_order_contract(self):
-  from rc2016.viewer import shading
+  from nwo.viewer import shading
   self.assertEqual(shading.PARALLAX_HEIGHT_TEXTURE_UNIT,12);self.assertEqual(shading.TINT_DETAIL_TEXTURE_UNIT,9)
   source=shading.FRAGMENT_SHADER if hasattr(shading,'FRAGMENT_SHADER') else shading.FRAGMENT
   self.assertIn('texture2D(uTexH, materialUV)',source)

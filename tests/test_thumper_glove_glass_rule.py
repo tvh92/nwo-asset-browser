@@ -14,11 +14,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.formats.links import EXACT, rule_coverage
-from rc2016.pipeline.render_state import material_flags
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.formats.links import EXACT, rule_coverage
+from nwo.pipeline.render_state import material_flags
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 
 GRAPH = 'materialgraph/equipment/weapon/wpn_thumper_glove_glass/wpn_thumper_glove_glass.materialgraph'
 MATERIAL = 'material/equipment/weapon/wpn_thumper_glove_glass/wpn_thumper_glove_glass.material'
@@ -120,7 +120,7 @@ class RuleBindingTests(unittest.TestCase):
                 self.assertEqual('VR glass normal strength' in names, textured)
                 self.assertEqual(roles, ['_n', '_pick'] if textured else [])
                 self.assertEqual(expected['VR glass glow colour'], (0.39613863825798035, 2.0, 0.0))
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_glass')[1].split('def apply_viewer_graph_rule')[0]
         for name in ('glass tint', 'glass rim bias', 'glass body', 'glass tiling', 'glass f0 base', 'glass gloss', 'glass normal strength',
                      'glass rim exp', 'glass glow colour', 'glass amplitude', 'glass pattern map', 'glass noise map A', 'glass noise map B',
@@ -136,8 +136,8 @@ class ArchiveProgramTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders import translator
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders import translator
         cls.archive = open_archive(root)
         cls.graph = asset_bytes(cls.archive, GRAPH)
         cls.programs = {p['shader_id']: p for p in translator.pixel_programs(cls.graph)}
@@ -157,7 +157,7 @@ class ArchiveProgramTests(unittest.TestCase):
 
     def test_loop_body_is_the_one_of_basic_glass(self):
         import difflib
-        from rc2016.research.forward_loops import loop_body_tokens
+        from nwo.research.forward_loops import loop_body_tokens
         a, b = loop_body_tokens(self.basic['0x4fc5703f']), loop_body_tokens(self.programs['0x5226f404'])
         names_a, names_b = [t[0] for t in a], [t[0] for t in b]
         matcher = difflib.SequenceMatcher(None, names_a, names_b, autojunk=False)
@@ -177,7 +177,7 @@ class ArchiveProgramTests(unittest.TestCase):
             self.assertEqual({first[1][0], second[1][0]}, {106, 107})
 
     def test_material_only_terms_match_the_program_numerically(self):
-        from rc2016.research import forward_loops as loops
+        from nwo.research import forward_loops as loops
         compiler = loops.compile_opaque(self.programs['0x5226f404'])
         self.assertEqual([(l['target'], l['branch']) for l in compiler.loops], [(1528, 4176), (12364, 12464)])
         roots, subs = loops.bind_frozen(compiler)
@@ -205,7 +205,7 @@ class ArchiveProgramTests(unittest.TestCase):
             self.assertLess(error, 5e-7, key)
 
     def test_tint_and_glow_terms_of_the_final_colour(self):
-        from rc2016.research import forward_loops as loops
+        from nwo.research import forward_loops as loops
         compiler = loops.compile_opaque(self.programs['0x5226f404'])
         roots, _ = loops.bind_frozen(compiler)
         ir, nodes = compiler.ir, compiler.ir.nodes
@@ -231,7 +231,7 @@ class ArchiveProgramTests(unittest.TestCase):
 
     def test_captured_pass_words_and_instance_flags(self):
         # Captured: CB0[135] = 0x40 (G-buffer and depth-equal passes) and 0x2 (blended pass); instance flags 0x261.
-        from rc2016.research import forward_loops as loops
+        from nwo.research import forward_loops as loops
         compiler = loops.compile_opaque(self.programs['0x5226f404'])
         ir = compiler.ir
         reads = lambda node: {n for n in loops.dependencies(ir, node) if n.startswith('CB0')}
@@ -248,14 +248,14 @@ class ArchiveProgramTests(unittest.TestCase):
         self.assertEqual(['CB0[115]' in reads(captured[c]) for c in range(3)], [True, True, False])   # K.b = 0
 
     def test_second_program_is_the_variant_without_the_pattern_normal(self):
-        from rc2016.research import forward_loops as loops
-        from rc2016.shaders.bindings import pass_contracts
+        from nwo.research import forward_loops as loops
+        from nwo.shaders.bindings import pass_contracts
         contracts = pass_contracts(self.graph)
         self.assertEqual([len(c['resources']) for c in contracts], [4, 3])
         self.assertEqual([c['table'][0]['key_hash'] for c in contracts], [0x79120089, 0x4B4DAB19])
         self.assertNotIn(0xCC7457CD, [e['key_hash'] for e in contracts[1]['table']])
         usage = {p['shader_id']: p for p in self.programs.values()}
-        from rc2016.research.forward_programs import forward_resource_usage
+        from nwo.research.forward_programs import forward_resource_usage
         first = forward_resource_usage(self.graph, '0x5226f404')['texture_apis']
         second = forward_resource_usage(self.graph, '0x1d429528')['texture_apis']
         self.assertEqual(sorted(a for a in first if 5 <= a < 32), [5, 6, 7, 8])
@@ -268,7 +268,7 @@ class ArchiveProgramTests(unittest.TestCase):
         forward = paths['forward']
         p = forward['params']
         # flags word 0x00200234 says opaque; the captured draw blends (SRC_ALPHA, ONE_MINUS_SRC_ALPHA), so the rule does too
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         self.assertEqual(material_flags(data=asset_bytes(self.archive, MATERIAL)), 0x00200234)
         self.assertEqual((forward['kind'], forward['writer'], forward['blend'], forward['two_sided'], forward['blend_source']),
                          ('glass_thumper', '5226F404', 'alpha_over', True, 'captured draw state'))

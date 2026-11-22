@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 import unittest
 
-from rc2016.app.window import AssetBrowserApp
+from nwo.app.window import AssetBrowserApp
 
 
 class CopyModelTextTests(unittest.TestCase):

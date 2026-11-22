@@ -7,9 +7,9 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT, OPAQUE_UNIFORMS
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT, OPAQUE_UNIFORMS
 
 CLAW_PAINT = 'material/environment/deplanetizer/architecture/dep_arch_ext_claw_paint_01/rv_dep_arch_ext_claw_paint_01.material'
 EYELASHES = 'material/character/npc/npc_elaris_eyelashes/npc_elaris_eyelashes.material'
@@ -23,7 +23,7 @@ class SyntheticTests(unittest.TestCase):
         self.assertIn('uPaneOpacity', OPAQUE_UNIFORMS)
 
     def test_native_pane_applies_the_opacity(self):
-        from rc2016.viewer import native_glsl
+        from nwo.viewer import native_glsl
         surface = dict(declarations='', body='', samplers=[dict(api=5, uniform='uNativeTex5')], key=())
         original = native_glsl.emit_surface
         native_glsl.emit_surface = lambda *a, **k: dict(surface)
@@ -57,7 +57,7 @@ class ArchiveTests(unittest.TestCase):
         research = os.environ.get('RC2016_RESEARCH')
         if not research:
             raise unittest.SkipTest('RC2016_RESEARCH is required')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(Path(research))
 
     @classmethod
@@ -81,7 +81,7 @@ class ArchiveTests(unittest.TestCase):
         self.assertNotIn('alpha_pane', tp.material_texture_paths(self.archive, METAL_TILE))   # opaque flags 0x230
 
     def test_rule_ports_the_pane(self):
-        from rc2016.formats.materials import viewer_graph_rule
+        from nwo.formats.materials import viewer_graph_rule
         rule = viewer_graph_rule(self.archive, CLAW_PAINT)
         self.assertIn('alpha_pane', rule['ported'])
         self.assertEqual(rule['terms']['alpha_pane']['opacity'], 112 / 255)

@@ -32,7 +32,7 @@ $BlenderPath = (Resolve-Path -LiteralPath $BlenderPath).Path
 $ps4Python = @(Get-ChildItem -LiteralPath (Split-Path -Parent $BlenderPath) -Directory |
     ForEach-Object { Join-Path $_.FullName 'python\bin\python.exe' } | Where-Object { Test-Path -LiteralPath $_ })
 if ($ps4Python.Count -ne 1) { throw 'Cannot find the Python runtime bundled with the selected Blender installation.' }
-$ps4Arguments = @('-B', (Join-Path $PSScriptRoot '..\rc2016\pipeline\run.py'), '--extracted-root', $ExtractedRoot,
+$ps4Arguments = @('-B', (Join-Path $PSScriptRoot '..\nwo\pipeline\run.py'), '--extracted-root', $ExtractedRoot,
     '--output-root', $OutputRoot, '--blender', $BlenderPath)
 if ($HdriPath) { $ps4Arguments += @('--hdri', $HdriPath) }
 if ($LightingConfig) { $ps4Arguments += @('--lighting-config', $LightingConfig) }

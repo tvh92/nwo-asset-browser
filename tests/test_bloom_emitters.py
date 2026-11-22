@@ -1,7 +1,7 @@
 """Which materials make a frame use the float target, so the decoded bloom glows around their emission."""
 import unittest
 
-from rc2016.viewer.viewport import ModelViewport, self_lit_entry
+from nwo.viewer.viewport import ModelViewport, self_lit_entry
 
 
 def translation(emission):

@@ -1,4 +1,4 @@
-"""Probe-volume reflection of the window glass (rc2016.levels.probe_volume; synthetic cells, no GL).
+"""Probe-volume reflection of the window glass (nwo.levels.probe_volume; synthetic cells, no GL).
 
 The archive tests read the game archive (RC2016_RESEARCH) and skip without it; the capture test also needs the saved
 capture in Research/ and skips when it is absent."""
@@ -10,17 +10,17 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.levels import lightgrid as lg
-from rc2016.levels import probe_volume as pv
-from rc2016.levels.probe_lighting import face_direction
-from rc2016.viewer import shading
+from nwo.levels import lightgrid as lg
+from nwo.levels import probe_volume as pv
+from nwo.levels.probe_lighting import face_direction
+from nwo.viewer import shading
 
 ROOT = Path(__file__).resolve().parents[1]
 NOVALIS_ZONE = 'levels/novalis/openarea/openworld/default_region/lighting.zone'
 
 
 def dat1(sections, tail=b''):
-    """A DAT1 container with the given {label: bytes} sections followed by ``tail`` (rc2016.levels.zone_format layout)."""
+    """A DAT1 container with the given {label: bytes} sections followed by ``tail`` (nwo.levels.zone_format layout)."""
     table = 16 + 12 * len(sections)
     body, entries = b'', []
     for label, payload in sections.items():
@@ -278,7 +278,7 @@ class ShaderTests(unittest.TestCase):
 class NovalisArchiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         try:
             cls.archive = open_archive(Path(os.environ['RC2016_RESEARCH']))
             cls.grid = lg.level_lightgrid(cls.archive, [NOVALIS_ZONE])

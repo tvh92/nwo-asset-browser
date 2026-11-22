@@ -6,9 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from rc2016.levels.actor_format import IDENTITY
-from rc2016.levels.actors import ActorCatalog, actor_groups, _references, KNOWN_UNSUPPORTED, AMBIGUOUS_PLACEMENT
-from rc2016.levels.viewport import LevelViewport
+from nwo.levels.actor_format import IDENTITY
+from nwo.levels.actors import ActorCatalog, actor_groups, _references, KNOWN_UNSUPPORTED, AMBIGUOUS_PLACEMENT
+from nwo.levels.viewport import LevelViewport
 
 
 def actor(model='object.model'):
@@ -107,7 +107,7 @@ class LayerTests(unittest.TestCase):
     def test_preview_toggle_invalidates_cached_draws_and_batches_independently(self):
         from array import array
         from types import SimpleNamespace
-        from rc2016.levels.viewport import LevelViewport
+        from nwo.levels.viewport import LevelViewport
         static, placed, spawn = (array('f', IDENTITY) for _ in range(3))
         placed[12], spawn[12] = 8., 16.
         model = dict(zones=[('art',(False,()),static)], actor_zones=[('game',(False,()),placed)],
@@ -140,7 +140,7 @@ class LoaderTests(unittest.TestCase):
         import queue
         import threading
         from unittest.mock import patch
-        from rc2016.levels import panel, scene, actors as module
+        from nwo.levels import panel, scene, actors as module
         a=actor('object.model');b=actor('Object.model');b['id']='0000000000000002'
         c=catalog(a);c.actors.append(b)
         c.add_zone=lambda *args:2
@@ -164,7 +164,7 @@ class LoaderTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('RC2016_RESEARCH'),'set RC2016_RESEARCH for archive checks')
 class ArchiveTests(unittest.TestCase):
     def test_crate_zone_has_structural_primary_bindings(self):
-        from rc2016.levels.scene import open_archive, zone_scene
+        from nwo.levels.scene import open_archive, zone_scene
         root=Path(os.environ['RC2016_RESEARCH'])
         archive=open_archive(root)
         try:

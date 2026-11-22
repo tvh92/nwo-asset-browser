@@ -34,8 +34,8 @@ The program reads no light, probe or shadow input. The electricity coordinate is
 
 ## In the viewer and Blender
 
-- Viewer (`rc2016/viewer/shading.py` `GLASS_FRAGMENT`, `uKind` 25): the three images sit on the window texture units (roles `_window_mask`, `_window_n1`, `_window_n2`); the frame blends in the float scene target and is tonemapped once, as the game blends it in its HDR target. The static values are the captured frame's `A`, `t` and `r`; while a clip plays, `t` is the effect clock and `r` the `frame_fade` stand-in (the engine's generator of `CB0[107]` is unknown, so the bolt changes channel and offset each 30 Hz frame but not in the game's sequence). Fog is the viewer fog (`F` = 1).
-- Blender (`rc2016/pipeline/game_shader.py`): the same terms as nodes into an emission shader, alpha-over and back-face culled; the nodes "VR glass time" and "VR glass frame random" can be driven to animate.
+- Viewer (`nwo/viewer/shading.py` `GLASS_FRAGMENT`, `uKind` 25): the three images sit on the window texture units (roles `_window_mask`, `_window_n1`, `_window_n2`); the frame blends in the float scene target and is tonemapped once, as the game blends it in its HDR target. The static values are the captured frame's `A`, `t` and `r`; while a clip plays, `t` is the effect clock and `r` the `frame_fade` stand-in (the engine's generator of `CB0[107]` is unknown, so the bolt changes channel and offset each 30 Hz frame but not in the game's sequence). Fog is the viewer fog (`F` = 1).
+- Blender (`nwo/pipeline/game_shader.py`): the same terms as nodes into an emission shader, alpha-over and back-face culled; the nodes "VR glass time" and "VR glass frame random" can be driven to animate.
 
 ## Not a material difference
 

@@ -9,9 +9,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from rc2016.games.rcra import animation as ra
-from rc2016.games.rcra.clip_library import RcraAnimationLibrary
-from rc2016.viewer.animation import AnimationLibrary, layer_over, on_rest
+from nwo.games.rcra import animation as ra
+from nwo.games.rcra.clip_library import RcraAnimationLibrary
+from nwo.viewer.animation import AnimationLibrary, layer_over, on_rest
 
 GAME = os.environ.get('RCRA_GAME')
 
@@ -90,7 +90,7 @@ PATHS = ['set/base_a.animclip', 'set/layer_l.animclip', 'set/base_b.animclip']
 def graph_animset():
     """One class: blend space @344 (root, bound to variable 0xABCD) over [pair @288, group clip @192]; the pair adds
     layer L (@96) over base A (@0) at weight 0.5; the group holds base B. A second, empty class."""
-    from rc2016.games.rcra.toc import path_crc64_many
+    from nwo.games.rcra.toc import path_crc64_many
     a, l_, b = (int(i) for i in path_crc64_many(PATHS))
     clip = lambda ref, flags=0: node(0x10, 1 | flags << 8, struct.pack('<II', 0, ref) + bytes(48))  # noqa: E731
     data = (clip(0x1111) + clip(0x2222, 1) + clip(0x3333)
@@ -141,7 +141,7 @@ class DriverGraphTests(unittest.TestCase):
                      for p in PATHS]
         lib._partners = None
         lib.source = SimpleNamespace(bytes=lambda key: (asset, None))
-        import rc2016.games.rcra.clip_library as cl
+        import nwo.games.rcra.clip_library as cl
         saved = cl._key
         cl._key = lambda source, path: path
         try:
@@ -160,8 +160,8 @@ class RealPartnerTests(unittest.TestCase):
     def test_thug_aim_layer_over_its_idle(self):
         import numpy as np
 
-        from rc2016.games.rcra.clip_library import animation_library
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.clip_library import animation_library
+        from nwo.games.rcra.source import RcraSource
         with tempfile.TemporaryDirectory() as tmp:
             source = RcraSource(GAME, str(Path(tmp) / 'out'))
             try:

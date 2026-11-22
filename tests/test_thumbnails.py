@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 import zlib
 
-from rc2016.app import thumbnails as th
+from nwo.app import thumbnails as th
 
 
 def decode_png(data):

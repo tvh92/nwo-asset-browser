@@ -1,6 +1,6 @@
 """Rift Apart materialgraph programs through the SM5 translator, on the real install (RCRA_GAME).
 
-The glass check is the automatic path against the hand decode (rc2016/viewer/shading.py, uKind 26) on the trooper dome:
+The glass check is the automatic path against the hand decode (nwo/viewer/shading.py, uKind 26) on the trooper dome:
 real material values and textures, the forward program translated under the neutral engine profile, all lighting zero
 and the per-draw "lit" render flag set, so the colour is the program's emissive term.
 """
@@ -14,9 +14,9 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.games.rcra import material as rmat
-from rc2016.games.rcra import shaders as rshaders
-from rc2016.shaders import sm5
+from nwo.games.rcra import material as rmat
+from nwo.games.rcra import shaders as rshaders
+from nwo.shaders import sm5
 
 GAME = os.environ.get('RCRA_GAME')
 DOME = 'characters/enemy/enm_neo_nefarious_trooper/materials/enm_neo_nefarious_trooper_dome.material'
@@ -28,7 +28,7 @@ RENDER_FLAG_LIT = 0x400   # MatDrawCB.m_RenderFlags: clear, the forward program'
 def rgba(texture):
     """The top mip as float RGBA, sRGB formats linearised as the sampler would."""
     from PIL import Image
-    from rc2016.formats.texture import dds_bytes
+    from nwo.formats.texture import dds_bytes
     fmt = SRGB_AS_UNORM.get(texture['format'], texture['format'])
     image = Image.open(io.BytesIO(dds_bytes(texture['width'], texture['height'], fmt, texture['pixels'])))
     data = np.asarray(image.convert('RGBA'), dtype=np.float32) / 255.0
@@ -78,7 +78,7 @@ def camera_inputs(u, v, N, T, sign, V):
 class RealShaderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 
@@ -103,7 +103,7 @@ class RealShaderTests(unittest.TestCase):
         material = self.asset(DOME, 'material')
         cb2 = rshaders.material_constants(graph, material)
         self.assertEqual([round(x, 4) for x in cb2[:8]], [1.0, 1.0, 0.9, 0.2, 0.5, 1.0, 15.0, 0.4])
-        from rc2016.games.rcra.texture import read_top_mip
+        from nwo.games.rcra.texture import read_top_mip
         units = {name: rgba(read_top_mip(self.source, path, full=False))
                  for name, path in rshaders.material_units(graph, material).items()}
         self.assertEqual(sorted(units), ['textureUnit5', 'textureUnit6', 'textureUnit7', 'textureUnit8'])

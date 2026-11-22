@@ -2,8 +2,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-from rc2016.viewer.loader import SourcePreviewLoader, mesh_payload, presentation_basis
-from rc2016.app.browser import count_clips, group_clips, source_details
+from nwo.viewer.loader import SourcePreviewLoader, mesh_payload, presentation_basis
+from nwo.app.browser import count_clips, group_clips, source_details
 
 class SourcePreviewTests(unittest.TestCase):
     def fixture(self):

@@ -2,8 +2,8 @@
 import struct
 import unittest
 
-from rc2016.shaders import gcn
-from rc2016.shaders.translator import decoder
+from nwo.shaders import gcn
+from nwo.shaders.translator import decoder
 
 
 def sopc(src0, src1):

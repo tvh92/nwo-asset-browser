@@ -7,10 +7,10 @@ is a 32-bit word. Avoid the signed wording in some later AMD ISA revisions.
 import struct
 import unittest
 
-from rc2016.shaders import gcn
-from rc2016.shaders.bindings import PORTABLE_OPS
-from rc2016.shaders.ir import bits, from_bits
-from rc2016.shaders.translator import Compiler, decoder
+from nwo.shaders import gcn
+from nwo.shaders.bindings import PORTABLE_OPS
+from nwo.shaders.ir import bits, from_bits
+from nwo.shaders.translator import Compiler, decoder
 
 
 def vop3(opcode, dst, src, *, abs_mask=0, neg_mask=0, omod=0, clamp=False):

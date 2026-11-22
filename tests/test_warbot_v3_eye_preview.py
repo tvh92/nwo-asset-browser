@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.shaders.bindings import (
+from nwo.shaders.bindings import (
     WARBOT_V3_EYE_SOURCE_PREVIEW as RULE,
     _source_preview_policy,
     validate_source_preview_inputs,
@@ -51,7 +51,7 @@ class WarbotEyeArchiveTests(unittest.TestCase):
         if not research:raise unittest.SkipTest('RC2016_RESEARCH is required')
         root=Path(os.environ.get('RC2016_GAME_ROOT',str(Path(research).parents[1]/'Ratchet & Clank (EUR)'/'Image0')))
         if not root.exists():raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive=open_archive(root)
 
     @classmethod
@@ -59,11 +59,11 @@ class WarbotEyeArchiveTests(unittest.TestCase):
         if hasattr(cls,'archive'):cls.archive.close()
 
     def test_exact_source_writer_parameter_layout_and_bounded_preview(self):
-        from rc2016.formats.index import references
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.bindings import pass_contracts,prepare_translation
-        from rc2016.viewer.native_glsl import evaluate_surface,selected_translation
+        from nwo.formats.index import references
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.bindings import pass_contracts,prepare_translation
+        from nwo.viewer.native_glsl import evaluate_surface,selected_translation
         graph_path=RULE['graph_path'];material_path=RULE['material_path']
         graph_data=asset_bytes(self.archive,graph_path);material_data=asset_bytes(self.archive,material_path)
         graph_paths=[r['path'] for r in references(material_data) if r['path'].endswith('.materialgraph')]

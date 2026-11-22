@@ -2,7 +2,7 @@
 plays the row the arrow keys stop on, and steps to the previous and next clip."""
 import unittest
 
-from rc2016.app.browser import PREVIEW_DELAY_MS, REST_POSE, AssetBrowser, clip_length, step_clip
+from nwo.app.browser import PREVIEW_DELAY_MS, REST_POSE, AssetBrowser, clip_length, step_clip
 
 MARK = "▶  "
 

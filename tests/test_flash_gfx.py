@@ -1,7 +1,7 @@
 import struct
 import unittest
 
-from rc2016.flash import gfx as G
+from nwo.flash import gfx as G
 class BitWriter:
     def __init__(self):
         self.bits = []
@@ -110,7 +110,7 @@ class GfxRenderTests(unittest.TestCase):
 
 class MapExportTests(unittest.TestCase):
     def test_secret_ranges_from_config_strings(self):
-        from rc2016.flash import planet_maps as M
+        from nwo.flash import planet_maps as M
         # Shape of system_<planet>_map.config strings: range ends, condition, state.
         config = (b'\0kVEL_1_16b\0kVEL_1_16b\0kAlways\0kSecret\0kNone\0kVEL_3_02\0kVEL_3_02\0kAlways\0kSecret\0'
                   b'kQUA_1_escape_from_victor\0kVEL_2_01a\0kVEL_2_07\0kIncomplete\0kHidden\0'

@@ -10,8 +10,8 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders import bindings
-from rc2016.shaders.ir import DAG
+from nwo.shaders import bindings
+from nwo.shaders.ir import DAG
 
 
 def bound(api=5):
@@ -143,7 +143,7 @@ class SourceRecordTests(unittest.TestCase):
 
 class ReceiptOutputTests(unittest.TestCase):
     def test_unsupported_receipt_prints_candidate_identity_binding_and_components(self):
-        from rc2016.shaders.census import print_receipt
+        from nwo.shaders.census import print_receipt
         source_record = dict(index=4, file_offset=900, pass_index=0, index_in_pass=4,
                              cb_mask=0x14, resource_mask=0x20,
                              word2_uninterpreted=0xDEADBEEF,
@@ -157,11 +157,11 @@ class ReceiptOutputTests(unittest.TestCase):
                          texture_bindings=[dict(api=5, path='textures/source.texture', source='material')])
         unsupported = dict(status='unsupported', differing_components=['emission'], diagnostics=['Different portable outputs'],
                            candidate_surfaces=[candidate], game_equivalence=False)
-        with patch('rc2016.viewer.native_glsl.prepare_material_translation', return_value=unsupported), \
-             patch('rc2016.viewer.experimental_materials.world_position_translation', return_value=unsupported), \
-             patch('rc2016.viewer.experimental_materials.preview_with_fallback', return_value=unsupported), \
-             patch('rc2016.viewer.textures.material_texture_paths', return_value=[]), \
-             patch('rc2016.viewer.experimental_materials.has_preview', return_value=False):
+        with patch('nwo.viewer.native_glsl.prepare_material_translation', return_value=unsupported), \
+             patch('nwo.viewer.experimental_materials.world_position_translation', return_value=unsupported), \
+             patch('nwo.viewer.experimental_materials.preview_with_fallback', return_value=unsupported), \
+             patch('nwo.viewer.textures.material_texture_paths', return_value=[]), \
+             patch('nwo.viewer.experimental_materials.has_preview', return_value=False):
             from io import StringIO
             import contextlib
             stream = StringIO()

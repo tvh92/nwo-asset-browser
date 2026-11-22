@@ -12,10 +12,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.pipeline.render_state import material_flags
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.pipeline.render_state import material_flags
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 
 GRAPH = 'materialgraph/equipment/weapon/wpn_warmonger_reticle/wpn_warmonger_reticle.materialgraph'
 MATERIAL = 'material/equipment/weapon/wpn_Warmonger_Reticle/wpn_Warmonger_Reticle.material'
@@ -89,7 +89,7 @@ class RuleBindingTests(unittest.TestCase):
         expected = validation._viewer_expected_constants(rule)
         self.assertTrue(set(names) <= set(expected))
         self.assertEqual(roles, ['_n', '_pick'])
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split("elif key == 'warmonger_reticle':")[1].split("elif key == 'window_glass':")[0]
         for name in ('glass time', 'glass fresnel exp', 'glass frame rate', 'glass alpha cut', 'glass alpha scale', 'glass f0 base',
                      'glass colour', 'glass gloss', 'glass reticle cma S5', 'glass reticle cma S6 ring', 'glass reticle cmb S7 flipbook',
@@ -105,8 +105,8 @@ class ArchiveProgramTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders import translator
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders import translator
         cls.archive = open_archive(root)
         cls.graph = asset_bytes(cls.archive, GRAPH)
         cls.program = next(p for p in translator.pixel_programs(cls.graph) if p['shader_id'] == '0x4c184dcc')
@@ -121,7 +121,7 @@ class ArchiveProgramTests(unittest.TestCase):
         self.assertEqual(self.program['code_sha256'], CODE_SHA)
 
     def test_alpha_matches_the_program_numerically(self):
-        from rc2016.research import forward_loops as loops
+        from nwo.research import forward_loops as loops
         compiler = loops.compile_opaque(self.program)
         rng = random.Random(20261101)
         for t in (0.0, 4.2):   # the alpha export does not depend on CB0[99] (only the texture coordinates do)
@@ -136,7 +136,7 @@ class ArchiveProgramTests(unittest.TestCase):
             self.assertLess(worst, 5e-6)
 
     def test_viewer_rule_from_the_archive(self):
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         paths = tp.material_texture_paths(self.archive, MATERIAL)
         forward = paths['forward']
         p = forward['params']

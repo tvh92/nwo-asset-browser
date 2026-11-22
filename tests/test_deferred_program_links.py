@@ -1,7 +1,7 @@
 """Level surface programs link in the material pump, never all at once inside a draw."""
 import unittest
 
-from rc2016.levels.viewport import LevelViewport
+from nwo.levels.viewport import LevelViewport
 
 
 class FakeShading:

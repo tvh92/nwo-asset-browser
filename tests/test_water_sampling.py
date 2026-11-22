@@ -6,7 +6,7 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders.water import (
+from nwo.shaders.water import (
     GLOW_GRAPH,
     GLOW_GRAPH_SHA256,
     GLOW_WRITERS,
@@ -59,7 +59,7 @@ class WaterSamplingArchiveTests(unittest.TestCase):
         research = os.environ.get('RC2016_GAME_ROOT') or os.environ.get("RC2016_RESEARCH")
         if not research:
             raise unittest.SkipTest("RC2016_RESEARCH is not configured")
-        from rc2016.formats.archive import Archive, locate, asset_data
+        from nwo.formats.archive import Archive, locate, asset_data
 
         cls.archive = Archive(locate(Path(research)),
                               Path(__file__).resolve().parents[1] / ".cache/water-sampling-test",
@@ -80,14 +80,14 @@ class WaterSamplingArchiveTests(unittest.TestCase):
             raise unittest.SkipTest("water graph/material pair is not indexed in this archive")
 
     def source_pair(self, graph_path, material_path):
-        from rc2016.shaders.water import water_sampling_rule
+        from nwo.shaders.water import water_sampling_rule
 
         graph = self.asset_data(self.archive, self.archive.resolve(graph_path)[0])
         material = self.asset_data(self.archive, self.archive.resolve(material_path)[0])
         return graph, material, water_sampling_rule(graph, material)
 
     def test_archive_materials_resolve_instance_displacement_and_graph_slots(self):
-        from rc2016.shaders.water import water_sampling_rule
+        from nwo.shaders.water import water_sampling_rule
 
         for graph_path, material_path in self.graph_materials:
             graph = self.asset_data(self.archive, self.archive.resolve(graph_path)[0])
@@ -108,8 +108,8 @@ class WaterSamplingArchiveTests(unittest.TestCase):
             self.assertTrue(any("normal composition" in text for text in row["limitations"]))
 
     def test_material_override_path_wins_and_conflicts_fail_closed(self):
-        from rc2016.formats import materials as material_format
-        from rc2016.shaders.water import water_sampling_rule
+        from nwo.formats import materials as material_format
+        from nwo.shaders.water import water_sampling_rule
 
         graph_path, material_path = self.graph_materials[0]
         graph = self.asset_data(self.archive, self.archive.resolve(graph_path)[0])
@@ -137,8 +137,8 @@ class WaterSamplingArchiveTests(unittest.TestCase):
                 water_sampling_rule(graph, material)
 
     def test_material_must_reference_the_exact_source_graph(self):
-        from rc2016.formats import index as index_format
-        from rc2016.shaders.water import water_sampling_rule
+        from nwo.formats import index as index_format
+        from nwo.shaders.water import water_sampling_rule
 
         graph_path, material_path = self.graph_materials[0]
         graph = self.asset_data(self.archive, self.archive.resolve(graph_path)[0])
@@ -150,8 +150,8 @@ class WaterSamplingArchiveTests(unittest.TestCase):
             water_sampling_rule(graph + b"changed", material)
 
     def test_explicit_empty_required_texture_slot_fails_closed(self):
-        from rc2016.formats import materials as material_format
-        from rc2016.shaders.water import water_sampling_rule
+        from nwo.formats import materials as material_format
+        from nwo.shaders.water import water_sampling_rule
 
         graph_path, material_path = self.graph_materials[0]
         graph = self.asset_data(self.archive, self.archive.resolve(graph_path)[0])
@@ -168,10 +168,10 @@ class WaterSamplingArchiveTests(unittest.TestCase):
                 water_sampling_rule(graph, material)
 
     def test_decoded_forward_uv_coordinates_match_numeric_contract(self):
-        from rc2016.formats.archive import asset_data
-        from rc2016.shaders import translator
-        from rc2016.shaders.translator import decoder, pixel_programs
-        from rc2016.shaders.water import water_primary_normal_sample_uvs
+        from nwo.formats.archive import asset_data
+        from nwo.shaders import translator
+        from nwo.shaders.translator import decoder, pixel_programs
+        from nwo.shaders.water import water_primary_normal_sample_uvs
 
         graph_path = self.graph_materials[0][0]
         graph = asset_data(self.archive, self.archive.resolve(graph_path)[0])
@@ -253,8 +253,8 @@ class WaterSamplingArchiveTests(unittest.TestCase):
                 self.assertAlmostEqual(actual, target, places=6)
 
     def test_wrong_width_and_non_finite_material_override_fail_closed(self):
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.shaders.water import water_sampling_rule
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.shaders.water import water_sampling_rule
 
         graph_path, material_path = self.graph_materials[0]
         graph = self.asset_data(self.archive, self.archive.resolve(graph_path)[0])

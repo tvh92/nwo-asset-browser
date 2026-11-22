@@ -6,10 +6,10 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.formats.materials import viewer_graph_rule
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT
+from nwo.formats.materials import viewer_graph_rule
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT
 from tests.test_viewer_textures import FakeArchive, dat1, flags
 
 SKIN = 'materialgraph/global/basic_skin/basic_skin.materialgraph'
@@ -29,8 +29,8 @@ def extract(graph, material_rows=(), flag_word=0x230):
     mat = dat1([graph], lambda at: [(tp.MATERIAL_FLAGS_SECTION, flags(flag_word))])
     archive = FakeArchive({'m/skin.material': ('material', mat), graph: ('materialgraph', dat1([], lambda at: []))})
     params = dict(parameters=[], unsupported_parameters=list(material_rows))
-    with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+    with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
+          patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
         return archive, tp.material_texture_paths(archive, 'm/skin.material')
 
 

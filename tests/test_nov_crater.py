@@ -3,7 +3,7 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.viewer import textures as tp
+from nwo.viewer import textures as tp
 
 GRAPH = 'materialgraph/environment/pokitaru/rock/pok_rock_blend_01/rp_nov_grass_dirt_blend_colorbreakup_01.materialgraph'
 MATERIAL = 'material/environment/novalis/ground/nov_gnd_Crater_01/rp_nov_gnd_Crater_01.material'
@@ -18,14 +18,14 @@ class CraterRuleTests(unittest.TestCase):
         self.assertEqual(tp._graph_rule([GRAPH]), {})
 
     def test_term_is_registered_for_the_blender_front_end(self):
-        from rc2016.formats import materials
+        from nwo.formats import materials
         self.assertIn('crater_blend', materials.VIEWER_RULE_EXTRAS)
         self.assertIn('crater_blend', materials.VIEWER_RULE_BUILT)
         self.assertEqual(materials.VIEWER_TERM_ROLES['crater_blend'], ('_crater_c',))
         self.assertNotIn('crater_blend', materials.VIEWER_LINEAR_Z_TERMS)   # the viewer keeps the sqrt normal z for the material normal
 
     def test_shader_declares_the_crater_uniforms(self):
-        from rc2016.viewer import shading
+        from nwo.viewer import shading
         sources = [value for value in vars(shading).values() if isinstance(value, str)]
         self.assertTrue(any('uniform bool uCraterBlend; uniform vec4 uCraterP;' in text and 'uMode == 2 && uCraterBlend' in text for text in sources))
         self.assertIn('"uCraterBlend", "uCraterP"', Path(shading.__file__).read_text(encoding='utf-8'))
@@ -37,7 +37,7 @@ class CraterArchiveTests(unittest.TestCase):
         research = os.environ.get('RC2016_RESEARCH')
         if not research:
             raise unittest.SkipTest('RC2016_RESEARCH is required')
-        from rc2016.levels.scene import asset_bytes, open_archive
+        from nwo.levels.scene import asset_bytes, open_archive
         try:
             cls.archive = open_archive(Path(research))
             cls.graph = bytes(asset_bytes(cls.archive, GRAPH))

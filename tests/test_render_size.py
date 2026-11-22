@@ -2,7 +2,7 @@
 import unittest
 from types import SimpleNamespace
 
-from rc2016.pipeline import scene_defaults as sd
+from nwo.pipeline import scene_defaults as sd
 
 
 class FitRenderSizeTests(unittest.TestCase):

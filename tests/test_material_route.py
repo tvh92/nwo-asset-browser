@@ -1,7 +1,7 @@
 """Blender front-end precedence between viewer graph rules and ready native translations."""
 import unittest
 
-from rc2016.formats.materials import final_shader_status
+from nwo.formats.materials import final_shader_status
 
 READY = dict(status='ready')
 EXACT_GRAPH = ['materialgraph/global/basic_colored_spec/basic_colored_spec.materialgraph']

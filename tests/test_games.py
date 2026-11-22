@@ -1,4 +1,4 @@
-"""The game seam (rc2016.games): folder detection, the 2016 adapter, capability gating in the window."""
+"""The game seam (nwo.games): folder detection, the 2016 adapter, capability gating in the window."""
 import os
 import struct
 import sys
@@ -8,9 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from rc2016 import games
-from rc2016.games import RC2016, RCRA
-from rc2016.games.base import CACHE_ROOT, Game, GameUnavailable
+from nwo import games
+from nwo.games import RC2016, RCRA
+from nwo.games.base import CACHE_ROOT, Game, GameUnavailable
 
 
 def _rc2016_folder(root: Path) -> Path:
@@ -38,7 +38,7 @@ class DetectionTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         # locate() remembers found roots in a sidecar; keep the test's out of the shared cache.
-        sidecar = patch('rc2016.formats.archive.LOCATE_SIDECAR', self.root / 'located_roots.json')
+        sidecar = patch('nwo.formats.archive.LOCATE_SIDECAR', self.root / 'located_roots.json')
         sidecar.start()
         self.addCleanup(sidecar.stop)
 
@@ -69,7 +69,7 @@ class DetectionTests(unittest.TestCase):
 
     def test_rift_apart_without_its_reader_says_so(self):
         folder = _rcra_folder(self.root)
-        with patch.dict(sys.modules, {'rc2016.games.rcra.source': None}):
+        with patch.dict(sys.modules, {'nwo.games.rcra.source': None}):
             with self.assertRaisesRegex(GameUnavailable, 'Rift Apart reader not installed'):
                 games.open_source(folder, 'source_preview', lambda *_a, **_k: None)
 
@@ -77,7 +77,7 @@ class DetectionTests(unittest.TestCase):
         opened = []
         game = Game(id='fake', title='Fake', detect=lambda folder: True,
                     open_source=lambda folder, output, log: opened.append(output) or 'source')
-        with patch('rc2016.games._DETECT_ORDER', (game,)):
+        with patch('nwo.games._DETECT_ORDER', (game,)):
             self.assertEqual(games.open_source(self.root, 'source_preview', None), (game, 'source'))
             games.open_source(self.root, self.root / 'absolute', None)
         self.assertEqual(opened, [CACHE_ROOT / 'fake' / 'source_preview', self.root / 'absolute'])
@@ -99,7 +99,7 @@ class GameRecordTests(unittest.TestCase):
         for capability in ('levels', 'flash', 'pipeline', 'decoded_shading'):
             self.assertFalse(RCRA.has(capability), capability)
         self.assertEqual(RCRA.unavailable_tip, 'Not yet available for Rift Apart')
-        self.assertEqual(RCRA.window_title, 'R&C Asset Browser — Rift Apart')
+        self.assertEqual(RCRA.window_title, 'NWO Asset Browser — Rift Apart')
 
     def test_unknown_capability_or_hook_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -124,17 +124,17 @@ class GameRecordTests(unittest.TestCase):
             programs, documents = Path(tmp) / 'Programs', Path(tmp) / 'Docs'
             source = Path(tmp) / 'Downloads' / 'CUSA01073'
             with patch.dict(os.environ, {'ProgramFiles': str(programs)}), \
-                    patch('rc2016.games.base.documents_folder', return_value=documents):
+                    patch('nwo.games.base.documents_folder', return_value=documents):
                 self.assertEqual(RC2016.default_output(source), source.parent / 'CUSA01073 Animation Output')
                 install = programs / 'Steam' / 'steamapps' / 'common' / 'Ratchet & Clank - Rift Apart'
-                self.assertEqual(RCRA.default_output(install), documents / 'R&C Asset Browser' / 'Rift Apart Output')
+                self.assertEqual(RCRA.default_output(install), documents / 'NWO Asset Browser' / 'Rift Apart Output')
                 library = Path(tmp) / 'SteamLibrary' / 'steamapps' / 'common' / 'Ratchet & Clank - Rift Apart'
-                self.assertEqual(RCRA.default_output(library), documents / 'R&C Asset Browser' / 'Rift Apart Output')
+                self.assertEqual(RCRA.default_output(library), documents / 'NWO Asset Browser' / 'Rift Apart Output')
 
 
 class LoaderDispatchTests(unittest.TestCase):
     def test_decode_dispatches_through_the_game(self):
-        from rc2016.viewer.loader import SourcePreviewLoader
+        from nwo.viewer.loader import SourcePreviewLoader
         calls = []
 
         def decode(source, model_id, source_path, as_arrays):
@@ -149,17 +149,17 @@ class LoaderDispatchTests(unittest.TestCase):
         self.assertEqual(entry['decoded']['_archive_path'], 'a.model')
 
     def test_rift_apart_decode_goes_to_its_model_decoder(self):
-        with patch('rc2016.games.rcra.model.decode_for_viewer', return_value=('decoded', b'data')) as decode:
+        with patch('nwo.games.rcra.model.decode_for_viewer', return_value=('decoded', b'data')) as decode:
             self.assertEqual(RCRA.decode_model('source', 'id', 'a.model', True), ('decoded', b'data'))
         decode.assert_called_once_with('source', 'id', 'a.model', True)
 
     def test_rift_apart_animation_library_hook_reaches_its_clip_library(self):
-        with patch('rc2016.games.rcra.clip_library.animation_library', return_value='library') as build:
+        with patch('nwo.games.rcra.clip_library.animation_library', return_value='library') as build:
             self.assertEqual(RCRA.animation_library('s', b'model', 'a.model', clips=False), 'library')
         build.assert_called_once_with('s', b'model', 'a.model', False)
 
     def test_loader_builds_a_rift_apart_library_through_the_game(self):
-        from rc2016.viewer.loader import SourcePreviewLoader
+        from nwo.viewer.loader import SourcePreviewLoader
         library = SimpleNamespace(clips=['clip'], animset_data={'a.animset': None})
         library.with_cinematic = lambda archive, path: library
         library.with_performances = lambda: library   # the view also lists face performances
@@ -167,7 +167,7 @@ class LoaderDispatchTests(unittest.TestCase):
         loader.game, loader.archive = RCRA, 'archive'
         cached = dict(decoded=dict(joint_count=3, _archive_path='a.model'), data=b'model', purpose='view',
                       animation=None, animation_built=None)
-        with patch('rc2016.games.rcra.clip_library.animation_library', return_value=library) as build:
+        with patch('nwo.games.rcra.clip_library.animation_library', return_value=library) as build:
             loader._build_animation_locked(cached, None)
         build.assert_called_once_with('archive', b'model', 'a.model', True)
         self.assertIs(cached['animation'], library)
@@ -182,15 +182,15 @@ class LoaderDispatchTests(unittest.TestCase):
                 ('texture_header', 'texture', 'texture_header', ('s', 'a.texture')),
                 ('load_texture', 'texture', 'load_texture', ('s', 'a.texture')),
                 ('export_textures', 'texture', 'export_textures', ('s', ['a.texture'], 'out', {'dds'}))):
-            with patch(f'rc2016.games.rcra.{module}.{name}', return_value='result') as reader:
+            with patch(f'nwo.games.rcra.{module}.{name}', return_value='result') as reader:
                 self.assertEqual(getattr(RCRA, hook)(*args), 'result', hook)
             reader.assert_called_once()
         rows = [dict(path='b/y.texture', folder='b'), dict(path='a/x.texture', folder='a')]
-        with patch('rc2016.games.rcra.texture.archive_textures', return_value=rows):
+        with patch('nwo.games.rcra.texture.archive_textures', return_value=rows):
             self.assertEqual(RCRA.texture_paths('s'), ['a/x.texture', 'b/y.texture'])
 
     def test_textures_tab_dispatches_through_the_game(self):
-        from rc2016.viewer.loader import SourcePreviewLoader
+        from nwo.viewer.loader import SourcePreviewLoader
         calls = []
         game = Game(id='fake', title='Fake', detect=bool, open_source=print, hooks=dict(
             texture_paths=lambda source: ['a/x_c.texture'],
@@ -205,8 +205,8 @@ class LoaderDispatchTests(unittest.TestCase):
         self.assertEqual(calls, [('export', ['a/x_c.texture'], 'out', {'dds'}, False, None)])
 
     def rift_apart_maps(self, decided):
-        from rc2016.export.models import _MapCache
-        from rc2016.games.rcra.material import SLOT_BASE_COLOUR, SLOT_G, SLOT_NORMAL
+        from nwo.export.models import _MapCache
+        from nwo.games.rcra.material import SLOT_BASE_COLOUR, SLOT_G, SLOT_NORMAL
         textures = {
             'c.texture': dict(format=28, width=2, height=2, pixels=bytes([200, 100, 50, 255] * 4), srgb=False),
             'n.texture': dict(format=49, width=2, height=2, pixels=bytes([128, 128] * 4), srgb=False),
@@ -218,10 +218,10 @@ class LoaderDispatchTests(unittest.TestCase):
         slots = {'a.material': [(SLOT_BASE_COLOUR, 'c.texture'), (SLOT_NORMAL, 'n.texture'), (SLOT_G, 'g.texture')],
                  'b.material': [(SLOT_NORMAL, 'float_n.texture')], 'c.material': [(SLOT_NORMAL, 'pink_n.texture')]}
         source = SimpleNamespace(asset_data=lambda key: key)
-        with patch('rc2016.games.rcra.material._material_key', side_effect=lambda s, path: path), \
-                patch('rc2016.games.rcra.material.material_slots', side_effect=lambda data: slots[data]), \
-                patch('rc2016.games.rcra_export.decoded_maps', side_effect=lambda s, key: dict(decided[key])), \
-                patch('rc2016.games.rcra.texture.load_texture_full', side_effect=lambda s, path: dict(textures[path])):
+        with patch('nwo.games.rcra.material._material_key', side_effect=lambda s, path: path), \
+                patch('nwo.games.rcra.material.material_slots', side_effect=lambda data: slots[data]), \
+                patch('nwo.games.rcra_export.decoded_maps', side_effect=lambda s, key: dict(decided[key])), \
+                patch('nwo.games.rcra.texture.load_texture_full', side_effect=lambda s, path: dict(textures[path])):
             return {key: RCRA.material_maps(source, dict(index=i, path=key), {}, _MapCache()) for i, key in enumerate(decided)}
 
     def test_rift_apart_export_maps_without_a_plain_writer_are_the_stand_in(self):
@@ -259,7 +259,7 @@ class LoaderDispatchTests(unittest.TestCase):
 
     def test_rift_apart_plain_writer_check(self):
         """A writer whose gloss is sqrt(_g.r), F0 _g.g and occlusion _m.b at UV0 is plain; scaled or moved UVs are not."""
-        from rc2016.games.rcra_export import _plain
+        from nwo.games.rcra_export import _plain
 
         def recipe(gloss_op='sqrt', u_scale=None):
             nodes = [dict(op='input', name='TEXCOORD.x', type='f', args=[]), dict(op='input', name='TEXCOORD.y', type='f', args=[])]
@@ -281,7 +281,7 @@ class LoaderDispatchTests(unittest.TestCase):
 
     def test_rift_apart_emission_and_alpha_forms(self):
         """Emission K x _m.r with a plain _c albedo, a constant emission, a forward alpha K x _c.a; a mixed form is refused."""
-        from rc2016.games.rcra_export import decoded_alpha, decoded_emission
+        from nwo.games.rcra_export import decoded_alpha, decoded_emission
 
         def recipe(emission=None, alpha=None, albedo_scale=None):
             nodes = [dict(op='input', name='TEXCOORD.x', type='f', args=[]), dict(op='input', name='TEXCOORD.y', type='f', args=[]),
@@ -364,7 +364,7 @@ class LoaderDispatchTests(unittest.TestCase):
 
     def test_gltf_occlusion_shares_the_metal_rough_image(self):
         import numpy as np
-        from rc2016.export.models import ModelExporter
+        from nwo.export.models import ModelExporter
         m = dict(obj_name='m', alpha=1.0, base=None, normal=None, emissive=None, emissive_strength=0.0, alpha_mode='OPAQUE',
                  double_sided=False, png={}, mr=np.full((1, 1, 3), 128, np.uint8), occlusion=True)
         doc = ModelExporter._build_gltf(None, 'x', [], {0: m}, None, []).doc
@@ -373,11 +373,11 @@ class LoaderDispatchTests(unittest.TestCase):
 
     def test_export_reads_materials_through_the_loaders_game(self):
         import inspect
-        from rc2016.export import models
+        from nwo.export import models
         source = inspect.getsource(models.ModelExporter.export)
         for call in ('game.material_maps(', 'game.export_textures(', 'game.shadow_only('):
             self.assertIn(call, source)
-        with patch('rc2016.export.models.material_maps', return_value='maps') as maps:
+        with patch('nwo.export.models.material_maps', return_value='maps') as maps:
             self.assertEqual(RC2016.material_maps('archive', {}, {}, None), 'maps')   # 2016 keeps its own function
         maps.assert_called_once_with('archive', {}, {}, None)
 
@@ -388,15 +388,15 @@ class LoaderDispatchTests(unittest.TestCase):
         source = SimpleNamespace(ids_of_type=lambda kind: {'model': ['k2', 'k1']}[kind],
                                  entries={'k1': dict(path='a/one.model'), 'k2': dict(path='b/two.model')},
                                  asset_header=headers.get, close=lambda: closed.append(True))
-        with patch('rc2016.games.rcra_game.open_source', return_value=source):
+        with patch('nwo.games.rcra_game.open_source', return_value=source):
             rows = RCRA.list_models('install', 'output')
         self.assertEqual([(r.model_id, r.archive_path, r.no_geometry) for r in rows],
                          [('k1', 'a/one.model', False), ('k2', 'b/two.model', True)])
         self.assertEqual(closed, [True])
 
     def test_levels_need_the_levels_capability(self):
-        from rc2016.levels import scene
-        with patch('rc2016.levels.scene.detect_game', return_value=RCRA):
+        from nwo.levels import scene
+        with patch('nwo.levels.scene.detect_game', return_value=RCRA):
             with self.assertRaisesRegex(ValueError, 'Levels are not yet available for Rift Apart'):
                 scene.open_archive(tempfile.gettempdir())
 
@@ -412,7 +412,7 @@ class CapabilityGatingTests(unittest.TestCase):
             self.root.withdraw()
         except Exception as error:  # no Tk runtime or no display
             self.skipTest(f'Tk unavailable: {error}')
-        from rc2016.app.window import ASSET_TYPE_CAPABILITY, HELP, AssetBrowserApp
+        from nwo.app.window import ASSET_TYPE_CAPABILITY, HELP, AssetBrowserApp
         self.HELP = HELP
         shown = []
         app = SimpleNamespace(tk=tk, ttk=ttk, root=self.root, game=None, game_gates=[], options_changed=0,
@@ -445,7 +445,7 @@ class CapabilityGatingTests(unittest.TestCase):
     def test_rift_apart_disables_what_it_lacks_and_rc2016_restores_it(self):
         app = self.app
         app._apply_game(RCRA)
-        self.assertEqual(self.root.title(), 'R&C Asset Browser — Rift Apart')
+        self.assertEqual(self.root.title(), 'NWO Asset Browser — Rift Apart')
         tips = self.tips()
         for kind in ('Level', 'Flash UI'):
             self.assertTrue(self.buttons[kind].instate(['disabled']), kind)
@@ -461,7 +461,7 @@ class CapabilityGatingTests(unittest.TestCase):
         self.assertEqual(app.options_changed, 1)
 
         app._apply_game(RC2016)
-        self.assertEqual(self.root.title(), 'R&C Asset Browser — R&C 2016')
+        self.assertEqual(self.root.title(), 'NWO Asset Browser — R&C 2016')
         tips = self.tips()
         for button in self.buttons.values():
             self.assertFalse(button.instate(['disabled']))

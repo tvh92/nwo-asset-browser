@@ -6,7 +6,7 @@ import struct
 import unittest
 import zlib
 
-from rc2016.formats import archive, container
+from nwo.formats import archive, container
 
 
 def lz4_block_python(data, size):

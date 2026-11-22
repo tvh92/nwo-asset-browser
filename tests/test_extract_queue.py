@@ -5,7 +5,7 @@ The methods are exercised on a stub that carries only the state they read, so no
 import unittest
 from types import SimpleNamespace
 
-from rc2016.app.window import AssetBrowserApp
+from nwo.app.window import AssetBrowserApp
 
 
 class _Table:
@@ -104,7 +104,7 @@ class QueuedBatchTests(unittest.TestCase):
 
 class BatchFinishTests(unittest.TestCase):
     def test_only_models_that_extracted_are_deselected_even_when_the_batch_failed(self):
-        from rc2016.app.batch import PipelineModelCandidate
+        from nwo.app.batch import PipelineModelCandidate
         a = PipelineModelCandidate(model_id="1", archive_path="models/a.model")
         b = PipelineModelCandidate(model_id="2", archive_path="models/b.model")
         c = PipelineModelCandidate(model_id="3", archive_path="models/c.model")

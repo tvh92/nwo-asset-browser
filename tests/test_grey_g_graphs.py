@@ -7,10 +7,10 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.formats.links import FAMILY, rule_coverage
-from rc2016.shaders import g_layout
-from rc2016.viewer import textures as tp
-from rc2016.viewer.grey_g_graphs import GREY_G_GRAPHS
+from nwo.formats.links import FAMILY, rule_coverage
+from nwo.shaders import g_layout
+from nwo.viewer import textures as tp
+from nwo.viewer.grey_g_graphs import GREY_G_GRAPHS
 
 
 class GreyGTableTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class GreyGArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -66,7 +66,7 @@ class GreyGArchiveTests(unittest.TestCase):
             cls.archive.close()
 
     def test_every_entry_matches_its_bytes_and_reads_a_grey_g(self):
-        from rc2016.formats.archive import asset_data
+        from nwo.formats.archive import asset_data
         for path, digest in GREY_G_GRAPHS.items():
             ids = [i for i in self.archive.resolve(path) if self.archive.entries[i]['type'] == 'materialgraph']
             self.assertEqual(len(ids), 1, path)
@@ -75,7 +75,7 @@ class GreyGArchiveTests(unittest.TestCase):
             self.assertTrue(g_layout.grey_graph(g_layout.writer_layouts(data)), path)
 
     def test_known_layouts(self):
-        from rc2016.formats.archive import asset_data
+        from nwo.formats.archive import asset_data
 
         def layouts(path):
             ids = [i for i in self.archive.resolve(path) if self.archive.entries[i]['type'] == 'materialgraph']

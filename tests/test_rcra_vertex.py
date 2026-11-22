@@ -1,4 +1,4 @@
-"""Rift Apart vertex programs at rest (rc2016.games.rcra.vertex): the vectorised evaluator, the view check, the stored
+"""Rift Apart vertex programs at rest (nwo.games.rcra.vertex): the vectorised evaluator, the view check, the stored
 vertices in the glTF export, plus real-install checks (RCRA_GAME, skipped without it)."""
 import os
 import tempfile
@@ -7,9 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.export import models
-from rc2016.games.rcra import vertex as rv
-from rc2016.shaders import sm5
+from nwo.export import models
+from nwo.games.rcra import vertex as rv
+from nwo.shaders import sm5
 
 GAME = os.environ.get('RCRA_GAME')
 
@@ -153,7 +153,7 @@ class ExportTests(unittest.TestCase):
 
 class LoaderNoteTests(unittest.TestCase):
     def test_decoder_material_notes_join_the_material_rule(self):
-        from rc2016.viewer.loader import SourcePreviewLoader
+        from nwo.viewer.loader import SourcePreviewLoader
 
         class Game:
             def decode_model(self, archive, model_id, path, view):
@@ -180,7 +180,7 @@ class LoaderNoteTests(unittest.TestCase):
 class RealVertexProgramTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 
@@ -190,13 +190,13 @@ class RealVertexProgramTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def material(self, path):
-        from rc2016.games.rcra.material import _material_key
-        from rc2016.games.rcra.viewer_materials import _graph
+        from nwo.games.rcra.material import _material_key
+        from nwo.games.rcra.viewer_materials import _graph
         key = _material_key(self.source, path)
         return _graph(self.source, key), self.source.asset_data(key)
 
     def test_vertex_animation_texture_moves_the_swarmer(self):
-        from rc2016.games.rcra.model import decode_for_viewer
+        from nwo.games.rcra.model import decode_for_viewer
         path = ('characters/enemy/enm_neo_nefarious_swarmer/animations/vertex_animations/'
                 'enm_neo_nefarious_swarmer_passive_move_vertexanim/models/'
                 'enm_neo_nefarious_swarmer_passive_move_vertexanim.model')
@@ -211,7 +211,7 @@ class RealVertexProgramTests(unittest.TestCase):
         # The vectorised run agrees with the translator's own evaluator on single vertices.
         graph, material = self.material(mesh['material']['path'])
         layout = rv.model_layout(data)
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra.texture import texture_size
         tr = rv.translate(graph, material, layout, texture_sizes=lambda p: texture_size(self.source, p))
         recipe = rv.export(tr)
         inputs, offset, _count = rv.vertex_streams(data)

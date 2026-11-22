@@ -3,8 +3,8 @@ from pathlib import Path
 import struct
 import unittest
 
-from rc2016.viewer import textures as tp
-from rc2016.viewer.loader import mesh_payload
+from nwo.viewer import textures as tp
+from nwo.viewer.loader import mesh_payload
 
 # Game source assets from the research workspace (RC2016_RESEARCH); they are not in git.
 ARCHIVE = Path(__file__).resolve().parents[1] / 'Research' / '2026-10-22_from-PS4-animation-pipeline'
@@ -59,8 +59,8 @@ def flags(word, alpha_base=0, alpha_reference=0):
 class TexturePreviewTests(unittest.TestCase):
     def test_stale_self_lit_screen_exact_slots_and_t0_forward(self):
         from unittest.mock import patch
-        from rc2016.viewer.shading import glass_uniforms
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.shading import glass_uniforms
+        from nwo.viewer.viewport import ModelViewport
         graph = 'materialgraph/environment/nebula/ambient/neb_amb_screen_01/mo_neb_amb_screen_01.materialgraph'
         self.assertEqual(tp._graph_rule([graph]), dict(self_lit_key=None, screen=True))
         self.assertEqual(tp._graph_rule([graph.replace('.materialgraph', '_extra.materialgraph')]), {})
@@ -82,9 +82,9 @@ class TexturePreviewTests(unittest.TestCase):
         def tex(_archive, path):
             return dict(path=path, format=28, width=2, height=1, srgb=False,
                         pixels=bytes((64, 64, 64, 255, 128, 128, 128, 255)))
-        with (patch('rc2016.shaders.families.graph_parameter_tables',
+        with (patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params),
               patch.object(tp, 'load_texture', side_effect=tex)):
             e = tp.material_textures(archive, [dict(index=0, path='m/s.material')], {})[0]
         self.assertEqual(e['k'], 0.)
@@ -119,9 +119,9 @@ class TexturePreviewTests(unittest.TestCase):
             params = dict(parameters=[], unsupported_parameters=[
                 dict(key_hash=k, size=4, raw_hex=struct.pack('<f', v).hex())
                 for k, v in ((0x66EFA55B, 99.), (0xF8C61683, 77.), (0x06F19114, 3.))])
-            with (patch('rc2016.shaders.families.graph_parameter_tables',
+            with (patch('nwo.shaders.families.graph_parameter_tables',
                         return_value=([[dict(key_hash=own)]], {own: 1.})),
-                  patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+                  patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
                 got = tp.material_texture_paths(archive, 'm/a.material')
             # Only the graph's own key counts: the material's stale 0x66EFA55B / 0xF8C61683 rows are dropped.
             self.assertEqual(got['k'], 3. if own == 0x06F19114 else 1.)
@@ -155,8 +155,8 @@ class TexturePreviewTests(unittest.TestCase):
             dict(key_hash=0x66EFA55B, size=4, raw_hex=struct.pack('<f', 20.0).hex()),
             dict(key_hash=0x7107A2D8, size=4, raw_hex=struct.pack('<f', 1.0).hex())])
         defaults = {0x62835AF9: 1.0, 0x24F4CA4C: 1.0}
-        with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params),
+        with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params),
               patch.object(tp, 'load_texture', side_effect=lambda _, p: dict(path=p, pixels=b'', format=61))):
             paths = tp.material_texture_paths(archive, 'm/leaf.material')
             entry = tp.material_textures(archive, [dict(index=0, path='m/leaf.material')], {})[0]
@@ -265,9 +265,9 @@ class TexturePreviewTests(unittest.TestCase):
                     dict(key_hash=0x06F19114, size=4, raw_hex=struct.pack('<f', 3.0).hex()),
                     dict(key_hash=0x5DB5EFC7, size=4, raw_hex=struct.pack('<f', 0.0).hex()),
                     dict(key_hash=0x9E0BA553, size=4, raw_hex=struct.pack('<f', 0.75).hex())])
-                with (patch('rc2016.shaders.families.graph_parameter_tables',
+                with (patch('nwo.shaders.families.graph_parameter_tables',
                             return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-                      patch('rc2016.formats.materials.extract_material_parameters', return_value=params),
+                      patch('nwo.formats.materials.extract_material_parameters', return_value=params),
                       patch.object(tp, 'load_texture', side_effect=lambda _, p: dict(path=p, pixels=b'', format=61))):
                     paths = tp.material_texture_paths(archive, 'm/a.material')
                     entry = tp.material_textures(archive, [dict(index=3, path='m/a.material')], {})[3]
@@ -287,7 +287,7 @@ class TexturePreviewTests(unittest.TestCase):
                     self.assertNotIn('_glow_parallax', paths)
                     self.assertNotIn('_glow_parallax', entry)
                     self.assertEqual(paths['self_lit'], 'glow_mask02')
-        from rc2016.viewer.shading import GLOW_PARALLAX_TEXTURE_UNIT
+        from nwo.viewer.shading import GLOW_PARALLAX_TEXTURE_UNIT
         self.assertEqual(GLOW_PARALLAX_TEXTURE_UNIT, 13)
 
     def test_parallax_occlusion_exact_rule(self):
@@ -311,8 +311,8 @@ class TexturePreviewTests(unittest.TestCase):
             dict(key_hash=0x24F4CA4C, size=4, raw_hex=struct.pack('<f', .5).hex()),
             dict(key_hash=0x7107A2D8, size=4, raw_hex=struct.pack('<f', 1).hex()),
             dict(key_hash=0x66EFA55B, size=4, raw_hex=struct.pack('<f', 99).hex())])
-        with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([], {})),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+        with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([], {})),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             got = tp.material_texture_paths(archive, 'm/p.material')
         self.assertEqual(got['g_mode'], 'grey')
         self.assertEqual(got['k'], 0)
@@ -353,9 +353,9 @@ class TexturePreviewTests(unittest.TestCase):
             with self.subTest(suffix=suffix):
                 graph = f'required/materials/basic_normal_gloss_{suffix}.materialgraph'
                 archive, defaults, params = self._bng_fixture(graph)
-                with (patch('rc2016.shaders.families.graph_parameter_tables',
+                with (patch('nwo.shaders.families.graph_parameter_tables',
                             return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-                      patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+                      patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
                     got = tp.material_texture_paths(archive, 'm/a.material')
                 self.assertEqual(got['bng']['kind'], kind)
                 self.assertEqual(got['g_mode'], 'grey')
@@ -363,8 +363,8 @@ class TexturePreviewTests(unittest.TestCase):
         # The exact dotted rule must not capture another graph sharing the prefix.
         graph = 'required/materials/basic_normal_gloss_emissive_variant.materialgraph'
         archive, defaults, params = self._bng_fixture(graph)
-        with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+        with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([], defaults)),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             fallback = tp.material_texture_paths(archive, 'm/a.material')
         self.assertEqual(fallback['g_mode'], 'grey')  # family fallback remains active
         self.assertNotIn('bng', fallback)
@@ -374,9 +374,9 @@ class TexturePreviewTests(unittest.TestCase):
         from unittest.mock import patch
         graph = 'required/materials/basic_normal_gloss_fresnel_detail.materialgraph'
         archive, defaults, params = self._bng_fixture(graph)
-        with (patch('rc2016.shaders.families.graph_parameter_tables',
+        with (patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             got = tp.material_texture_paths(archive, 'm/a.material')
         # Material texture suffixes are intentionally swapped; the serialized slot identity wins.
         self.assertEqual(got['_n'], 't/slot_n_named_detail.texture')
@@ -394,9 +394,9 @@ class TexturePreviewTests(unittest.TestCase):
             dict(key_hash=0x41E7FE54, size=4, raw_hex=struct.pack('<f', 30.0).hex()),
         ]
         archive, defaults, _ = self._bng_fixture(graph, dict(parameters=[], unsupported_parameters=rows))
-        with (patch('rc2016.shaders.families.graph_parameter_tables',
+        with (patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters',
+              patch('nwo.formats.materials.extract_material_parameters',
                     return_value=dict(parameters=[], unsupported_parameters=rows))):
             got = tp.material_texture_paths(archive, 'm/a.material')
         self.assertEqual(got['bng']['colour'], list(color))
@@ -412,9 +412,9 @@ class TexturePreviewTests(unittest.TestCase):
         tint = (0.25, 0.5, 0.75)
         rows = [dict(key_hash=0x43C53ECA, size=12, raw_hex=struct.pack('<3f', *tint).hex())]
         archive, defaults, _ = self._bng_fixture(graph, dict(parameters=[], unsupported_parameters=rows))
-        with (patch('rc2016.shaders.families.graph_parameter_tables',
+        with (patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters',
+              patch('nwo.formats.materials.extract_material_parameters',
                     return_value=dict(parameters=[], unsupported_parameters=rows))):
             got = tp.material_texture_paths(archive, 'm/a.material')
         self.assertEqual(got['spec_tint'], list(tint))
@@ -426,9 +426,9 @@ class TexturePreviewTests(unittest.TestCase):
         rows = [dict(key_hash=0x24F4CA4C, size=4, raw_hex=struct.pack('<f', 7.0).hex()),
                 dict(key_hash=0x9856BA09, size=4, raw_hex=struct.pack('<f', gloss).hex())]
         archive, defaults, _ = self._bng_fixture(graph, dict(parameters=[], unsupported_parameters=rows))
-        with (patch('rc2016.shaders.families.graph_parameter_tables',
+        with (patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters',
+              patch('nwo.formats.materials.extract_material_parameters',
                     return_value=dict(parameters=[], unsupported_parameters=rows))):
             got = tp.material_texture_paths(archive, 'm/a.material')
         self.assertEqual(got['gloss'], gloss)
@@ -439,9 +439,9 @@ class TexturePreviewTests(unittest.TestCase):
         graph = 'required/materials/basic_normal_gloss_fresnel_detail.materialgraph'
         archive, defaults, params = self._bng_fixture(graph)
         sentinel = lambda archive, path: dict(path=path, pixels=b'', format=61)
-        with (patch('rc2016.shaders.families.graph_parameter_tables',
+        with (patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params),
               patch.object(tp, 'load_texture', side_effect=sentinel)):
             entry = tp.material_textures(archive, [dict(index=17, path='m/a.material')], {})[17]
         self.assertEqual(entry['bng']['kind'], 3)
@@ -454,9 +454,9 @@ class TexturePreviewTests(unittest.TestCase):
         from unittest.mock import patch
         graph = 'required/materials/basic_normal_gloss_specfresnel_emissive.materialgraph'
         archive, defaults, params = self._bng_fixture(graph)
-        with (patch('rc2016.shaders.families.graph_parameter_tables',
+        with (patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             got = tp.material_texture_paths(archive, 'm/a.material')
         self.assertEqual(got['bng']['params'], (3.0, 1.0, 10.0, 0.0))
         self.assertEqual(got['bng']['detail'], (1.0, 1.0, 0.75))
@@ -478,9 +478,9 @@ class TexturePreviewTests(unittest.TestCase):
                 mat_blob = dat1([graph, 't/body_m.texture'], lambda at: [(tp.MATERIAL_SLOT_SECTION, slot_rows([(at[1], mask)]))])
                 archive = FakeArchive({'m/a.material': ('material', mat_blob), graph: ('materialgraph', graph_blob)})
                 params = dict(parameters=[], unsupported_parameters=rows)
-                with (patch('rc2016.shaders.families.graph_parameter_tables',
+                with (patch('nwo.shaders.families.graph_parameter_tables',
                             return_value=([[dict(key_hash=key) for key in defaults]], defaults)),
-                      patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+                      patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
                     got = tp.material_texture_paths(archive, 'm/a.material')
                 self.assertEqual((got['bng']['kind'], got['bng']['params'][:2]), (kind, (50.0, 8.0)))
                 self.assertEqual((got['g_mode'], got['k']), ('colored', k))
@@ -526,8 +526,8 @@ class TexturePreviewTests(unittest.TestCase):
             dict(key_hash=0x4F1684D2, size=12, raw_hex=struct.pack('<3f', 0.5, 0.25, 1.0).hex()),
             dict(key_hash=0x148C2635, size=4, raw_hex=struct.pack('<f', 0.0).hex()),
             dict(key_hash=0x66EFA55B, size=4, raw_hex=struct.pack('<f', 99.0).hex())])
-        with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+        with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             paths = tp.material_texture_paths(archive, 'm/car.material')
             self.assertEqual((paths['_pick'], paths['_vehicle_p2'], paths['_h']), ('t/white.texture', inputs[2], inputs[3]))
             self.assertEqual((paths['g_mode'], paths['k']), ('vehicle', 0.0))
@@ -540,7 +540,7 @@ class TexturePreviewTests(unittest.TestCase):
             self.assertEqual(entry['_vehicle_p2']['path'], inputs[2])
             other = tp.material_texture_paths(archive, 'm/variant.material')
             self.assertNotIn('vehicle', other); self.assertEqual(other['_g'], 't/keep_g.texture')
-        from rc2016.viewer.shading import VEHICLE_PALETTE_TEXTURE_UNIT
+        from nwo.viewer.shading import VEHICLE_PALETTE_TEXTURE_UNIT
         self.assertEqual(VEHICLE_PALETTE_TEXTURE_UNIT, 10)
 
     def test_roles_prefer_material_over_graph_defaults(self):
@@ -591,7 +591,7 @@ class TexturePreviewTests(unittest.TestCase):
 
     def test_color_tint_variants_bind_exact_slots_and_preserve_zero_overrides(self):
         from unittest.mock import patch
-        from rc2016.viewer.shading import TINT_DETAIL_TEXTURE_UNIT
+        from nwo.viewer.shading import TINT_DETAIL_TEXTURE_UNIT
         self.assertEqual(TINT_DETAIL_TEXTURE_UNIT, 9)
         folder = 'materialgraph/environment/global/gbl_color_tint_01/'
         variants = [('jn_mo_gbl_color_tint_01_random_color', 'random'), ('jn_color_tint_detail', 'detail'),
@@ -616,8 +616,8 @@ class TexturePreviewTests(unittest.TestCase):
                 graph: ('materialgraph', dat1([path for slot,path in slots], lambda at:
                     [(tp.GRAPH_SLOT_SECTION, slot_rows([(at[i], slot) for i,(slot,path) in enumerate(slots)]))]))}
             archive = FakeArchive(files)
-            with patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)), \
-                 patch('rc2016.formats.materials.extract_material_parameters', return_value=params):
+            with patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)), \
+                 patch('nwo.formats.materials.extract_material_parameters', return_value=params):
                 paths = tp.material_texture_paths(archive, 'm/v.material')
                 self.assertEqual((paths['_c'], paths['_g'], paths['_n'], paths['_h']),
                                  ('t/main_c.texture', 't/replacement_g.texture', 't/main_n.texture', 't/tint_h.texture'))
@@ -658,7 +658,7 @@ class TexturePreviewTests(unittest.TestCase):
         archive = FakeArchive(files)
         defaults = {0x62835AF9: 1.0, 0x24F4CA4C: 1.0, 0x4D385B45: 8.0}
         tables = [[dict(key_hash=k) for k in defaults]]
-        with patch('rc2016.shaders.families.graph_parameter_tables', return_value=(tables, defaults)):
+        with patch('nwo.shaders.families.graph_parameter_tables', return_value=(tables, defaults)):
             paths = tp.material_texture_paths(archive, 'm/za.material')
             self.assertEqual((paths['g_mode'], paths['k'], paths['za_fresnel_power']), ('grey', 0.0, 8.0))
             self.assertEqual((paths['spec'], paths['gloss']), (1.0, 1.0))
@@ -671,7 +671,7 @@ class TexturePreviewTests(unittest.TestCase):
                 params = dict(parameters=[], unsupported_parameters=[
                     dict(key_hash=k, size=4, raw_hex=struct.pack('<f', v).hex())
                     for k, v in ((0x4D385B45, power), (0x62835AF9, 2.0), (0x24F4CA4C, 0.5), (0x66EFA55B, 22.0))])
-                with patch('rc2016.formats.materials.extract_material_parameters', return_value=params):
+                with patch('nwo.formats.materials.extract_material_parameters', return_value=params):
                     paths = tp.material_texture_paths(archive, 'm/za.material')
                     self.assertEqual((paths['spec'], paths['gloss'], paths['k']), (2.0, 0.5, 0.0))
                     entry = tp.material_textures(archive, [dict(index=0, path='m/za.material')], {})[0]
@@ -694,7 +694,7 @@ class TexturePreviewTests(unittest.TestCase):
                     0x60DE8181: 0.125, 0x33BD9BA6: 0.1, 0x23FEED4B: 2.0, 0xD7B41D33: 3.0}
         params = dict(parameters=[], unsupported_parameters=[dict(key_hash=k, size=4, raw_hex=struct.pack('<f', v).hex())
             for k, v in ((0x66EFA55B, 99.0), (0x77AF2D2B, 0.0), (0x7F87B733, 1.0), (0x1418C201, 1.0))])
-        with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)), patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+        with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)), patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             paths = tp.material_texture_paths(archive, 'm/a.material')
             self.assertEqual((paths['g_mode'], paths['k'], paths['spec'], paths['gloss']), ('grey', 0.0, 1.0, 5.0))
             self.assertEqual((paths['_h'], paths['_sequence'], paths['_pick']), ('t/override_h.texture', 't/sequence_h.texture', 't/mask_h.texture'))
@@ -710,7 +710,7 @@ class TexturePreviewTests(unittest.TestCase):
             self.assertEqual(entry['arch_sequence'], decoded)
             self.assertEqual(entry['_sequence'], fake_texture)
             self.assertNotIn('arch_sequence', tp.material_texture_paths(archive, 'm/b.material'))
-        from rc2016.viewer.shading import ARCH_SEQUENCE_TEXTURE_UNIT
+        from nwo.viewer.shading import ARCH_SEQUENCE_TEXTURE_UNIT
         self.assertEqual(ARCH_SEQUENCE_TEXTURE_UNIT, 8)
 
     def test_glass_rules_bind_by_slot_and_read_flags(self):
@@ -753,7 +753,7 @@ class TexturePreviewTests(unittest.TestCase):
         self.assertEqual(tp.blend_state(None), dict(blend=None, two_sided=False))
 
     def test_glass_uniform_packing(self):
-        from rc2016.viewer.shading import glass_uniforms
+        from nwo.viewer.shading import glass_uniforms
         patterned = dict(kind='glass_patterned', params=dict(tiling=1.5, normal_strength=0.03, f0=0.1, gloss=0.75,
                                                               pick_u=0.125, rim_bias=0.9, rim_exp=8.0))
         self.assertEqual(glass_uniforms(patterned)[:3], (2, (1.5, 0.03, 0.1, 0.75), (0.125, 0.9, 8.0, 0.0)))
@@ -789,7 +789,7 @@ class TexturePreviewTests(unittest.TestCase):
 
     def test_untile_numpy_matches_python_including_npot(self):
         import os, sys
-        from rc2016.formats import texture
+        from nwo.formats import texture
         for width, height, fmt in [(1920, 1080, 98), (250, 250, 28), (64, 24, 72), (256, 256, 80)]:
             data = os.urandom(texture.tiled_top_mip_size(width, height, fmt))
             fast = texture.ps4_deswizzle_top(data, width, height, fmt)
@@ -803,7 +803,7 @@ class TexturePreviewTests(unittest.TestCase):
             self.assertEqual(len(fast), texture.top_mip_size(width, height, fmt))
 
     def test_array_slices_and_array_dds(self):
-        from rc2016.formats import texture
+        from nwo.formats import texture
         step = texture.tiled_top_mip_size(32, 32, 80)
         data = bytes([1]) * step + bytes([2]) * step
         slices = texture.ps4_deswizzle_slices(data, 32, 32, 80, 2)
@@ -902,7 +902,7 @@ class RockBlendTests(unittest.TestCase):
         def loaded(_archive,path):
             return dict(path=path,width=1,height=1,format=28,pixels=bytes([10,20,30,255]),srgb=False)
         with patch.object(tp,'load_texture',side_effect=loaded), \
-                patch('rc2016.viewer.native_glsl.selected_translation',return_value=None):
+                patch('nwo.viewer.native_glsl.selected_translation',return_value=None):
             entry=tp.material_textures(archive,[dict(index=0,path='m/breakup.material')],{})[0]
         self.assertEqual(entry['_rock_volume']['source_paths'],[paths[k] for k in ('_rock_mask','_rock_g2','_rock_g2','_rock_n2')])
         self.assertNotIn('unresolved_second_layer',entry['rock_blend'])
@@ -912,7 +912,7 @@ class RockBlendTests(unittest.TestCase):
             uv0=[(0,0)]*3,triangles=[(0,1,2)],colors=[(1,1,1,a) for a in (0.0,0.5,1.0)])
         decoded=dict(meshes=[mesh],looks=[],mesh_record_count=1,source_sha256='x')
         from unittest.mock import patch
-        with patch('rc2016.formats.native_model._selected_meshes',return_value=[0]):
+        with patch('nwo.formats.native_model._selected_meshes',return_value=[0]):
             payload=mesh_payload(decoded)
             self.assertEqual(payload['rock_alpha'],[0.0,0.5,1.0])
             self.assertEqual(payload['rock_alpha_sources'][0]['source'],'native_colors_alpha')
@@ -947,7 +947,7 @@ class DroppedPixelsTests(unittest.TestCase):
         materials = [dict(index=i, path=p) for i, p in enumerate(paths)]
         with patch.object(tp, 'material_texture_paths', side_effect=lambda _a, p: paths[p]), \
                 patch.object(tp, 'load_texture', side_effect=loaded) as load, \
-                patch('rc2016.viewer.native_glsl.selected_translation', return_value=None):
+                patch('nwo.viewer.native_glsl.selected_translation', return_value=None):
             rock, tint, puddle = (tp.material_textures(None, materials, cache)[i] for i in range(3))
         self.assertEqual(rock['_rock_volume']['source_paths'], ['mask', 'c2', 'g2', 'n2'])
         self.assertNotIn('unresolved_second_layer', rock['rock_blend'])
@@ -965,7 +965,7 @@ class GroundPuddlesTests(unittest.TestCase):
         from pathlib import Path
         import json
         from unittest.mock import patch
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         folder=MATERIALS/'GroundPuddles'
         graph='materialgraph/environment/kalebo/jn_ground_puddles.materialgraph'
         rule=tp._graph_rule([graph]);self.assertTrue(rule['puddles'])

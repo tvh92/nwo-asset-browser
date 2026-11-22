@@ -11,9 +11,9 @@ import random
 import unittest
 from pathlib import Path
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms, frame_fade
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms, frame_fade
 
 GRAPH = 'materialgraph/character/enemy/enm_victor_von_ion_tubes/enm_victor_von_ion_tubes_w_rust.materialgraph'
 MATERIAL = 'material/character/enemy/enm_victor_von_ion_tubes/enm_victor_von_ion_tubes.material'
@@ -102,7 +102,7 @@ class IonTubesRuleTests(unittest.TestCase):
         self.assertEqual(set(expected), set(wanted))
         self.assertEqual(expected['VR ion tubes tint'], [0.0953, 0.5906, 1.0])
         self.assertEqual((expected['VR ion tubes gain'], expected['VR ion tubes amplitude'], expected['VR ion tubes time']), (6.0, 0.5, 0.0))
-        text = (pathlib.Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (pathlib.Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_ion_tubes')[1].split('def _finish_viewer_rule')[0]
         for name in names:
             self.assertIn(name[3:], body)
@@ -118,7 +118,7 @@ class EffectClockTests(unittest.TestCase):
     """The viewer clock for CB0[99]: running while a clip plays, held while paused, static at the rest pose."""
 
     def view(self):
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         view = ModelViewport.__new__(ModelViewport)
         view.animate_effects, view._effects_job, view._effect_origin, view._effect_held = False, None, None, None
         view._schedule_draw = lambda: None
@@ -150,8 +150,8 @@ class IonTubesArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders import translator
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders import translator
         cls.archive = open_archive(root)
         cls.graph = bytes(asset_bytes(cls.archive, GRAPH))
         cls.material = bytes(asset_bytes(cls.archive, MATERIAL))

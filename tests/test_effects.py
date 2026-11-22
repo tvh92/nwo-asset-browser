@@ -1,4 +1,4 @@
-"""Visual-effect placements and the light cones among them (rc2016/levels/effects.py)."""
+"""Visual-effect placements and the light cones among them (nwo/levels/effects.py)."""
 import math
 import os
 import struct
@@ -7,8 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.levels import effects
-from rc2016.levels.zone_format import path_crc64
+from nwo.levels import effects
+from nwo.levels.zone_format import path_crc64
 
 PATHS = [r'visualeffect\environment\global\ambient\gbl_amb_Light_Cone_Circular_Med\gbl_amb_Light_Cone_Circular_Med.visualeffect',
          r'visualeffect\environment\global\ambient\gbl_amb_Light_Cone_Circular_Med\gbl_amb_Light_Cone_Circular_Small.visualeffect',
@@ -214,12 +214,12 @@ RESEARCH = os.environ.get('RC2016_RESEARCH')
 class ArchiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(RESEARCH)
         cls.zone = 'levels/aridia/openarea/openworld/default_region/lighting.zone'
 
     def test_aridia_places_27_light_cones_and_every_placement_has_the_decoded_shape(self):
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         placements = effects.decode_zone_effects(asset_bytes(self.archive, self.zone), self.zone)
         cones = [p for p in placements if effects.is_light_cone(p['effect'])]
         names = sorted({p['effect'].rsplit('/', 1)[-1] for p in cones})
@@ -235,7 +235,7 @@ class ArchiveTests(unittest.TestCase):
         self.assertTrue(model.endswith('gbl_amb_light_cone_circular_med.model'), model)
 
     def test_aridia_has_a_beam_per_placement_at_scale_1_in_its_effects_colour(self):
-        from rc2016.levels.scene_lighting import load_scene_lighting
+        from nwo.levels.scene_lighting import load_scene_lighting
         lighting = load_scene_lighting(self.archive, [self.zone])
         cones = lighting['light_cones']
         self.assertEqual(len(cones), 27)
@@ -292,8 +292,8 @@ class ArchiveTests(unittest.TestCase):
                 self.assertAlmostEqual(value, 1.0, places=5)     # slot 1 x slot 4: no hue in the tint
 
     def test_quartus_wide_cones_are_drawn_on_the_wide_model_axis(self):
-        from rc2016.levels.scene import level_zone_paths
-        from rc2016.levels.scene_lighting import load_scene_lighting
+        from nwo.levels.scene import level_zone_paths
+        from nwo.levels.scene_lighting import load_scene_lighting
         lighting = load_scene_lighting(self.archive, level_zone_paths(self.archive, 'levels/quartu/quartu.level'))
         cones = lighting['light_cones']
         self.assertEqual(len(cones), 59)

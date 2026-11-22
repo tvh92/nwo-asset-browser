@@ -5,7 +5,7 @@ provenance only, never memory evaluation, sampler state, or vertex semantics.
 """
 import unittest
 
-from rc2016.shaders.translator import Compiler
+from nwo.shaders.translator import Compiler
 
 
 # The MUBUF enum values are from third_party/opengnm/gcn_types.h; MTBUF has

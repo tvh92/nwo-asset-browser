@@ -5,7 +5,7 @@ from pathlib import Path
 import struct
 import unittest
 
-from rc2016.shaders.translator import Compiler,decoder
+from nwo.shaders.translator import Compiler,decoder
 
 
 class TypedBufferWriteSpanTests(unittest.TestCase):
@@ -37,14 +37,14 @@ class SourceBasicColourTests(unittest.TestCase):
         if not workspace:raise unittest.SkipTest('RC2016_RESEARCH not set')
         root=Path(workspace).parents[1]/'Ratchet & Clank (EUR)'/'CUSA01073'
         if not root.exists():raise unittest.SkipTest('Source archive unavailable')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive=open_archive(root)
 
     @classmethod
     def tearDownClass(cls):cls.archive.close()
 
     def test_source_colour_writers_bind_without_inventing_buffer_values(self):
-        from rc2016.viewer.native_glsl import selected_translation,evaluate_surface
+        from nwo.viewer.native_glsl import selected_translation,evaluate_surface
         cases=[('material/environment/metropolis/ground/met_gnd_grass_distant_01/met_gnd_grass_distant_01.material',
                 .12200000137090683,0.,(1.,1.)),
                ('material/environment/pokitaru/ground/pok_gnd_sand_floor_blend_01/rp_nov_gnd_grass_simple.material',

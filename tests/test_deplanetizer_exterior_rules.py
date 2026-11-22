@@ -11,10 +11,10 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.grey_g_graphs import GREY_G_GRAPHS
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms, record_colour_encode
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.grey_g_graphs import GREY_G_GRAPHS
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms, record_colour_encode
 
 ROOT = Path(__file__).resolve().parents[1]
 GLASS_GRAPH = 'materialgraph/environment/deplanetizer/architecture/dep_arch_glass_panels_01/dep_arch_glass_panels_01.materialgraph'
@@ -119,7 +119,7 @@ class UniformTests(unittest.TestCase):
         for x in b:
             self.assertAlmostEqual(x, 1.0)   # white record colour encodes to 1
         self.assertEqual(glass_uniforms(dict(kind='dwarf_star', params=p), 2.5)[1][1], 2.5)
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         self.assertIn('dwarf_star', ModelViewport.EFFECT_KINDS)
         self.assertAlmostEqual(record_colour_encode((0.5,))[0], 1.055 * 0.5 ** (1 / 2.4) - 0.055)
         self.assertEqual(record_colour_encode((0.0,))[0], 0.0)   # max(0, -0.055): no linear segment
@@ -246,7 +246,7 @@ class BlenderFrontEndTests(unittest.TestCase):
             names, roles = validation._viewer_required(rule, False)
             self.assertTrue(set(names) <= set(validation._viewer_expected_constants(rule)), kind)
             self.assertEqual(roles, wanted, kind)
-        text = (ROOT / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (ROOT / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         kinds = text.split('GLASS_VIEWER_KINDS =')[1].split('\n')[0]
         for kind in ('glass_tinted_spec', 'dwarf_star', 'flat_incandescent'):
             self.assertIn("'%s'" % kind, kinds)
@@ -265,7 +265,7 @@ class ArchiveRuleTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -312,7 +312,7 @@ class ArchiveRuleTests(unittest.TestCase):
         self.assertNotIn('flat_surface', paths)
 
     def test_blender_rule(self):
-        from rc2016.formats.materials import viewer_graph_rule
+        from nwo.formats.materials import viewer_graph_rule
         for material, kind in ((GLASS_MATERIAL, 'glass_tinted_spec'), (STAR_MATERIAL, 'dwarf_star'), (GLOW_MATERIAL, 'flat_incandescent')):
             rule = viewer_graph_rule(self.archive, material)
             self.assertTrue(rule['applies'], material)

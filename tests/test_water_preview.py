@@ -1,9 +1,9 @@
 """Water preview rule: family-level coverage and uniform packing (no archive, no GL)."""
 import unittest
 
-from rc2016.formats.links import EXACT, rule_coverage
-from rc2016.viewer.shading import GLASS_KINDS, glass_uniforms
-from rc2016.viewer.textures import WATER_PRESENTATION
+from nwo.formats.links import EXACT, rule_coverage
+from nwo.viewer.shading import GLASS_KINDS, glass_uniforms
+from nwo.viewer.textures import WATER_PRESENTATION
 
 WATER = 'materialgraph/visualeffect/environment/pokitaru/unique/pok_uniq_water/pok_uniq_water.materialgraph'
 GLOW = 'materialgraph/visualeffect/environment/pokitaru/unique/pok_uniq_water/rp_pok_uniq_water_biolumenscent.materialgraph'

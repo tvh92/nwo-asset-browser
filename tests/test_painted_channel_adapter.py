@@ -7,8 +7,8 @@ linear generic white fallback represented by the resulting bound IR.
 import unittest
 from unittest import mock
 
-from rc2016.shaders import bindings
-from rc2016.shaders.ir import DAG
+from nwo.shaders import bindings
+from nwo.shaders.ir import DAG
 
 
 def _fixture(stream_channels, attribute_channels=(0, 1, 3)):
@@ -22,9 +22,9 @@ def _fixture(stream_channels, attribute_channels=(0, 1, 3)):
         normal=None, limitations=[])
     program = {'_lowered': lowered}
     contract = {'resources': [], 'index': 0}
-    with mock.patch('rc2016.formats.materials.texture_slot_records', return_value=[]), \
+    with mock.patch('nwo.formats.materials.texture_slot_records', return_value=[]), \
          mock.patch.object(bindings, '_parameter_values', return_value=({}, [])), \
-         mock.patch('rc2016.shaders.engine_inputs.reconstruct_world_position',
+         mock.patch('nwo.shaders.engine_inputs.reconstruct_world_position',
                     side_effect=lambda _ir, roots: (roots, 1)):
         result = bindings._bind(program, contract, b'', {}, True, (), stream_channels)
     return result

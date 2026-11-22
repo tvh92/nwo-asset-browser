@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unittest
 
-from rc2016.app.main import (
+from nwo.app.main import (
     BatchRunner,
     build_command,
     discover_models,
@@ -62,7 +62,7 @@ class DiscoveryTest(unittest.TestCase):
             (root / "thing.model").write_bytes(b"model")
             (root / "thing.animset").write_bytes(b"animset")
             result = subprocess.run(
-                [sys.executable, "-m", "rc2016", "--scan", str(root)],
+                [sys.executable, "-m", "nwo", "--scan", str(root)],
                 cwd=str(ROOT), capture_output=True, text=True, check=True,
             )
             payload = json.loads(result.stdout)
@@ -123,7 +123,7 @@ class BackendIntegrationTest(unittest.TestCase):
             animset.write_bytes(b"animset")
             record = discover_models(root)[0]
             command = build_command(Path("python.exe"), record, root / "out", ("Idle", "Fire"))
-            self.assertIn(str(ROOT / "rc2016" / "formats" / "animation_transforms.py"), command)
+            self.assertIn(str(ROOT / "nwo" / "formats" / "animation_transforms.py"), command)
             self.assertEqual(command[-4:], ["--prefix", "Idle", "--prefix", "Fire"])
 
 

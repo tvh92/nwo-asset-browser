@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
-from rc2016.levels.viewport import LevelViewport
-from rc2016.viewer.viewport import ModelViewport
+from nwo.levels.viewport import LevelViewport
+from nwo.viewer.viewport import ModelViewport
 from tests.test_perf_wp5 import FakeGL, bare_view
 
 
@@ -37,7 +37,7 @@ def settle(view):
 
 class ShadowAmbientTests(unittest.TestCase):
     def test_a_fitted_atmosphere_overrides_the_novalis_factor(self):
-        from rc2016.levels import scene_effects
+        from nwo.levels import scene_effects
         self.assertEqual(scene_effects.shadow_ambient('atmosphere/atm_Aridia/atm_Aridia.atmosphere'), 1.0)
         self.assertEqual(scene_effects.shadow_ambient('atmosphere/atm_veldin/atm_veldin.atmosphere'), scene_effects.SHADOW_AMBIENT)
         self.assertEqual(scene_effects.shadow_ambient(None), scene_effects.SHADOW_AMBIENT)
@@ -141,7 +141,7 @@ if __name__ == '__main__':
 
 class GlCallOrderTests(unittest.TestCase):
     def test_queued_uploads_run_before_a_later_call(self):
-        from rc2016.levels.viewport import LevelViewport
+        from nwo.levels.viewport import LevelViewport
         order = []
         view = object.__new__(LevelViewport)
         view._make_current = lambda: True

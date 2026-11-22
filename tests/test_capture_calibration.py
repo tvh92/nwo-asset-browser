@@ -1,9 +1,9 @@
-"""Captured Novalis frame constants (rc2016.levels.capture_calibration): synthetic checks, no game data."""
+"""Captured Novalis frame constants (nwo.levels.capture_calibration): synthetic checks, no game data."""
 import math
 import unittest
 
-from rc2016.levels import capture_calibration as cc
-from rc2016.levels import fog, lightgrid, scene_effects
+from nwo.levels import capture_calibration as cc
+from nwo.levels import fog, lightgrid, scene_effects
 
 NOVALIS = 'atmosphere/atm_Novalis/atm_Novalis.atmosphere'
 PROFILE = dict(heights=(-100.0, -52.0, 386.0, 926.0, 400.0), densities=(1.0, 0.1, 0.002, 0.0, 0.0))

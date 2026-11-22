@@ -2,13 +2,13 @@
 import math
 import unittest
 
-from rc2016.viewer.viewport import (MeshPayloadError, back_to_front, batch_centres, camera_fit, forward_order, mesh_bounds,
+from nwo.viewer.viewport import (MeshPayloadError, back_to_front, batch_centres, camera_fit, forward_order, mesh_bounds,
                        perspective_matrix, split_forward, validate_mesh)
 
 
 class LeafCutoutShaderTests(unittest.TestCase):
     def test_fragment_and_pick_shaders_discard_below_the_threshold_and_the_uniforms_are_linked(self):
-        from rc2016.viewer import shading
+        from nwo.viewer import shading
         self.assertIn("if (uHasC && c.a < uAlphaCut) discard;", shading.FRAGMENT)
         self.assertIn("uAlphaCut", shading.OPAQUE_UNIFORMS)
         # The cut-out sits right after `_c` is sampled, before any lighting term reads it.
@@ -17,7 +17,7 @@ class LeafCutoutShaderTests(unittest.TestCase):
         self.assertIn("discard", shading.PICK_FRAGMENT)
 
     def test_gl_entry_carries_the_cutout(self):
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
 
         class Upload:
             def _upload_texture(self, texture): return 5
@@ -132,8 +132,8 @@ class GlassPassTests(unittest.TestCase):
 
 class FailedShadedDrawTests(unittest.TestCase):
     def test_failed_draw_switches_every_attribute_array_off_and_the_next_mesh_retries(self):
-        from rc2016.viewer.viewport import ModelViewport
-        from rc2016.viewer.shading import ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, RCRA_COLOUR_ATTRIBUTE, UV1_ATTRIBUTE
+        from nwo.viewer.viewport import ModelViewport
+        from nwo.viewer.shading import ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, RCRA_COLOUR_ATTRIBUTE, UV1_ATTRIBUTE
         disabled = []
         view = ModelViewport.__new__(ModelViewport)
         view._shading = type('Shading', (), {'glDisableVertexAttribArray': staticmethod(disabled.append)})()

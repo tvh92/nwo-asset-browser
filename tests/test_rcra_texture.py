@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rc2016.app.browser import rule_text
-from rc2016.games.rcra import material as rmat
-from rc2016.games.rcra import texture as rt
+from nwo.app.browser import rule_text
+from nwo.games.rcra import material as rmat
+from nwo.games.rcra import texture as rt
 
 GAME = os.environ.get('RCRA_GAME')
 
@@ -106,7 +106,7 @@ class TextureTests(unittest.TestCase):
             rt.load_texture(FakeSource({'v.texture': data}), 'v.texture')
 
     def test_unit_float_and_16_bit_textures_convert_to_rgba8(self):
-        from rc2016.games.rcra import unit_texture as ut
+        from nwo.games.rcra import unit_texture as ut
         rg32f = dict(format=16, width=2, height=1, pixels=struct.pack('<4f', 0.0, 0.5, 128 / 255, 1.0))
         out = ut.as_rgba8(rg32f)
         self.assertEqual((out['format'], out['stored_format'], out['srgb']), (28, 16, False))
@@ -120,7 +120,7 @@ class TextureTests(unittest.TestCase):
         self.assertFalse(ut.is_data(28))
 
     def test_unit_data_textures_preview_and_export_as_16_bit_png(self):
-        from rc2016.games import rcra_game
+        from nwo.games import rcra_game
         data, _ = texture_asset(fmt=35, hd_mips=0)   # R16G16_UNORM, 8x8 with 2 mips: 320 bytes
         top = struct.pack('<128H', *[i * 512 for i in range(128)])
         data = data[:-320] + top + bytes(64)
@@ -160,7 +160,7 @@ class TextureTests(unittest.TestCase):
 
 class EngineDefaultTests(unittest.TestCase):
     def test_engine_defaults_are_constant_rgba8(self):
-        from rc2016.games.rcra import blender_export as bexp
+        from nwo.games.rcra import blender_export as bexp
         for path, value, faces in ((rt.ENGINE_DEFAULT_2D, 128, 1), (rt.ENGINE_DEFAULT_3D, 255, 1),
                                    (rt.ENGINE_DEFAULT_CUBE, 128, 6)):
             texture = rt.read_top_mip(None, path, full=True)
@@ -215,7 +215,7 @@ class MaterialTests(unittest.TestCase):
 class RealTextureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 

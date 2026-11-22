@@ -5,7 +5,7 @@ decode a real shader or establish runtime draw selection.
 """
 import unittest
 
-from rc2016.shaders.translator import Compiler
+from nwo.shaders.translator import Compiler
 
 
 RESOURCE_POINTER = dict(kind=0x13, api=0, reg=12, flags=16)

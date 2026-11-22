@@ -13,7 +13,7 @@ The deferred writers of the case and brain graphs are the shared zero writer `11
 ## Evidence and what it does not prove
 
 - The capture (`Research/captures/2026-11-07_telepathopus/`, a Telepathipus in close view) holds 47 draws, all screen-space UI over a finished scene image, so there are no captured constants or draw state. The final image shows the look: a pink-white, brain-shaped case with red edges and veins, the yellow core of the brain showing through it.
-- The shadPS4 dumps of that session hold all five forward programs, compiled during the scene. The formulas below were read from their IR. The case's colour and alpha were checked in `tests/test_telepathipus_brain_case.py` against the project's own GCN decode (`rc2016.research.forward_loops`, with the light-loop outputs as random inputs): relative error below 2e-6.
+- The shadPS4 dumps of that session hold all five forward programs, compiled during the scene. The formulas below were read from their IR. The case's colour and alpha were checked in `tests/test_telepathipus_brain_case.py` against the project's own GCN decode (`nwo.research.forward_loops`, with the light-loop outputs as random inputs): relative error below 2e-6.
 - Texture binding follows API = 5 + resource index of pass 0 (case: 5 flow normal `met_amb_water_pool_flow_01_n`, 6 and 7 the case `_g`, 8 `_c`, 9 `_n`; brain: 5 `_g`, 6 `_n`, 7 `telepathipus_brain_electricity`, 8 `default_pink_shader_c`, 9 `telepathipus_leg_brain_c`), confirmed by the channels each sample reads.
 - Pass 1 of the case (`775A45A0`) has the same literals and terms without the water-flow distortion (three samples fewer); which pass the game picks at what distance is not established.
 
@@ -49,7 +49,7 @@ The existing [basic_flat_color](BASIC_FLAT_COLOR_D169A814.md) reading applies: z
 
 ## Viewer and Blender
 
-- Case: exact-graph rule `brain_case` (`uKind` 20, `rc2016/viewer/shading.py`). The model viewer draws its frames in the float scene target and copies the frame's colour and depth just before the case draws, so `Bg`, `Z` and the composition above are the program's; the light is the viewer rig. The level viewer has no copies: there `k` = 1 and the blend supplies `Bg` (alpha = `1 - (1 - k)(1 - s)(1 - _c.a)`, `D` taken as 1 for it). Frozen: `t` = 0, `q` = 1, no SSR, fog `t_f` = 1. The tangent frame comes from screen derivatives, as for the viewer's other normal maps.
+- Case: exact-graph rule `brain_case` (`uKind` 20, `nwo/viewer/shading.py`). The model viewer draws its frames in the float scene target and copies the frame's colour and depth just before the case draws, so `Bg`, `Z` and the composition above are the program's; the light is the viewer rig. The level viewer has no copies: there `k` = 1 and the blend supplies `Bg` (alpha = `1 - (1 - k)(1 - s)(1 - _c.a)`, `D` taken as 1 for it). Frozen: `t` = 0, `q` = 1, no SSR, fog `t_f` = 1. The tangent frame comes from screen derivatives, as for the viewer's other normal maps.
 - Inside: the `basic_flat_color` reading culls back faces when the flags word says so (viewer and Blender, `VR cull back faces`).
 - Brain: exact-graph grey reading with `_c`, `_g`, `_n` bound by slot (`0xABDAD780`, `0x1576D848`, `0x7AE34E7A`) instead of by suffix; the electricity is drawn in its off state.
 - Blender builds the case through the glass front-end without the scene lookups: `k` = 1 (the body colour where the viewer shows what is behind), no UV distortion, and the specular tint on F0 and the Principled edge tint.

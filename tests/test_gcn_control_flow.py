@@ -2,9 +2,9 @@
 import struct
 import unittest
 
-from rc2016.shaders import gcn
-from rc2016.shaders.ir import DAG
-from rc2016.shaders.translator import Compiler, decoder
+from nwo.shaders import gcn
+from nwo.shaders.ir import DAG
+from nwo.shaders.translator import Compiler, decoder
 
 V = 256  # VGPR operand base
 
@@ -77,7 +77,7 @@ def run(code, inputs, slots=(), register=3):
 
 class ControlFlowTests(unittest.TestCase):
     def test_ps_input_registers_follow_input_address(self):
-        from rc2016.shaders.translator import ps_input_registers
+        from nwo.shaders.translator import ps_input_registers
         # PERSP_CENTER (bit 1), POS_X..POS_W (bits 8-11), FRONT_FACE (bit 12); POS_W not loaded.
         addr = (1 << 1) | (0xf << 8) | (1 << 12)
         ena = addr & ~(1 << 11)
@@ -90,8 +90,8 @@ class ControlFlowTests(unittest.TestCase):
         self.assertEqual(ps_input_registers(addr, ena, 4), {})
 
     def test_front_face_zero_test_binds_to_facing(self):
-        from rc2016.shaders.bindings import bind_front_face
-        from rc2016.viewer.native_glsl import emit_surface, evaluate_surface
+        from nwo.shaders.bindings import bind_front_face
+        from nwo.viewer.native_glsl import emit_surface, evaluate_surface
         addr = (1 << 1) | (1 << 12)  # PERSP_CENTER, FRONT_FACE in VGPR 2
         # v3 = front ? v1 : v2 through an integer not-equal test (VOP3 names it LG).
         cmp = struct.pack('<Q', (0x34 << 26) | (op('GcnOpcodeVOP3', 'V_CMP_LG_U32_E64') << 17) | 106 |
@@ -112,7 +112,7 @@ class ControlFlowTests(unittest.TestCase):
         self.assertEqual((front['gloss'], back['gloss']), (.25, .75))
 
     def test_front_face_other_uses_stay_unbound(self):
-        from rc2016.shaders.bindings import bind_front_face
+        from nwo.shaders.bindings import bind_front_face
         ir = DAG()
         face = ir.node('input', name='ps.FRONT_FACE', kind='ps_input', input='FRONT_FACE')
         roots = [ir.op('mul', face, ir.const(2.))]

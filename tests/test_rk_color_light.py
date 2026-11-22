@@ -8,8 +8,8 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.formats.links import EXACT, GENERIC, rule_coverage
-from rc2016.viewer import textures as tp
+from nwo.formats.links import EXACT, GENERIC, rule_coverage
+from nwo.viewer import textures as tp
 
 GRAPH = 'materialgraph/global/rk_color_light/rk_color_light.materialgraph'
 FOLDER = 'material/global/rk_env_black/'
@@ -41,7 +41,7 @@ class ArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -59,7 +59,7 @@ class ArchiveTests(unittest.TestCase):
             self.assertNotIn(role, paths)
 
     def test_only_opaque_materials_take_the_writer(self):
-        from rc2016.viewer.loader import material_rules
+        from nwo.viewer.loader import material_rules
         for name in OPAQUE:
             path = FOLDER + name + '.material'
             self.assertEqual(tp.material_texture_paths(self.archive, path)['flat_surface']['model'], 'color_light', name)
@@ -71,7 +71,7 @@ class ArchiveTests(unittest.TestCase):
 
     def test_keys_follow_the_graph_cb_table(self):
         import hashlib
-        from rc2016.shaders.families import graph_parameter_tables
+        from nwo.shaders.families import graph_parameter_tables
         key = next(k for k in self.archive.resolve(GRAPH) if self.archive.entries[k]['type'] == 'materialgraph')
         data = tp.asset_data(self.archive, key)
         self.assertEqual(hashlib.sha256(data).hexdigest(), tp.RK_COLOR_LIGHT_GRAPH_SHA256)
@@ -80,7 +80,7 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(table, [(0, k['colour']), (3, k['self_lit']), (4, k['f0']), (5, k['gloss'])])
 
     def test_blender_front_end_gets_the_rule(self):
-        from rc2016.formats.materials import viewer_graph_rule
+        from nwo.formats.materials import viewer_graph_rule
         rule = viewer_graph_rule(self.archive, FOLDER + 'rk_env_gray.material')
         self.assertTrue(rule['applies'])
         self.assertIn('flat_surface', rule['ported'])

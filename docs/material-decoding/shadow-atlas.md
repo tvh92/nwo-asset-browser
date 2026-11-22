@@ -1,6 +1,6 @@
 # Sun shadow atlas
 
-The key light's cast shadow is a set of six orthographic cascades along the sun ray, rendered into one D16 atlas and turned into a screen-space shadow mask before the deferred lighting pass. Everything below is read from one Novalis frame (shadPS4 RenderDoc capture); the viewer's implementation is `rc2016/levels/shadow_cascades.py` and the `sceneShadow` helper in `rc2016/levels/scene_effects.py`.
+The key light's cast shadow is a set of six orthographic cascades along the sun ray, rendered into one D16 atlas and turned into a screen-space shadow mask before the deferred lighting pass. Everything below is read from one Novalis frame (shadPS4 RenderDoc capture); the viewer's implementation is `nwo/levels/shadow_cascades.py` and the `sceneShadow` helper in `nwo/levels/scene_effects.py`.
 
 ## Passes
 

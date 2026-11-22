@@ -12,7 +12,7 @@
 
 ## Why the rule is not general
 
-Admitting every texture-free deferred writer whose native resource bitmap is 0 was measured across all archive graphs. It newly binds, for dozens of graphs, the zero-output placeholder writer `0x11408de9` (the visible colour of those materials lives in forward and discard programs), plus `0xd88e357b` and `0xec0d6a2f`. Those would change from the existing preview fallback to a zero-output surface, so the general rule was rejected. `RESOURCE_FREE_WRITERS` in `rc2016/shaders/bindings.py` names the one audited writer by graph SHA-256, shader id and code SHA-256 (`82d8502f...032d`); any other graph or code gets nothing. Archive-backed check: `tests/test_resource_free_writer_join.py`.
+Admitting every texture-free deferred writer whose native resource bitmap is 0 was measured across all archive graphs. It newly binds, for dozens of graphs, the zero-output placeholder writer `0x11408de9` (the visible colour of those materials lives in forward and discard programs), plus `0xd88e357b` and `0xec0d6a2f`. Those would change from the existing preview fallback to a zero-output surface, so the general rule was rejected. `RESOURCE_FREE_WRITERS` in `nwo/shaders/bindings.py` names the one audited writer by graph SHA-256, shader id and code SHA-256 (`82d8502f...032d`); any other graph or code gets nothing. Archive-backed check: `tests/test_resource_free_writer_join.py`.
 
 ## Not modelled
 

@@ -1,7 +1,7 @@
-"""Render Region padding math (rc2016/pipeline/scene_defaults.padded_region); pure, no Blender."""
+"""Render Region padding math (nwo/pipeline/scene_defaults.padded_region); pure, no Blender."""
 import unittest
 
-from rc2016.pipeline.scene_defaults import REGION_PADDING_LONG, REGION_PADDING_SHORT, REGION_PADDING_SIDE, padded_region
+from nwo.pipeline.scene_defaults import REGION_PADDING_LONG, REGION_PADDING_SHORT, REGION_PADDING_SIDE, padded_region
 
 
 class PaddedRegionTests(unittest.TestCase):
@@ -44,7 +44,7 @@ class PaddedRegionTests(unittest.TestCase):
 
     def test_camera_distance_makes_points_span_the_requested_fraction(self):
         import numpy as np
-        from rc2016.pipeline.scene_defaults import camera_distance_for_fill
+        from nwo.pipeline.scene_defaults import camera_distance_for_fill
 
         # Camera looks down -Z (identity rotation); a 2 x 2 square at the origin, focal length 1.
         # At distance d the square's half-size 1 maps to +-1/d about the frame centre, so it spans 1 / d
@@ -60,7 +60,7 @@ class PaddedRegionTests(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import patch
         import numpy as np
-        from rc2016.pipeline.scene_defaults import fit_render_region
+        from nwo.pipeline.scene_defaults import fit_render_region
 
         camera = SimpleNamespace(type="CAMERA", location=(1, 2, 3),
                                  matrix_world=SimpleNamespace(inverted=lambda: np.eye(4)),

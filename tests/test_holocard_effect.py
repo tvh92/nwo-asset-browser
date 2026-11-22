@@ -1,4 +1,4 @@
-"""Holocard glow (rc2016/viewer/holocard_effect.py, rc2016/pipeline/holocard_effect.py): the card table, the glow quad's
+"""Holocard glow (nwo/viewer/holocard_effect.py, nwo/pipeline/holocard_effect.py): the card table, the glow quad's
 corners and normals, the viewer quads, the shader kinds, the decoded effect and card locators (game files) and the quad
 geometry against the holocard capture (Research)."""
 import json
@@ -7,8 +7,8 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.viewer import holocard_effect as fx
-from rc2016.viewer import shading
+from nwo.viewer import holocard_effect as fx
+from nwo.viewer import shading
 
 ROOT = Path(__file__).resolve().parents[1]
 CAPTURE = ROOT / 'Research/captures/2026-11-12_holocard-glow'
@@ -89,7 +89,7 @@ class ShaderTests(unittest.TestCase):
 
 
 def _archive():
-    from rc2016.levels.scene import open_archive
+    from nwo.levels.scene import open_archive
     return open_archive(os.environ['RC2016_RESEARCH'])
 
 
@@ -108,7 +108,7 @@ class GameFileTests(unittest.TestCase):
         self.assertEqual([round(v, 6) for v in glow['pulls']], [-0.2, 0.2, 0.2, -0.0])   # +0x7C = 0.2, -0.2, -0.2, 0
 
     def test_actors_and_conduit_name_the_effect(self):
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         for actor in fx.CARDS.values():
             self.assertIn(b'pup_holocard_vfx', asset_bytes(self.archive, actor).lower())
         conduit = asset_bytes(self.archive, fx.CONDUIT_PATH)
@@ -116,9 +116,9 @@ class GameFileTests(unittest.TestCase):
         self.assertIn(fx.LOCATOR.encode(), conduit)
 
     def test_every_card_preview_and_blender_description(self):
-        from rc2016.formats.native_model import decode_locators
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.pipeline import holocard_effect
+        from nwo.formats.native_model import decode_locators
+        from nwo.levels.scene import asset_bytes
+        from nwo.pipeline import holocard_effect
         for stem, folder in (('pup_card_single', 'pup_card_single'), ('pup_card_ryno', 'pup_card_single'), ('pup_card_pack', 'pup_card_pack')):
             path = 'equipment/pickup/%s/%s.model' % (folder, stem)
             data = asset_bytes(self.archive, path)
@@ -133,7 +133,7 @@ class GameFileTests(unittest.TestCase):
 
 
 class BlenderDriverTests(unittest.TestCase):
-    """The Blender glow's driver expressions (rc2016/pipeline/holocard_effect.attach), evaluated here as Blender would."""
+    """The Blender glow's driver expressions (nwo/pipeline/holocard_effect.attach), evaluated here as Blender would."""
 
     @staticmethod
     def _quaternion(axis, degrees):
@@ -142,7 +142,7 @@ class BlenderDriverTests(unittest.TestCase):
 
     def _evaluate(self, turn, camera, anchor=(0.0, 0.0, 0.0), scale=1.0, along_normal=0):
         """(camera in native space, side, toward, location, fade) for a card turned by ``turn`` (axis, degrees)."""
-        from rc2016.pipeline import holocard_effect as pipeline
+        from nwo.pipeline import holocard_effect as pipeline
         centre, normal = (0.0, 1.195, 0.0), (1.0, 0.0, 0.0)
         e = pipeline.attach_expressions(centre, normal, 0.2, centre, dict(distance=60.0, range=25.0), 0.5)
         names = dict(self._quaternion(*turn), a_x=anchor[0], a_y=anchor[1], a_z=anchor[2], a_s=scale,
@@ -175,7 +175,7 @@ class BlenderDriverTests(unittest.TestCase):
         self.assertAlmostEqual(far, 0.5 * (60.0 - 50.0) / 25.0, places=6)   # world distance: native x scale
 
     def test_expressions_fit_in_blender(self):
-        from rc2016.pipeline import holocard_effect as pipeline
+        from nwo.pipeline import holocard_effect as pipeline
         e = pipeline.attach_expressions((0.3, 1.2, -0.4), (0.6, 0.48, 0.64), 0.2, (0.3, 1.2, -0.4), dict(distance=60.0, range=25.0), 0.9725490196)
         for value in e['camera'] + e['toward'] + e['location'] + [e['side'], e['fade']]:
             self.assertLessEqual(len(value), pipeline.EXPRESSION_LIMIT)

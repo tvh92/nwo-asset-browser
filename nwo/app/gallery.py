@@ -1,0 +1,976 @@
+"""Gallery tab: a virtualised thumbnail grid for the Model asset type.
+
+The tab shows the models selected in the tree (selecting a folder selects every model in it) or, with
+nothing or one model selected, the current search results. Thumbnails come from the cache written by
+``nwo.app.thumbnails``; missing ones are rendered by one owned renderer process, visible tiles first. The renderer stays
+up while the grid scrolls (its queue is replaced through stdin) and stops after IDLE_STOP_SECONDS with nothing to do.
+The layout, queue and selection rules are plain functions so they run without Tk.
+"""
+from __future__ import annotations
+
+from collections import OrderedDict
+import math
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import queue
+import re
+
+from nwo.app.theme import TOOLTIP_COLORS, color, listen, track
+from nwo.app.thumbnails import (DEFAULT_SIZE, RendererProcess, ThumbnailIndex, cache_dir)
+from nwo.app.workers import LatestWork
+
+IMAGE_CACHE_SIZE = 300      # PhotoImages kept; the tiles on screen are a small subset
+FILTER_CAP = 2000           # largest search-result list shown when nothing is selected
+QUEUE_HEAD = 80             # visible tiles must be within this many pending models, else the renderer is re-prioritised
+QUEUE_LIMIT = 1500          # models handed to the renderer in one queue
+RESTART_DELAY_MS = 450      # debounce for scroll and selection changes
+RESTART_MIN_SECONDS = 1.5   # never respawn faster than this
+STALL_SECONDS = 600         # one model this long without a result: the renderer is stopped and the model skipped this session
+IDLE_STOP_SECONDS = 60      # a renderer idle this long is stopped (it holds a GL context and its worker processes)
+SHIFT_MASK = 0x0001         # Tk event.state bits for a click or key
+CONTROL_MASK = 0x0004
+
+
+# Layout maths ----------------------------------------------------------------
+def column_count(width, cell_width):
+    return max(1, int(width) // max(1, int(cell_width)))
+
+
+def row_count(total, columns):
+    return math.ceil(total / columns) if total > 0 else 0
+
+
+def visible_rows(offset, view_height, row_height, rows, overscan=1):
+    """Row range [first, last) that intersects the viewport (plus ``overscan`` rows each side)."""
+    if rows <= 0 or row_height <= 0:
+        return 0, 0
+    first = max(0, int(offset // row_height) - overscan)
+    last = min(rows, math.ceil((offset + max(0, view_height)) / row_height) + overscan)
+    return first, max(first, last)
+
+
+def visible_tiles(offset, view_height, row_height, columns, total, overscan=1):
+    """Tile index range [first, last) for a scroll offset."""
+    first_row, last_row = visible_rows(offset, view_height, row_height, row_count(total, columns), overscan)
+    return first_row * columns, min(total, last_row * columns)
+
+
+def tile_at(x, y, offset, cell_width, cell_height, columns, total):
+    """Index of the tile under canvas-window point (x, y), or None for gaps and the empty tail."""
+    if x < 0 or y < 0:
+        return None
+    column, row = int(x // cell_width), int((y + offset) // cell_height)
+    if column >= columns:
+        return None
+    index = row * columns + column
+    return index if index < total else None
+
+
+def scroll_to_show(index, offset, view_height, cell_height, columns):
+    """New scroll offset that brings tile ``index`` fully into view (unchanged when it already is)."""
+    top = (index // columns) * cell_height
+    if top < offset:
+        return top
+    if top + cell_height > offset + view_height:
+        return top + cell_height - view_height
+    return offset
+
+
+class ImageCache:
+    """Bounded LRU of decoded images, so thousands of tiles never hold hundreds of megabytes."""
+
+    def __init__(self, capacity=IMAGE_CACHE_SIZE):
+        self.capacity = max(1, capacity)
+        self.items = OrderedDict()
+
+    def get(self, key):
+        if key in self.items:
+            self.items.move_to_end(key)
+            return self.items[key]
+        return None
+
+    def put(self, key, value):
+        self.items[key] = value
+        self.items.move_to_end(key)
+        while len(self.items) > self.capacity:
+            self.items.popitem(last=False)
+
+    def discard(self, key):
+        self.items.pop(key, None)
+
+    def clear(self):
+        self.items.clear()
+
+    def __len__(self):
+        return len(self.items)
+
+    def __contains__(self, key):
+        return key in self.items
+
+
+def elide(text, measure, width):
+    """Shorten ``text`` with an ellipsis until ``measure(text)`` fits ``width``."""
+    if measure(text) <= width:
+        return text
+    low, high = 0, len(text)
+    while low < high:   # longest prefix that fits with the ellipsis
+        middle = (low + high + 1) // 2
+        if measure(text[:middle] + '…') <= width:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low].rstrip() + '…' if low else '…'
+
+
+NUMBERED_STEM = re.compile(r'^(?:moby|tie|shrub)-?\d+(?:_lod\d+)?$')
+
+
+def used_by(record):
+    return [name.strip() for name in (getattr(record, 'used_by', '') or '').split(',') if name.strip()]
+
+
+def display_name(record):
+    """The model's file name, as in the list and Copy name.
+
+    Several actors often reference one model (each Clank bot actor lists all four bot models,
+    a chunk is referenced by its parent enemy), so an actor name would mislabel it. Only a
+    numbered moby/tie/shrub model, which has no name of its own, shows the first named actor."""
+    stem = Path(record.archive_path).stem
+    actors = used_by(record)
+    return actors[0] if actors and NUMBERED_STEM.match(stem) else stem
+
+
+CHUNK_BANGLE_FOLDER = re.compile(r'(?:^|_)(?:chunks?|bangles?)(?:_set)?(?:_?\d+)?$')
+
+
+# Rift Apart models are named by file (``enm_sandshark_spawner_chunks_art``), not kept in a chunk folder.
+CHUNK_BANGLE_STEM = re.compile(r'(?:^|_)chunks(?:_|\d|$)')
+
+
+def is_chunk_or_bangle(record):
+    """Whether a model is inside an archive folder reserved for a chunk or bangle.
+
+    Matches ``chunk``, ``bangle_set`` and the per-enemy ``<name>_chunk_set``, ``<name>_chunks_set`` and
+    ``<name>_bangle_set`` folders, with an optional numbered suffix (``<name>_chunks_set_01``, ``<name>_chunk08``)."""
+    path = getattr(record, 'archive_path', '') or getattr(record, 'relative_model', '')
+    parts = str(path).replace('\\', '/').casefold().split('/')
+    if any(CHUNK_BANGLE_FOLDER.search(folder) for folder in parts[:-1]):
+        return True
+    return bool(CHUNK_BANGLE_STEM.search(Path(parts[-1]).stem))
+
+
+def choose_records(selected, filtered, shown_ids, cap=FILTER_CAP):
+    """Models the gallery shows: (records, kind, total).
+
+    Two or more selected models (a folder, or several rows): exactly those. One selected model that
+    the gallery already shows: keep the list, so clicking a tile does not replace it. Otherwise the
+    current search results, capped at ``cap``. Only models with an archive id are shown."""
+    selected = [r for r in selected if getattr(r, 'model_id', None)]
+    if len(selected) >= 2:
+        return selected, 'selection', len(selected)
+    if len(selected) == 1 and selected[0].model_id in shown_ids:
+        return None, 'keep', 0
+    filtered = [r for r in filtered if getattr(r, 'model_id', None)]
+    return filtered[:cap], 'filter', len(filtered)
+
+
+def render_queue(records, is_ready, first_visible, last_visible, limit=QUEUE_LIMIT):
+    """Ids to render: missing visible tiles, then the missing ones after them, then those before."""
+    order = (list(range(first_visible, last_visible)) + list(range(last_visible, len(records)))
+             + list(range(0, first_visible)))
+    queued = []
+    for position in order:
+        model_id = records[position].model_id
+        if not is_ready(model_id):
+            queued.append(model_id)
+            if len(queued) >= limit:
+                break
+    return queued
+
+
+def needs_restart(visible_missing, pending, head=QUEUE_HEAD):
+    """True when a missing visible tile is not within the first ``head`` pending ids of the running batch."""
+    if not visible_missing:
+        return False
+    return not set(visible_missing) <= set(pending[:head])
+
+
+def stalled(begun, now, limit=STALL_SECONDS):
+    """The model id of a renderer ``begin`` event (id, monotonic time) that has had no result for ``limit`` seconds."""
+    if begun is None:
+        return None
+    model_id, since = begun
+    return model_id if now - since >= limit else None
+
+
+def decode_thumbnail(path):
+    """Decode one thumbnail PNG to an RGBA Pillow image (worker thread; no Tk objects). None without Pillow."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    with Image.open(path) as image:
+        return image.convert('RGBA')
+
+
+def photo_from_image(image, master):
+    """A Tk PhotoImage from a decoded image (UI thread). None when Pillow's Tk bridge is unavailable."""
+    try:
+        from PIL import ImageTk
+        return ImageTk.PhotoImage(image, master=master)
+    except Exception:
+        return None
+
+
+# Tk view ---------------------------------------------------------------------
+class Gallery:
+    """The thumbnail grid: the Grid view of the model list (AssetBrowserApp.show_list_view). All Tk work happens on the UI thread; the renderer is a child process."""
+
+    THUMB = DEFAULT_SIZE
+
+    def __init__(self, browser, parent):
+        """``parent``: the frame the app places ``self.frame`` in (the cell shared with the model tree)."""
+        import tkinter.font as tkfont
+        self.browser, self.app, self.tk, self.ttk = browser, browser.app, browser.tk, browser.ttk
+        tk, ttk = self.tk, self.ttk
+        self.font = tkfont.nametofont('TkDefaultFont', root=self.app.root)
+        self.records, self.kind, self.total = [], 'filter', 0
+        self.base_records = []             # the current list before the Grid-only chunk/bangle filter
+        self.base_kind, self.base_total = 'filter', 0
+        self.ids = set()
+        self.index = ThumbnailIndex(Path('.'))
+        self.cache_root = None
+        self.images = ImageCache()
+        self.index_work = LatestWork()     # index.json is parsed off the UI thread
+        self.index_loading = False
+        self.decoder = ThreadPoolExecutor(max_workers=2, thread_name_prefix='thumbnail-decode')
+        self.decoded = queue.Queue()       # (model_id, token, image or None) from decoder threads
+        self.inflight = {}                 # model_id -> token of the decode whose result is still wanted
+        self.unreadable = set()
+        self.decode_job = None
+        self.token = 0
+        self.live = {}                 # id -> (status, reason) learned from renderer events this session
+        self.stalls = {}               # id -> reason: models the watchdog skipped this session (never in the index)
+        self.begun = None              # (id, monotonic time) of the model the renderer is working on
+        self.idle_since = None         # monotonic time the running renderer reported an empty queue
+        self.item_by_id = {}
+        self.current_id = None
+        self.anchor = None             # tile index a Shift-click or Shift+arrow extends from
+        self.picked_here = None        # (model ids, filtered list) of the last selection made in this grid
+        self.proc = None
+        self.proc_pending = []         # ids still queued in the running renderer, in order
+        self.mode = 'view'             # 'view' (visible first) or 'all' (Render all thumbnails)
+        self.hide_chunks_bangles = False
+        self.blocked = ''              # why automatic rendering stopped (renderer crashed)
+        self.last_start = 0.0
+        self.stale = True
+        self.refresh_job = self.queue_job = self.redraw_job = self.poll_job = self.tip_job = self.tip_window = None
+        self.hover = None
+        self.redraw_due = False
+        self.closed = False
+        self.columns, self.cell_w, self.cell_h, self.pad, self.margin = 1, 1, 1, 6, 0
+        self._visible = (0, 0)
+        self.total_done_logged = 0
+
+        self.frame = ttk.Frame(parent)   # placed (and hidden) by the app
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.rowconfigure(1, weight=1)
+        bar = ttk.Frame(self.frame)
+        bar.grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 4))
+        bar.columnconfigure(0, weight=1)
+        self.info_var = tk.StringVar(value='')
+        ttk.Label(bar, textvariable=self.info_var, wraplength=520).grid(row=0, column=0, sticky='ew')
+        self.hide_chunks_button = ttk.Button(bar, text='Hide chunks/bangles', command=self.toggle_chunks_bangles)
+        self.hide_chunks_button.grid(row=0, column=2, padx=(2, 2))
+        self.cancel_button = ttk.Button(bar, text='Cancel', command=self.cancel_render, state='disabled')
+        self.cancel_button.grid(row=0, column=3)
+        self.canvas = tk.Canvas(self.frame, highlightthickness=0, takefocus=True)
+        track(self.canvas, background='bg')
+        listen(self._schedule_redraw)
+        self.canvas.grid(row=1, column=0, sticky='nsew')
+        self.scrollbar = ttk.Scrollbar(self.frame, orient='vertical', command=self._scroll_command)
+        self.scrollbar.grid(row=1, column=1, sticky='ns')
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.message = ttk.Label(self.frame, text='Thumbnails need a game folder. Pick a Source above.',
+                                 wraplength=380, justify='center')
+        self.canvas.bind('<Configure>', lambda _e: self._relayout())
+        self.canvas.bind('<ButtonPress-1>', self._click)
+        self.canvas.bind('<Double-Button-1>', self._double_click)
+        self.canvas.bind('<Button-3>', self._right_click)
+        self.canvas.bind('<Motion>', self._motion)
+        self.canvas.bind('<Leave>', lambda _e: self._hide_tip())
+        for key, step in (('Left', -1), ('Right', 1)):
+            self.canvas.bind(f'<{key}>', lambda _e, s=step: self._move(s))
+            self.canvas.bind(f'<Shift-{key}>', lambda _e, s=step: self._move(s, extend=True))
+        self.canvas.bind('<Up>', lambda _e: self._move(-self.columns))
+        self.canvas.bind('<Down>', lambda _e: self._move(self.columns))
+        self.canvas.bind('<Shift-Up>', lambda _e: self._move(-self.columns, extend=True))
+        self.canvas.bind('<Shift-Down>', lambda _e: self._move(self.columns, extend=True))
+        self.canvas.bind('<Prior>', lambda _e: self._move(-self.columns * self._page_rows()))
+        self.canvas.bind('<Next>', lambda _e: self._move(self.columns * self._page_rows()))
+        self.canvas.bind('<Home>', lambda _e: self._move_to(0))
+        self.canvas.bind('<End>', lambda _e: self._move_to(len(self.records) - 1))
+        self.canvas.bind('<Return>', lambda _e: self._open_current())
+        self.canvas.bind('<Control-a>', lambda _e: self._select_all())
+        self.canvas.bind('<Escape>', lambda _e: self._clear())
+        self.canvas.bind('<Enter>', lambda _e: self.canvas.focus_set())
+        # Windows delivers the wheel to the focused widget, so listen application-wide.
+        self.canvas.bind_all('<MouseWheel>', self._wheel, add='+')
+        self.frame.bind('<Map>', lambda _e: self.invalidate())
+        self._poll()
+
+    # Contents --------------------------------------------------------------
+    def visible(self):
+        try:
+            return bool(self.frame.winfo_ismapped())
+        except Exception:
+            return False
+
+    def invalidate(self):
+        """The tree selection or the search results changed; refresh once the tab is shown."""
+        self.stale = True
+        if self.closed or not self.visible() or self.refresh_job is not None:
+            return
+        self.refresh_job = self.app.root.after_idle(self.refresh)
+
+    def _visible_records(self, records):
+        visible = [record for record in records if not self.hide_chunks_bangles or not is_chunk_or_bangle(record)]
+        return visible[:FILTER_CAP] if self.base_kind == 'filter' else visible
+
+    def toggle_chunks_bangles(self):
+        self.hide_chunks_bangles = not self.hide_chunks_bangles
+        self.hide_chunks_button.configure(
+            text='Show chunks/bangles' if self.hide_chunks_bangles else 'Hide chunks/bangles')
+        if self.proc is not None and self.mode != 'all':
+            self.stop_renderer()
+        self.invalidate()
+
+    def refresh(self):
+        self.refresh_job = None
+        if self.closed or not self.stale or not self.visible():
+            return
+        self.stale = False
+        app = self.app
+        game = app.game
+        if game is None:
+            self._show_message(True)
+            self.records, self.ids = [], set()
+            self.info_var.set('')
+            self.stop_renderer()
+            return
+        self._show_message(False)
+        root = game.cache_dir()   # the app's own .cache, never the output folder
+        if root != self.cache_root:
+            self.cache_root = root
+            self._clear_images()
+            self.live.clear()
+            self.stalls.clear()
+            self.index = ThumbnailIndex(cache_dir(root))
+            self.stop_renderer()
+            self.blocked = ''
+        self.item_by_id = {getattr(r, 'model_id', None): item for item, r in app.item_by_record.items()}
+        everything = app._selected_records()
+        picked = {getattr(r, 'model_id', None) for r in everything} - {None}
+        shown = {getattr(r, 'model_id', None) for r in app.filtered_records}
+        selected = [r for r in everything if getattr(r, 'model_id', None) in shown]   # a selection in another folder does not replace this one
+        if self.picked_here is not None and self.picked_here == (picked, app.filtered_records):
+            records, kind, total = None, 'keep', 0      # the grid made this selection: keep its list
+        else:
+            base_ids = {getattr(r, 'model_id', None) for r in self.base_records}
+            records, kind, total = choose_records(selected, app.filtered_records, base_ids)
+        if len(selected) == 1:
+            self.current_id = getattr(selected[0], 'model_id', None)
+        previous_ids = self.ids
+        if kind != 'keep':
+            if kind == 'filter':
+                self.base_records = [r for r in app.filtered_records if getattr(r, 'model_id', None)]
+                self.base_total = len(self.base_records)
+            else:
+                self.base_records, self.base_total = records, total
+            self.base_kind = kind
+        self.records = self._visible_records(self.base_records)
+        self.kind = self.base_kind
+        hidden_total = sum(1 for r in self.base_records if self.hide_chunks_bangles and is_chunk_or_bangle(r))
+        self.total = self.base_total - hidden_total
+        self.ids = {r.model_id for r in self.records}
+        if self.ids != previous_ids:
+            self.canvas.yview_moveto(0)
+        if kind != 'keep' or not self.index.models:
+            self._load_index(cache_dir(root))
+        self._describe()
+        self._relayout()
+        self.schedule_render()
+
+    def _load_index(self, folder):
+        """Parse index.json on a worker; the previous index keeps serving until the new one arrives."""
+        self.index_loading = True
+        self.index_work.submit(ThumbnailIndex.load, folder)
+        self._poll_index()
+
+    def _poll_index(self):
+        if self.closed:
+            return
+        try:
+            while True:
+                generation, index, error = self.index_work.events.get_nowait()
+                if generation != self.index_work.generation:
+                    continue
+                self.index_loading = False
+                if error:
+                    continue   # unreadable index: keep what is shown; missing models are simply rendered again
+                self.index = index
+                self.live.clear()
+                self._clear_images()
+                self.redraw()
+                self.schedule_render()
+        except queue.Empty:
+            pass
+        if self.index_loading:
+            self.app.root.after(30, self._poll_index)
+
+    def _clear_images(self):
+        self.images.clear()
+        self.unreadable.clear()
+        self.inflight.clear()
+
+    def _discard_image(self, model_id):
+        self.images.discard(model_id)
+        self.unreadable.discard(model_id)
+        self.inflight.pop(model_id, None)
+
+    def _describe(self):
+        if not self.records:
+            if self.hide_chunks_bangles:
+                self.info_var.set('No models to show with chunks/bangles hidden. Click Show chunks/bangles or change the search.')
+            else:
+                self.info_var.set('No models to show. Scan the archive, then select a folder or search.')
+            return
+        note = ''
+        if self.kind == 'filter':
+            note = (f'Search results (showing the first {len(self.records):,} of {self.total:,}; narrow the search or select a folder)'
+                    if self.total > len(self.records) else 'Search results')
+        else:
+            note = 'Selected models'
+        if self.blocked:
+            note += f' · {self.blocked}'
+        self.info_var.set(f'{note}: {len(self.records):,} models')
+
+    def _show_message(self, show):
+        if show:
+            self.canvas.grid_remove()
+            self.scrollbar.grid_remove()
+            self.message.grid(row=1, column=0, columnspan=2, sticky='nsew')
+        else:
+            self.message.grid_remove()
+            self.canvas.grid()
+            self.scrollbar.grid()
+
+    # Layout and drawing ----------------------------------------------------
+    def _relayout(self):
+        linespace = self.font.metrics('linespace')
+        self.pad = max(6, linespace // 2)
+        self.cell_w = self.THUMB + 2 * self.pad
+        self.cell_h = self.THUMB + linespace + 3 * self.pad
+        width = max(self.canvas.winfo_width(), 1)
+        self.columns = column_count(width, self.cell_w)
+        rows = row_count(len(self.records), self.columns)
+        # Centre the grid: the leftover width is split into the left margin.
+        self.margin = max(0, (width - self.columns * self.cell_w) // 2)
+        self.canvas.configure(scrollregion=(0, 0, width, max(rows * self.cell_h, 1)), yscrollincrement=max(1, self.cell_h // 3))
+        self.redraw()
+
+    def _page_rows(self):
+        return max(1, self.canvas.winfo_height() // max(1, self.cell_h) - 0)
+
+    def _offset(self):
+        return int(self.canvas.canvasy(0))
+
+    def _scroll_command(self, *args):
+        self.canvas.yview(*args)
+        self.redraw()
+        self.schedule_render()
+
+    def _wheel(self, event):
+        if not self.visible():
+            return
+        try:
+            under = self.canvas.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            under = None
+        if under is not self.canvas:
+            return
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+        self.redraw()
+        self.schedule_render()
+        return 'break'
+
+    def status_of(self, model_id):
+        """('ok'|'unsupported'|'error'|'queued', reason) for one model, from this session's events then the index."""
+        live = self.live.get(model_id)
+        if live:
+            return live
+        if model_id in self.stalls:
+            return 'error', self.stalls[model_id]
+        if self.index_loading and not self.index.models:
+            return 'loading', ''
+        if self.index.is_current(model_id, self.THUMB):
+            entry = self.index.get(model_id)
+            return entry['status'], entry.get('reason', '')
+        return 'queued', ''
+
+    def _photo(self, model_id):
+        photo = self.images.get(model_id)
+        if photo is None and model_id not in self.unreadable and model_id not in self.inflight:
+            path = str(self.index.png_path(model_id))
+            self.token += 1
+            self.inflight[model_id] = token = self.token
+            self.decoder.submit(self._decode, model_id, token, path)
+            self._poll_decoded()
+        return photo
+
+    def _decode(self, model_id, token, path):
+        try:
+            image = decode_thumbnail(path)
+        except Exception:
+            image = None
+        self.decoded.put((model_id, token, image, path))
+
+    def _poll_decoded(self):
+        """Wrap decoded images into PhotoImages here, on the UI thread (Tk objects are not thread safe)."""
+        if self.decode_job is not None:
+            self.app.root.after_cancel(self.decode_job)
+            self.decode_job = None
+        if self.closed:
+            return
+        changed = False
+        try:
+            while True:
+                model_id, token, image, path = self.decoded.get_nowait()
+                if self.inflight.get(model_id) != token:
+                    continue   # superseded: the thumbnail was re-rendered or the cache changed
+                del self.inflight[model_id]
+                photo = photo_from_image(image, self.canvas) if image is not None else None
+                if photo is None:   # no Pillow / ImageTk: let Tk decode the PNG itself
+                    try:
+                        photo = self.tk.PhotoImage(file=path, master=self.canvas)
+                    except Exception:
+                        photo = None
+                if photo is None:
+                    self.unreadable.add(model_id)
+                else:
+                    self.images.put(model_id, photo)
+                changed = True
+        except queue.Empty:
+            pass
+        if changed:
+            self._schedule_redraw()
+        if self.inflight:
+            self.decode_job = self.app.root.after(30, self._poll_decoded)
+
+    def redraw(self):
+        self.redraw_job = None
+        canvas = self.canvas
+        canvas.delete('all')
+        total = len(self.records)
+        if not total:
+            return
+        height = max(canvas.winfo_height(), 1)
+        offset = self._offset()
+        first, last = visible_tiles(offset, height, self.cell_h, self.columns, total)
+        self._visible = (first, last)
+        text_colour, muted, placeholder, accent = color('fg'), color('muted'), color('placeholder'), color('accent')
+        width = self.cell_w - 2 * self.pad
+        picked = set(self.app.table.selection())
+        for number in range(first, last):
+            record = self.records[number]
+            x = self.margin + (number % self.columns) * self.cell_w
+            y = (number // self.columns) * self.cell_h
+            selected = self.item_by_id.get(record.model_id) in picked
+            if selected:
+                canvas.create_rectangle(x + 2, y + 2, x + self.cell_w - 2, y + self.cell_h - 2, fill=accent, outline='')
+            status, _reason = self.status_of(record.model_id)
+            photo = self._photo(record.model_id) if status == 'ok' else None
+            left, top = x + self.pad, y + self.pad
+            if photo is not None:
+                canvas.create_image(left, top, anchor='nw', image=photo)
+            else:
+                canvas.create_rectangle(left, top, left + self.THUMB, top + self.THUMB, fill=placeholder, outline='')
+                label = {'queued': 'queued…', 'loading': 'loading…', 'unsupported': 'unsupported', 'error': 'error'}.get(status, status)
+                if status == 'ok':
+                    label = 'unreadable' if record.model_id in self.unreadable else 'loading…'
+                canvas.create_text(left + self.THUMB // 2, top + self.THUMB // 2, text=label, fill=muted, font=self.font)
+            name = elide(display_name(record), self.font.measure, width)
+            canvas.create_text(left + self.THUMB // 2, top + self.THUMB + self.pad, anchor='n', text=name,
+                               fill=color('select_fg') if selected else text_colour, font=self.font)
+
+    def _schedule_redraw(self):
+        if self.redraw_job is None and not self.closed:
+            self.redraw_job = self.app.root.after(120, self.redraw)
+
+    # Interaction -----------------------------------------------------------
+    def _event_index(self, event):
+        if not self.records:
+            return None
+        return tile_at(event.x - self.margin, event.y, self._offset(), self.cell_w, self.cell_h, self.columns, len(self.records))
+
+    def _click(self, event):
+        self.canvas.focus_set()
+        self._hide_tip()
+        index = self._event_index(event)
+        if index is None:
+            return
+        if event.state & SHIFT_MASK and self.anchor is not None and self.anchor < len(self.records):
+            low, high = sorted((self.anchor, index))
+            self._pick(range(low, high + 1), index, keep=bool(event.state & CONTROL_MASK))
+        elif event.state & CONTROL_MASK:
+            # Ctrl-click toggles one tile and leaves the rest of the selection alone.
+            item = self.item_by_id.get(self.records[index].model_id)
+            if item is None or not self.app.table.exists(item):
+                return
+            items = set(self.app.table.selection())
+            items.symmetric_difference_update({item})
+            self._set_items(sorted(items), index)
+            self.anchor = index
+        else:
+            self._pick([index], index)
+            self.anchor = index
+
+    def _right_click(self, event):
+        index = self._event_index(event)
+        if index is not None:
+            self.app._model_context_menu(event, self.records[index])
+
+    def _double_click(self, event):
+        index = self._event_index(event)
+        if index is not None:
+            self.select(index)
+            self.anchor = index
+            self._open_current()
+
+    def _tile_items(self, indices):
+        table = self.app.table
+        items = []
+        for number in indices:
+            item = self.item_by_id.get(self.records[number].model_id)
+            if item is not None and table.exists(item):
+                items.append(item)
+        return items
+
+    def _pick(self, indices, focus, keep=False):
+        """Select the tiles in ``indices`` (added to the current selection when ``keep``), focusing ``focus``."""
+        items = self._tile_items(indices)
+        if keep:
+            items = list(set(self.app.table.selection()) | set(items))
+        self._set_items(items, focus)
+
+    def _set_items(self, items, focus):
+        """Make ``items`` (tree item ids) the model selection, mirror it in the tree and redraw the grid."""
+        table = self.app.table
+        table.selection_set(items)
+        record = self.records[focus] if 0 <= focus < len(self.records) else None
+        if record is not None:
+            self.current_id = record.model_id
+            item = self.item_by_id.get(record.model_id)
+            if item is not None and table.exists(item):
+                table.focus(item)
+                table.see(item)
+        # The selection made here stays in this grid, even though it is no longer the whole search result.
+        self.picked_here = ({getattr(r, 'model_id', None) for r in self.app._selected_records()} - {None},
+                            self.app.filtered_records)
+        self.redraw()
+
+    def _select_all(self):
+        self._set_items(self._tile_items(range(len(self.records))), self._current_index() or 0)
+        return 'break'
+
+    def _clear(self):
+        self.app.clear_selection()
+        self.anchor = None
+        return 'break'
+
+    def select(self, index, show=False):
+        """Select tile ``index`` in the model tree (which loads it in the 3D view)."""
+        if not 0 <= index < len(self.records):
+            return
+        record = self.records[index]
+        self.current_id = record.model_id
+        item = self.item_by_id.get(record.model_id)
+        table = self.app.table
+        if item is not None and table.exists(item):
+            table.selection_set(item)
+            table.focus(item)
+            table.see(item)
+        if show:
+            offset = scroll_to_show(index, self._offset(), self.canvas.winfo_height(), self.cell_h, self.columns)
+            rows = max(1, row_count(len(self.records), self.columns) * self.cell_h)
+            self.canvas.yview_moveto(offset / rows)
+        self.redraw()
+
+    def _current_index(self):
+        for number, record in enumerate(self.records):
+            if record.model_id == self.current_id:
+                return number
+        return None
+
+    def _move(self, step, extend=False):
+        if not self.records:
+            return 'break'
+        current = self._current_index()
+        target = 0 if current is None else max(0, min(len(self.records) - 1, current + step))
+        if extend:
+            # Shift+arrow selects from the anchor to the new tile; the anchor stays where it was.
+            anchor = self.anchor if self.anchor is not None and self.anchor < len(self.records) else (current or 0)
+            self.anchor = anchor
+            low, high = sorted((anchor, target))
+            self._pick(range(low, high + 1), target)
+            self._show(target)
+        else:
+            self.select(target, show=True)
+            self.anchor = target
+        self.schedule_render()
+        return 'break'
+
+    def _show(self, index):
+        offset = scroll_to_show(index, self._offset(), self.canvas.winfo_height(), self.cell_h, self.columns)
+        rows = max(1, row_count(len(self.records), self.columns) * self.cell_h)
+        self.canvas.yview_moveto(offset / rows)
+
+    def _move_to(self, target):
+        if self.records:
+            self.select(max(0, min(len(self.records) - 1, target)), show=True)
+            self.schedule_render()
+        return 'break'
+
+    def _open_current(self):
+        index = self._current_index()
+        if index is None:
+            return 'break'
+        self.select(index)
+        notebook = self.browser.notebook
+        notebook.select(notebook.tabs()[0])   # the "3D model" tab
+        return 'break'
+
+    # Hover tooltip ---------------------------------------------------------
+    def _motion(self, event):
+        index = self._event_index(event)
+        if index == self.hover:
+            return
+        self._hide_tip()
+        self.hover = index
+        if index is not None:
+            self.tip_job = self.canvas.after(500, lambda: self._show_tip(index, event.x_root, event.y_root))
+
+    def _show_tip(self, index, x, y):
+        self.tip_job = None
+        if index >= len(self.records):
+            return
+        record = self.records[index]
+        status, reason = self.status_of(record.model_id)
+        lines = [display_name(record), record.archive_path, f'ID {record.model_id}']
+        if used_by(record):
+            lines.append('Used by: ' + ', '.join(used_by(record)))
+        if status in ('unsupported', 'error'):
+            lines.append(f'Thumbnail {status}: {reason}')
+        elif status == 'queued':
+            lines.append('Thumbnail not rendered yet')
+        window = self.tip_window = self.tk.Toplevel(self.canvas)
+        window.wm_overrideredirect(True)
+        self.tk.Label(window, text='\n'.join(lines), justify='left', wraplength=520, relief='solid', borderwidth=1, padx=8, pady=6,
+                      **TOOLTIP_COLORS).pack()
+        window.wm_geometry(f'+{x + 14}+{y + 18}')
+
+    def _hide_tip(self):
+        self.hover = None
+        if self.tip_job is not None:
+            self.canvas.after_cancel(self.tip_job)
+            self.tip_job = None
+        if self.tip_window is not None:
+            self.tip_window.destroy()
+            self.tip_window = None
+
+    # Rendering -------------------------------------------------------------
+    def _source(self):
+        return self.app.source_var.get().strip()
+
+    def _is_ready(self, model_id):
+        return model_id in self.stalls or self.status_of(model_id)[0] != 'queued'
+
+    def schedule_render(self):
+        if self.queue_job is None and not self.closed:
+            self.queue_job = self.app.root.after(RESTART_DELAY_MS, self.ensure_rendering)
+
+    def ensure_rendering(self):
+        """Start the renderer for missing thumbnails, or re-prioritise it when the view moved."""
+        import time
+        self.queue_job = None
+        if self.closed or not self.records or not self.visible() or self.cache_root is None or not self._source():
+            return
+        if self.index_loading:
+            return   # the loaded index decides what is missing; it schedules rendering itself
+        if self.blocked and self.mode != 'all':
+            return
+        first, last = self._visible
+        wanted = render_queue(self.records, self._is_ready, first, last)
+        if not wanted:
+            return
+        running = self.proc is not None and self.proc.running()
+        if running:
+            if self.mode == 'all':
+                return
+            visible_missing = [r.model_id for r in self.records[first:last] if not self._is_ready(r.model_id)]
+            if self.idle_since is None and not needs_restart(visible_missing, self.proc_pending):
+                return   # busy, and the visible tiles are near the head of its queue
+            if self.proc.send(wanted):   # the running renderer takes the new order: no new process
+                self.proc_pending = list(wanted)
+                self.idle_since = None
+                return
+            if time.monotonic() - self.last_start < RESTART_MIN_SECONDS:
+                self.schedule_render()
+                return
+            self.stop_renderer()
+        self._start(wanted, all_models=False)
+
+    def _start(self, ids, all_models):
+        import time
+        from nwo.app.settings import PROJECT_ROOT, _default_interpreter
+        try:
+            self.proc = RendererProcess(self._source(), self.cache_root, ids=ids, all_models=all_models, size=self.THUMB,
+                                        cwd=PROJECT_ROOT, python=_default_interpreter(), persistent=not all_models,
+                                        skip=sorted(self.stalls)).start()
+        except OSError as error:
+            self.proc = None
+            self.blocked = f'thumbnail renderer could not start ({error})'
+            self._describe()
+            return
+        self.proc_pending = list(ids)
+        self.begun, self.idle_since = None, None
+        self.last_start = time.monotonic()
+        self.mode = 'all' if all_models else 'view'
+        self.cancel_button.configure(state='normal' if all_models else 'disabled')
+        self.total_done_logged = 0
+        self._poll()
+
+    def cancel_render(self):
+        if self.proc is not None:
+            self.app._append_log('Thumbnail rendering cancelled.', 'muted')
+        self.stop_renderer()
+        self.info_var.set('Thumbnail rendering cancelled.')
+
+    def stop_renderer(self):
+        proc, self.proc, self.proc_pending = self.proc, None, []
+        self.begun = self.idle_since = None
+        if proc is not None:
+            proc.stop()
+        self.mode = 'view'
+        self.cancel_button.configure(state='disabled')
+
+    def _poll(self):
+        """Drain renderer events (JSON lines through a queue), refreshing only the affected tiles."""
+        if self.poll_job is not None:
+            self.app.root.after_cancel(self.poll_job)
+            self.poll_job = None
+        if self.closed:
+            return
+        proc = self.proc
+        if proc is not None:
+            changed = False
+            try:
+                while True:
+                    event = proc.events.get_nowait()
+                    changed |= self._handle(event, proc)
+            except queue.Empty:
+                pass
+            if changed:
+                self._schedule_redraw()
+            self._watch()
+        if self.proc is not None:
+            self.poll_job = self.app.root.after(120, self._poll)
+
+    def _watch(self):
+        """Stop a renderer stuck on one model (that model is skipped this session; the rest render again) or idle too long."""
+        import time
+        now = time.monotonic()
+        model_id = stalled(self.begun, now)
+        if model_id is not None:
+            minutes = STALL_SECONDS // 60
+            self.stalls[model_id] = f'Thumbnail skipped this session: no result after {minutes} minutes.'
+            self.app._append_log(f'Thumbnails: {model_id} took over {minutes} minutes; skipped for this session.', 'error')
+            self._discard_image(model_id)
+            self.stop_renderer()
+            self._schedule_redraw()
+            self.schedule_render()
+        elif self.idle_since is not None and now - self.idle_since >= IDLE_STOP_SECONDS:
+            self.stop_renderer()
+
+    def _handle(self, event, proc):
+        import time
+        kind = event.get('event')
+        if kind == 'begin':
+            self.begun, self.idle_since = (event.get('id'), time.monotonic()), None
+            return False
+        if kind == 'idle':
+            self.begun, self.idle_since, self.proc_pending = None, time.monotonic(), []
+            self.schedule_render()   # models that went missing meanwhile (the grid changed) are sent now
+            return False
+        if kind == 'model':
+            model_id = event.get('id')
+            if self.begun and self.begun[0] == model_id:
+                self.begun = None
+            if model_id in self.proc_pending:
+                self.proc_pending.remove(model_id)
+            if event.get('skipped'):
+                self.live.pop(model_id, None)
+            else:
+                self.live[model_id] = (event.get('status', 'error'), event.get('reason', ''))
+            self._discard_image(model_id)
+            if self.mode == 'all':
+                done = event.get('n', 0)
+                total = event.get('total', 0)
+                self.info_var.set(f'Rendering thumbnails: {done:,} of {total:,}')
+                if done - self.total_done_logged >= 250:
+                    self.total_done_logged = done
+                    self.app._append_log(f'Thumbnails: {done:,} of {total:,}', 'muted')
+            return model_id in self.ids
+        if kind == 'start':
+            if not event.get('transparent') and event.get('fbo') is False:
+                self.app._append_log('Thumbnails: offscreen framebuffer unavailable, using the window back buffer '
+                                     f"({event.get('fbo_error') or 'forced'}); backgrounds are opaque.", 'muted')
+        elif kind == 'fatal':
+            self.blocked = f"renderer stopped: {event.get('reason')}"
+            self.app._append_log(f"Thumbnail renderer: {event.get('reason')}", 'error')
+            self._describe()
+        elif kind == 'done':
+            if self.mode == 'all':
+                self.app._append_log(f"Thumbnails finished: {event.get('rendered', 0):,} models.", 'success')
+        elif kind == 'exit':
+            code = event.get('code')
+            finished_all = self.mode == 'all'
+            self.proc, self.proc_pending, self.mode = None, [], 'view'
+            self.cancel_button.configure(state='disabled')
+            if self.cache_root:
+                self._load_index(cache_dir(self.cache_root))   # live results keep serving until it arrives
+            else:
+                self.live.clear()
+                self._clear_images()
+            if code not in (0, None) and not self.blocked:
+                self.blocked = f'renderer exited with code {code}; see .cache/thumbnails/renderer.log'
+                self.app._append_log(f'Thumbnail renderer exited with code {code}; see thumbnails/renderer.log in the game .cache folder.', 'error')
+            self._describe()
+            if finished_all:
+                self.info_var.set('Thumbnails finished.')
+            self.schedule_render()
+            return True
+        return False
+
+    def close(self):
+        self.closed = True
+        for job in (self.refresh_job, self.queue_job, self.redraw_job, self.poll_job):
+            if job is not None:
+                try:
+                    self.app.root.after_cancel(job)
+                except Exception:
+                    pass
+        self._hide_tip()
+        self.stop_renderer()
+        self.index_work.close()
+        self.decoder.shutdown(wait=False, cancel_futures=True)

@@ -1,9 +1,9 @@
-"""Unsigned BC6H decoding (rc2016/formats/bc6h.py) on hand-packed blocks."""
+"""Unsigned BC6H decoding (nwo/formats/bc6h.py) on hand-packed blocks."""
 import unittest
 
 import numpy as np
 
-from rc2016.formats.bc6h import PARTITIONS, WEIGHTS_3, WEIGHTS_4, decode_bc6h
+from nwo.formats.bc6h import PARTITIONS, WEIGHTS_3, WEIGHTS_4, decode_bc6h
 
 
 def pack(fields):

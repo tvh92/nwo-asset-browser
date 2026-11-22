@@ -2,7 +2,7 @@
 
 Material `material/character/hero/hero_clank_antenna/hero_bright_center_light_clank.material` (SHA-256 `5f3f1641...87a8`, the only material on the graph) uses graph `materialgraph/character/hero/hero_bright_center_light/hero_bright_center_light.materialgraph` (SHA-256 `d3e43dc0...4d28d`). The graph has two compiled deferred writers: `7BEC2D2F` (code SHA-256 `cd0b14ef...e4e1`, pass contract 0, the antenna surface) and `11408DE9` (the zero-output placeholder). The other four programs are forward light-loop or exec-masked (discard) programs and are not modelled. Archive-backed checks are in `tests/test_clank_antenna.py`.
 
-The writer is the sibling of the Qwark light writer `D14A48D7` (graph `hero_bright_center_light_variable`, see [viewer](../viewer.md)). It is a different graph with different arithmetic, so it has its own rule, bound to the graph SHA-256 in `GRAPH_RULES` (`rc2016/viewer/textures.py`).
+The writer is the sibling of the Qwark light writer `D14A48D7` (graph `hero_bright_center_light_variable`, see [viewer](../viewer.md)). It is a different graph with different arithmetic, so it has its own rule, bound to the graph SHA-256 in `GRAPH_RULES` (`nwo/viewer/textures.py`).
 
 ## Decoded surface
 
@@ -38,7 +38,7 @@ With the exponent 0.01 the factor `t` is 0.93 at N.V = 1 and approaches 1 elsewh
 
 `hero_bright_center_light` (exact graph SHA-256) reuses the viewer's `bright_center` term with the values above (`bright_center = 'clank'` in `GRAPH_RULES`). Blender builds the same `VR bright centre ...` constants and passes reopen validation. The term carries `writer = 7BEC2D2F`, the graph path and SHA-256, `frozen_inputs = {CB0_99: 0}` and `game_equivalence = False`; Blender records the frozen inputs as a limitation. The Qwark sibling rule is unchanged.
 
-The viewer and Blender draw the antenna with a labelled preview by default (`CLANK_ANTENNA_QWARK_TIP_PREVIEW` in `rc2016/viewer/textures.py`, the same convention as the Qwark robot tip): a white albedo and Qwark's `enm_qwark_light_center` values (edge, centre, exponent 0.1, steady 1, F0 0.2, gloss sqrt(0.35), K 50). The decoded 7BEC2D2F term above is the rule when the flag is `False`. The preview is not a decoded game value, and `game_equivalence` stays false.
+The viewer and Blender draw the antenna with a labelled preview by default (`CLANK_ANTENNA_QWARK_TIP_PREVIEW` in `nwo/viewer/textures.py`, the same convention as the Qwark robot tip): a white albedo and Qwark's `enm_qwark_light_center` values (edge, centre, exponent 0.1, steady 1, F0 0.2, gloss sqrt(0.35), K 50). The decoded 7BEC2D2F term above is the rule when the flag is `False`. The preview is not a decoded game value, and `game_equivalence` stays false.
 
 Native translation of the writer is not possible. Freezing `CB0[99]` through `SOURCE_PREVIEW_POLICIES` (the convention of [weapon-gadget-frozen-time](weapon-gadget-frozen-time.md)) does not make it ready, because five more engine-owned inputs remain. No policy is registered, since it would change nothing.
 

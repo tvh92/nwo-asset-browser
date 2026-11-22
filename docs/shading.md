@@ -10,21 +10,21 @@ The equations below were read from the SPIR-V of a RenderDoc capture of the game
 
 | Path | Purpose |
 |---|---|
-| `rc2016/pipeline/game_shader.py` | Node group "RC PS4 Deferred BRDF", material conversion, per-family front-ends, character glass, viewer graph rules. |
-| `rc2016/pipeline/render_state.py` | Blend and cull state from a `.material` flags word. |
-| `rc2016/pipeline/material_flags.json.gz` | Census of the flags word for every `.material` in the archive (path to flags). |
-| `rc2016/pipeline/scene_defaults.py` | New-scene defaults, `load_shared_lighting`, `apply_shared_lighting`, `check_shared_lighting`, `audit_scene`. |
+| `nwo/pipeline/game_shader.py` | Node group "RC PS4 Deferred BRDF", material conversion, per-family front-ends, character glass, viewer graph rules. |
+| `nwo/pipeline/render_state.py` | Blend and cull state from a `.material` flags word. |
+| `nwo/pipeline/material_flags.json.gz` | Census of the flags word for every `.material` in the archive (path to flags). |
+| `nwo/pipeline/scene_defaults.py` | New-scene defaults, `load_shared_lighting`, `apply_shared_lighting`, `check_shared_lighting`, `audit_scene`. |
 | `assets/lighting/shared_lighting.json`, `golden_gate_hills_1k.exr` | Shared review lighting. |
-| `rc2016/pipeline/game_look.py` | Opt-in captured Veldin look (`apply_veldin_look`). |
-| `rc2016/pipeline/game_view_compositor.py` | The captured tonemap as compositor nodes. |
+| `nwo/pipeline/game_look.py` | Opt-in captured Veldin look (`apply_veldin_look`). |
+| `nwo/pipeline/game_view_compositor.py` | The captured tonemap as compositor nodes. |
 | `assets/game_view/` | Captured view data: `rc_game_view.json`, `rc_tonemap.spi1d`, `rc_grade.cube`. |
-| `rc2016/formats/materials.py` | Chooses image colourspaces; produces the material reports used here. |
-| `rc2016/shaders/families.py` | Shader family registry keyed by source path and decoded SHA-256. |
+| `nwo/formats/materials.py` | Chooses image colourspaces; produces the material reports used here. |
+| `nwo/shaders/families.py` | Shader family registry keyed by source path and decoded SHA-256. |
 
 ## Textures
 
 - Set DDS images to `Alpha Mode: Channel Packed`. Alpha is always linear data.
-- Colourspace follows the native DXGI format, not the filename: sRGB for formats 29, 72, 75, 78, 91, 93 and 99, Non-Color for every other format. `rc2016/formats/materials.py` applies this; for example a `_g` stored as BC7 sRGB (format 99) is sRGB. In Blender an sRGB texture is a `Non-Color` 16-bit image of its texels already decoded to linear, because Cycles would filter before decoding while the GPU decodes first ([pipeline](pipeline.md#textures)).
+- Colourspace follows the native DXGI format, not the filename: sRGB for formats 29, 72, 75, 78, 91, 93 and 99, Non-Color for every other format. `nwo/formats/materials.py` applies this; for example a `_g` stored as BC7 sRGB (format 99) is sRGB. In Blender an sRGB texture is a `Non-Color` 16-bit image of its texels already decoded to linear, because Cycles would filter before decoding while the GPU decodes first ([pipeline](pipeline.md#textures)).
 - Normals are always Non-Color.
 - Roles by suffix:
   - `_c`: base colour, normally BC7 sRGB. Its alpha is a self-lit mask, never ordinary transparency. The one exception is the foliage writers (`basic_foliage`, the tree-leaf graphs) and the protosuit chest logo (`basic_normal_coloredgloss_alpha`), where it is read only as cut-out coverage compared with an alpha-test threshold and nothing else (see [viewer](viewer.md#leaf-cut-out)).
@@ -103,7 +103,7 @@ Validate a converted material by asserting the group's inputs, image colourspace
 
 ## Graph families
 
-`_g` is not coloured F0 in every graph. The pipeline classifies each referenced graph by canonical source path and decoded SHA-256 in `rc2016/shaders/families.py`, and `apply_preflight_material` applies a front-end only to an exact registered identity. It never infers a family from a name. Unregistered graphs get an explicitly labelled source-colour-only preview, or the viewer graph rule below. Source-identical graphs reuse the interpretation; instance values stay material-specific.
+`_g` is not coloured F0 in every graph. The pipeline classifies each referenced graph by canonical source path and decoded SHA-256 in `nwo/shaders/families.py`, and `apply_preflight_material` applies a front-end only to an exact registered identity. It never infers a family from a name. Unregistered graphs get an explicitly labelled source-colour-only preview, or the viewer graph rule below. Source-identical graphs reuse the interpretation; instance values stay material-specific.
 
 Parameter rows come from `.materialgraph` section `0x45C4F4C0` (u16 byte offset, u16 size, u32 key). The registered-family reader splits layouts where the offset returns to zero and reads the first layout's defaults. Native translation instead uses each 24-byte `0xBC93FB5E` record's parameter/resource counts to partition rows, including empty passes and layouts that start at a nonzero offset. Its padded CB size partitions the corresponding block in `0xA59F667B`; extents, alignment, overlap and complete consumption are checked. Instance overrides are bound by key hash within that pass's layout.
 
@@ -120,7 +120,7 @@ Deferred families use specular scale key `0x62835AF9` and gloss scale key `0x24F
 
 Skin (`apply_skin_emissive`, group `SKIN_GROUP_NAME`, `SKIN_GROUP_VERSION` 3):
 - Fresnel-boosted gloss and specular, and a Fresnel albedo tint of `(0.745404, 0.644480, 0.603827)`.
-- Albedo `_c × lerp(P5, tint, F)` is clamped to [0, 1] (node "Skin albedo UNORM clamp") because MRT1 is UNORM; some graphs use P5 above 1. The lighting pass multiplies self-lit by the same stored albedo. `rc2016/shaders/validation.py` asserts the clamp.
+- Albedo `_c × lerp(P5, tint, F)` is clamped to [0, 1] (node "Skin albedo UNORM clamp") because MRT1 is UNORM; some graphs use P5 above 1. The lighting pass multiplies self-lit by the same stored albedo. `nwo/shaders/validation.py` asserts the clamp.
 - The native pixel shader also samples a skin ramp and adds a diffuse term tinted `(0.637597, 0.116971, 0.122139)`. That term and the complete forward light and shadow response are not reproduced, so recognition stays partial and materials carry `game_equivalence = False`.
 - `apply_native_skin_normal` connects the decoded normal `normalize(2R-1, 2G-1, 1-x²-y²)` to both the BRDF and the skin group's material normal input. The secondary-normal blend (keys `0x59011FBD`, `0xB7ABB64A`) is applied when it resolves: the BED06840 forward shader samples the second normal at UV0 × the scale (dword 10 of table 0) and blends it as `w = blend × _g.B` (blend is dword 4 of table 0), with the same combine as F0CD85FF. Otherwise `rc_shader_frontend_limitation` is set.
 - Stage assignments from native GCN: `7D3F5FA6` and `D7749B42` are vertex shaders; `BED06840` and `AE7244FE` are forward pixel shaders.
@@ -198,7 +198,7 @@ implicitly alias this vector to the normal attribute.
 
 ### Viewer graph rules
 
-For graphs without a registered family, `apply_viewer_graph_rule` builds the asset viewer's per-graph reading on the shared deferred BRDF (rules from `viewer_graph_rule` in `rc2016/formats/materials.py`; the GL implementation is in `rc2016/viewer/shading.py`, see [viewer](viewer.md)).
+For graphs without a registered family, `apply_viewer_graph_rule` builds the asset viewer's per-graph reading on the shared deferred BRDF (rules from `viewer_graph_rule` in `nwo/formats/materials.py`; the GL implementation is in `nwo/viewer/shading.py`, see [viewer](viewer.md)).
 - `g_mode` `grey`: F0 = grey specular × `_g.G`, gloss = `sqrt(sat(gloss × _g.R))`. `grey_skin`: F0 = grey `min(0.5, _g.G)`, gloss = `sqrt(sat(_g.R))`. `vehicle`: packed constants. Otherwise coloured F0 = specular × `_g.rgb`, gloss = `sqrt(sat(gloss × _g.a²))`.
 - No `_g` means no specular, as in the viewer.
 - Self-lit = `_c.rgb × (_g.B or _c.a) × K` with the viewer's effective K. Normal x, y = 2RG − 1 with the viewer's z.
@@ -276,7 +276,7 @@ Limitations, kept visible in the rule and in `rc_shader_frontend_limitation`: th
 
 ## Render state
 
-Blend and cull come from the `.material` flags word, not from names or guesses (`rc2016/pipeline/render_state.py`).
+Blend and cull come from the `.material` flags word, not from names or guesses (`nwo/pipeline/render_state.py`).
 
 - Every `.material` has a 36-byte section `0xE1275683`; the flags word is the u32 at byte 16.
 - Bits 0-1 select blend: 0 opaque, 1 additive alpha (SRC_ALPHA, ONE), 2 alpha over (SRC_ALPHA, ONE_MINUS_SRC_ALPHA), 3 not observed (`decode_flags` returns surface `None`). Bit 2 makes the material two-sided; otherwise back faces are culled.
@@ -350,7 +350,7 @@ Approximations:
 - Lambert instead of Oren-Nayar diffuse; no reflections; Principled GGX standing in for the game GGX/Smith lobe.
 - Skin and viewer-graph materials (`game_equivalence = False`).
 - The shared review lighting, which is neutral and not game lighting.
-- Presentation-tuned profiles in `rc2016/pipeline/material_profiles/` and per-weapon profiles are separate from this shading and are not game equations.
+- Presentation-tuned profiles in `nwo/pipeline/material_profiles/` and per-weapon profiles are separate from this shading and are not game equations.
 
 Known gaps:
 - Glass, energy and VFX materials are forward-shaded and not covered by the deferred group. Only `character_glass` and the documented per-model recipes exist.

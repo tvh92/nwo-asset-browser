@@ -9,10 +9,10 @@ from unittest.mock import patch
 ARCHIVE = Path(__file__).resolve().parents[1] / 'Research' / '2026-10-22_from-PS4-animation-pipeline'
 RESEARCH = Path(os.environ['RC2016_RESEARCH']) if os.environ.get('RC2016_RESEARCH') else None
 HERE = ARCHIVE / 'decodes/Materials/TwoColorGlossMetal'
-from rc2016.formats.materials import extract_material_parameters, viewer_graph_rule
-from rc2016.shaders.families import graph_parameter_tables
-from rc2016.viewer import textures as tp
-from rc2016.viewer.viewport import ModelViewport
+from nwo.formats.materials import extract_material_parameters, viewer_graph_rule
+from nwo.shaders.families import graph_parameter_tables
+from nwo.viewer import textures as tp
+from nwo.viewer.viewport import ModelViewport
 
 GRAPH_PATH="materialgraph/global/basic_normal_gloss_metal/basic_normal_two_color_gloss_metal.materialgraph"
 GRAPH_FILE=HERE/"source_assets/basic_normal_two_color_gloss_metal.materialgraph" if HERE else None
@@ -162,7 +162,7 @@ class ViewerCorpusChecks(unittest.TestCase):
         strings=[GRAPH_PATH]
         no_override=dat1(strings,lambda at:[])
         archive=SourceAssetFakeArchive([(GRAPH_PATH,"materialgraph",self.graph_bytes),("material/no_overrides.material","material",no_override)])
-        with patch("rc2016.formats.materials.extract_material_parameters",return_value={"parameters":[],"unsupported_parameters":[]}):
+        with patch("nwo.formats.materials.extract_material_parameters",return_value={"parameters":[],"unsupported_parameters":[]}):
             got=tp.material_texture_paths(archive,"material/no_overrides.material")["two_color_metal"]
         for name,(key,fallback) in VECTORS.items():
             expected,source=source_value(no_override,key,fallback,True,self.graph_defaults)
@@ -172,7 +172,7 @@ class ViewerCorpusChecks(unittest.TestCase):
             self.assertEqual(source,"graph_default"); self.assertTrue(close(got[name],expected))
         # A stored zero is a real override and must not be replaced with the nonzero graph default.
         zeros=fake_parameter_rows({0x4A4437A7:0.,0xD3E7B61B:(0.,0.,0.)})
-        with patch("rc2016.formats.materials.extract_material_parameters",return_value=zeros):
+        with patch("nwo.formats.materials.extract_material_parameters",return_value=zeros):
             got_zero=tp.material_texture_paths(archive,"material/no_overrides.material")["two_color_metal"]
         self.assertEqual(got_zero["power"],0.); self.assertEqual(got_zero["diffuse_a"],[0.,0.,0.])
 
@@ -181,7 +181,7 @@ class ViewerCorpusChecks(unittest.TestCase):
         parsed=extract_material_parameters(data)
         parsed.setdefault("unsupported_parameters",[]).append({"key":"0x66EFA55B","key_hash":0x66EFA55B,
             "size":4,"raw_hex":struct.pack("<f",99.).hex(),"type":"unsupported_untyped"})
-        with patch("rc2016.formats.materials.extract_material_parameters",return_value=parsed):
+        with patch("nwo.formats.materials.extract_material_parameters",return_value=parsed):
             got=tp.material_texture_paths(self.archive,actual["path"])
         self.assertEqual(got["k"],0.)
 

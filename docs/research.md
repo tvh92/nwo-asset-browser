@@ -1,11 +1,11 @@
 # Corpus research toolkit
 
-`rc2016.research` scans DAT1 assets to find structural candidates for undecoded sections and aligned record fields. It uses the existing archive reader, decompressor and zone section parser. It imports no Qt, OpenGL or Blender modules and changes no decoder or viewer behaviour. See [levels](levels.md) for established layouts.
+`nwo.research` scans DAT1 assets to find structural candidates for undecoded sections and aligned record fields. It uses the existing archive reader, decompressor and zone section parser. It imports no Qt, OpenGL or Blender modules and changes no decoder or viewer behaviour. See [levels](levels.md) for established layouts.
 
 ## Command line
 
 ```
-python -m rc2016.research <game or asset_archive root> --out <output folder>
+python -m nwo.research <game or asset_archive root> --out <output folder>
                          [--ext .zone .level .zone_static]
                          [--level novalis] [--limit N] [--model-features]
 ```
@@ -29,10 +29,10 @@ The output folder must be outside the repository and source root. It receives `r
 | `hypothesis.py` | Executable claims over fixed-stride tables or offset-selected records |
 | `cross_reference.py` | Actual vendored dat1lib reader execution and CRC algorithms; guarded generic serialized reader |
 | `report.py` | Two-pass analysis and deterministic JSON/Markdown |
-| `mip_layout.py` | Texture payload sizes against top-mip-only, tile-padded and unpadded mip-chain layouts (`python -m rc2016.research.mip_layout --source-root <Image0>`); a prerequisite for uploading stored mips instead of generating them |
+| `mip_layout.py` | Texture payload sizes against top-mip-only, tile-padded and unpadded mip-chain layouts (`python -m nwo.research.mip_layout --source-root <Image0>`); a prerequisite for uploading stored mips instead of generating them |
 | `forward_programs.py` | Resource-table texture and sampler usage of a graph's forward pixel programs (`forward_resource_usage`), read from the GCN descriptor loads; results in [Ratchet forward passes](material-decoding/ratchet-forward-passes.md) |
 | `npc_audit.py` | Per-model animation and material coverage for one path prefix (default `character/npc/`); see [Character audit](#character-audit) |
-| `inheritance_audit.py` | Bit-0 scale-compensation rules: inverse-bind fit of every model and world-basis shear of paired clips per rule (`python -m rc2016.research.inheritance_audit <game or asset_archive root> --out <folder>`); see [pipeline](pipeline.md#inheritance-rule) |
+| `inheritance_audit.py` | Bit-0 scale-compensation rules: inverse-bind fit of every model and world-basis shear of paired clips per rule (`python -m nwo.research.inheritance_audit <game or asset_archive root> --out <folder>`); see [pipeline](pipeline.md#inheritance-rule) |
 
 The census ranks undecoded sections before decoded ones, with requested open items first. Within each group, score is file count times total section bytes. Heap coverage uses existing instance/decal reference ranges; unclaimed bytes can include alignment padding. The heap is only partially decoded.
 
@@ -45,7 +45,7 @@ Float candidates require finite values with magnitude at most 10 million, exclud
 ## Character audit
 
 ```
-python -m rc2016.research.npc_audit <game or asset_archive root> --out <folder> [--prefix character/npc/]
+python -m nwo.research.npc_audit <game or asset_archive root> --out <folder> [--prefix character/npc/]
 ```
 
 Writes `audit.json` and `audit.md` to `--out` (outside the repository and source root). It reads archive bytes in memory, so no decode cache is written. Per model under the prefix:
@@ -64,7 +64,7 @@ For serialized tags, including `0x81999057` and `0x2300D240`, the toolkit direct
 ## Hypothesis API and CLI
 
 ```python
-from rc2016.research.hypothesis import Claim, RecordSource, run
+from nwo.research.hypothesis import Claim, RecordSource, run
 
 source = RecordSource(section=0x06ABCAB2, offsets_section=0x6987F172)
 claims = [Claim('candidate model index', 0x58, 'index', target=0xC6A5905E)]
@@ -74,7 +74,7 @@ result = run(corpus, source, claims, examples=8)
 `RecordSource` accepts a fixed `stride` with `offsets_section=None`, or a u32 offsets section pointing into the selected section. Offset sources may use a record `size_field`; without one, adjacent offsets delimit records. `Claim` supports `index`, `equals_count`, `range` and `float3_bounds`. Scalar types are `u16`, `u32`, `u64` and `f32`. Target counts require a declared `target_stride` (default 4). `float3_bounds` compares three floats with the current zone's instance-translation bounds. A missing target or missing field fails visibly; malformed record sources are reported separately.
 
 ```
-python -m rc2016.research hypothesis <archive root> --out <folder>
+python -m nwo.research hypothesis <archive root> --out <folder>
     --claim '{"name":"candidate index","offset":96,"kind":"index","dtype":"u16","target":305419896}'
 ```
 

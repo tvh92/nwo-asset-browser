@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, TAXI_GLASS_TEXTURES, glass_uniforms
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, TAXI_GLASS_TEXTURES, glass_uniforms
 
 GRAPH = 'materialgraph/environment/global/architecture/mo_gbl_arch_glass_01/mo_gbl_arch_glass_01.materialgraph'
 MATERIAL = 'material/environment/global/gameplay/gbl_gp_taxi_glass_01/gbl_gp_taxi_glass_01.material'
@@ -100,7 +100,7 @@ class RuleBindingTests(unittest.TestCase):
         names, roles = validation._viewer_required(rule, False)
         self.assertEqual(set(names) <= set(validation._viewer_expected_constants(rule)), True)
         self.assertEqual(roles, ['_n', '_pick', '_window_c', '_window_g'])
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_glass')[1].split('def apply_viewer_graph_rule')[0]
         for name in ('glass tint', 'glass tint dense', 'glass height weight', 'glass alpha test', 'glass alpha scale', 'glass f0 scale',
                      'glass gloss scale', 'glass taxi alpha_H', 'glass taxi window _c', 'glass taxi window _g', 'glass taxi normal map',
@@ -116,7 +116,7 @@ class ArchiveRuleTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod

@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.formats import materials
-from rc2016.shaders import validation
+from nwo.formats import materials
+from nwo.shaders import validation
 
 PATTERNS = 'textures/character/shared/patterns_cma.texture'
 MATERIAL = 'material/character/enemy/enm_blarg_saucer_glass/enm_blarg_saucer_glass.material'
@@ -17,7 +17,7 @@ class SaucerGlassRuleTest(unittest.TestCase):
     def test_pipeline_lists_the_kind(self):
         self.assertIn('glass_patterned', materials.VIEWER_RULE_BUILT)
         self.assertEqual(materials.VIEWER_TERM_ROLES['glass_patterned'], ('_n',))
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         self.assertIn("'glass_patterned'", text.split('GLASS_VIEWER_KINDS =')[1].split('\n')[0])
         body = text.split("elif key == 'glass_patterned':")[1].split('elif key ==')[0]
         for name in ('glass rim exp', 'glass tiling', 'glass normal strength', 'glass pick rgb', 'glass f0', 'glass gloss',
@@ -45,7 +45,7 @@ class SaucerGlassRuleTest(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('RC2016_RESEARCH'), 'RC2016_RESEARCH is required')
 class SaucerGlassArchiveTest(unittest.TestCase):
     def test_dome_reads_the_orange_pick_entry(self):
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         archive = open_archive(Path(os.environ['RC2016_RESEARCH']))
         rule = materials.viewer_graph_rule(archive, MATERIAL)
         self.assertTrue(rule['applies'], rule.get('reason'))

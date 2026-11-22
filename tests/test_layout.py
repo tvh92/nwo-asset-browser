@@ -1,6 +1,6 @@
 import unittest
 
-from rc2016.app.layout import HORIZONTAL, VERTICAL, SplitLayout, Splitter, regrid
+from nwo.app.layout import HORIZONTAL, VERTICAL, SplitLayout, Splitter, regrid
 
 
 class SplitLayoutTests(unittest.TestCase):

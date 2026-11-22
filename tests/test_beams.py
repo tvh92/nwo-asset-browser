@@ -1,10 +1,10 @@
-"""Light beams: the mesh of the decoded light-cone placements (rc2016/levels/beams.py; no GL)."""
+"""Light beams: the mesh of the decoded light-cone placements (nwo/levels/beams.py; no GL)."""
 import math
 import unittest
 
 import numpy as np
 
-from rc2016.levels import beams
+from nwo.levels import beams
 
 
 def cone_model():

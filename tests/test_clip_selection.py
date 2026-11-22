@@ -1,7 +1,7 @@
 """Exact clip selection: label selectors, the browser picker's selectors, and the source audit trail."""
 import unittest
 
-from rc2016.pipeline.clip_selection import ClipSelectionError, resolve_clip_selection
+from nwo.pipeline.clip_selection import ClipSelectionError, resolve_clip_selection
 
 
 def source_row(order, name, stem, status='included', raw='aa', name_hash='0x1'):

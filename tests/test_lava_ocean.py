@@ -3,7 +3,7 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.shaders.lava_ocean import (
+from nwo.shaders.lava_ocean import (
     GRAPH, GRAPH_SHA256, GASPAR_LAVA_OCEAN_WRITER_SHA256,
     surface_rule, valid_contract,
 )
@@ -27,10 +27,10 @@ class LavaOceanContractTests(unittest.TestCase):
         research = os.environ.get("RC2016_GAME_ROOT") or os.environ.get("RC2016_RESEARCH") or os.environ.get("RC2016_ROOT")
         if not research or not Path(research).exists():
             self.skipTest("RC2016_RESEARCH is not configured")
-        from rc2016.formats.archive import Archive, asset_data, locate
-        from rc2016.formats.index import references
-        from rc2016.shaders.bindings import _parameter_values, pass_contracts
-        from rc2016.formats.materials import extract_material_parameters
+        from nwo.formats.archive import Archive, asset_data, locate
+        from nwo.formats.index import references
+        from nwo.shaders.bindings import _parameter_values, pass_contracts
+        from nwo.formats.materials import extract_material_parameters
 
         archive = Archive(locate(Path(research)), Path(__file__).resolve().parents[1] / ".cache/liquid-ocean-test",
                           lambda *_args, **_kwargs: None)
@@ -67,8 +67,8 @@ class LavaOceanContractTests(unittest.TestCase):
         # Evaluate the actual compact decoded writer with explicit review
         # positions and deterministic texels, checking that it is executable
         # and that changing source samples changes at least one material term.
-        from rc2016.viewer.native_glsl import evaluate_surface, emit_surface
-        from rc2016.shaders.lava_surface import prepare_rule, valid_contract as sealed_contract
+        from nwo.viewer.native_glsl import evaluate_surface, emit_surface
+        from nwo.shaders.lava_surface import prepare_rule, valid_contract as sealed_contract
         receipt = prepare_rule(GRAPH, graph_data, material_data)
         self.assertTrue(sealed_contract(receipt))
         emit_surface(receipt, rule_preview=True)

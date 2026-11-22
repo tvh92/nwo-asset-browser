@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from rc2016.levels import curves as C
+from nwo.levels import curves as C
 
 
 def record(points, closed=True, ups=None):

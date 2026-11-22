@@ -6,8 +6,8 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders.bindings import pass_contracts, surface_signature, prepare_translation
-from rc2016.shaders.ir import DAG
+from nwo.shaders.bindings import pass_contracts, surface_signature, prepare_translation
+from nwo.shaders.ir import DAG
 
 
 def graph(passes, rows=(), defaults=b''):
@@ -101,10 +101,10 @@ class SurfaceIdentityTests(unittest.TestCase):
         candidates=[bound(),bound(8,19,True)]
         candidates[1]['pass_contract_index']=1
         candidates[1]['limitations']=['Other native normal composition is not covered.']
-        with patch('rc2016.shaders.bindings.compiled',return_value=compiled), \
-             patch('rc2016.shaders.bindings.pass_contracts',return_value=[{}]), \
-             patch('rc2016.shaders.bindings.program_contracts',return_value=[{}]), \
-             patch('rc2016.shaders.bindings._bind',side_effect=candidates):
+        with patch('nwo.shaders.bindings.compiled',return_value=compiled), \
+             patch('nwo.shaders.bindings.pass_contracts',return_value=[{}]), \
+             patch('nwo.shaders.bindings.program_contracts',return_value=[{}]), \
+             patch('nwo.shaders.bindings._bind',side_effect=candidates):
             result=prepare_translation([b'graph'],b'material',{})
         self.assertEqual(result['status'],'ready')
         self.assertEqual(result['equivalent_candidates'],2)
@@ -112,10 +112,10 @@ class SurfaceIdentityTests(unittest.TestCase):
         self.assertIn(candidates[1]['limitations'][0],result['limitations'])
         self.assertFalse(result['game_equivalence'])
         candidates[1]['texture_bindings'][0]['path']='t/other.texture'
-        with patch('rc2016.shaders.bindings.compiled',return_value=compiled), \
-             patch('rc2016.shaders.bindings.pass_contracts',return_value=[{}]), \
-             patch('rc2016.shaders.bindings.program_contracts',return_value=[{}]), \
-             patch('rc2016.shaders.bindings._bind',side_effect=candidates):
+        with patch('nwo.shaders.bindings.compiled',return_value=compiled), \
+             patch('nwo.shaders.bindings.pass_contracts',return_value=[{}]), \
+             patch('nwo.shaders.bindings.program_contracts',return_value=[{}]), \
+             patch('nwo.shaders.bindings._bind',side_effect=candidates):
             result=prepare_translation([b'graph'],b'material',{})
         self.assertEqual(result['status'],'unsupported')
         self.assertIn('Multiple portable native variants',result['diagnostics'][-1])
@@ -131,16 +131,16 @@ class ArchiveBindingTests(unittest.TestCase):
         if not research:raise unittest.SkipTest('RC2016_RESEARCH is required')
         root=Path(os.environ.get('RC2016_GAME_ROOT',str(Path(research).parents[1]/'Ratchet & Clank (EUR)'/'Image0')))
         if not root.exists():raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive=open_archive(root)
 
     @classmethod
     def tearDownClass(cls):cls.archive.close()
 
     def translate(self,path):
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.formats.index import references
-        from rc2016.formats.materials import extract_material_parameters
+        from nwo.levels.scene import asset_bytes
+        from nwo.formats.index import references
+        from nwo.formats.materials import extract_material_parameters
         data=asset_bytes(self.archive,path)
         graphs=[asset_bytes(self.archive,r['path']) for r in references(data) if r['path'].endswith('.materialgraph')]
         return prepare_translation(graphs,data,extract_material_parameters(data))
@@ -153,12 +153,12 @@ class ArchiveBindingTests(unittest.TestCase):
         self.assertEqual({c['pass_contract_index'] for c in result['candidate_sources']},{0,1})
         self.assertTrue(any('composition involving other samples' in s for s in result['limitations']))
         self.assertFalse(result['game_equivalence'])
-        from rc2016.viewer.native_glsl import selected_translation
+        from nwo.viewer.native_glsl import selected_translation
         self.assertIsNone(selected_translation(self.archive,path)) # exact hand rule keeps precedence
 
     def test_empty_parameter_passes_bind_actual_source_textures(self):
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.viewer.native_glsl import selected_translation
+        from nwo.levels.scene import asset_bytes
+        from nwo.viewer.native_glsl import selected_translation
         graph_path='materialgraph/environment/global/prop/gbl_prop_qwark_posters_01/gbl_prop_qwark_posters_01.materialgraph'
         contracts=pass_contracts(asset_bytes(self.archive,graph_path))
         self.assertEqual([c['table'] for c in contracts],[[],[]])

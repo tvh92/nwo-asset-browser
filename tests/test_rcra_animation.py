@@ -7,10 +7,10 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.formats.animation_transforms import sample_transforms
-from rc2016.formats.container import game_crc32
-from rc2016.games.rcra import animation as ra
-from rc2016.games.rcra import model as rm
+from nwo.formats.animation_transforms import sample_transforms
+from nwo.formats.container import game_crc32
+from nwo.games.rcra import animation as ra
+from nwo.games.rcra import model as rm
 
 GAME = os.environ.get('RCRA_GAME')
 ROOT, CHILD = game_crc32('root'), game_crc32('child')
@@ -209,7 +209,7 @@ class RootMotionTests(unittest.TestCase):
                 ra.motion_section(section)
 
     def test_library_displacement_is_relative_to_the_first_record(self):
-        from rc2016.games.rcra.clip_library import RcraAnimationLibrary
+        from nwo.games.rcra.clip_library import RcraAnimationLibrary
         records = b''.join(struct.pack('<Q3fI', smallest_three(q), *t, 0)
                            for q, t in ((yaw(90), [1, 0, 0]), (yaw(180), [1, 0, -2]), (yaw(180), [1, 0, -4])))
         data = build_clip([(0, 0)] * 2, extra={ra.MOTION: motion_section(1, 2, records, 3, 2)})
@@ -222,8 +222,8 @@ class RootMotionTests(unittest.TestCase):
         np.testing.assert_allclose(translation[4], [4, 0, 0], atol=1e-6)
 
     def test_apply_root_motion_moves_the_whole_skeleton(self):
-        from rc2016.formats.skeleton import worlds
-        from rc2016.viewer.animation import apply_root_motion
+        from nwo.formats.skeleton import worlds
+        from nwo.viewer.animation import apply_root_motion
         rows = [dict(hash='0x1', name='root', parent=-1, flags=0, scale=[2.0, 2.0, 2.0], rotation_xyzw=[0, 0, 0, 1],
                      translation=[0.0, 1.0, 0.0]),
                 dict(hash='0x2', name='child', parent=0, flags=0, scale=[1.0, 1.0, 1.0], rotation_xyzw=list(yaw(30)),
@@ -305,7 +305,7 @@ class FacePerformanceTests(unittest.TestCase):
             ra.performance_frames(poses, [0, 1], dict(index=np.full((1, 8), 2), weight=np.full((1, 8), 0.1)))
 
     def test_face_section_of_the_clip_list(self):
-        from rc2016.app.browser import face_clips, group_clips
+        from nwo.app.browser import face_clips, group_clips
         labels = ['hero_ratchet: Walk', 'ratc_corv: RATC_CORV_001', 'ratc_corv: RATC_CORV_002', 'shot_1']
         animsets = ['characters/hero/hero_ratchet/hero_ratchet.animset', 'localization/ratc/ratc_corv.animset',
                     'cinematics/x/x.cinematic2']
@@ -349,7 +349,7 @@ class RealAnimationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 
@@ -362,11 +362,11 @@ class RealAnimationTests(unittest.TestCase):
         return self.source.bytes(self.source.resolve(path)[0])[0]
 
     def library(self, path):
-        from rc2016.games.rcra.clip_library import animation_library
+        from nwo.games.rcra.clip_library import animation_library
         return animation_library(self.source, self.data(path), path)
 
     def test_fish_clips_rest_pose_and_first_frame(self):
-        from rc2016.formats.skeleton import worlds
+        from nwo.formats.skeleton import worlds
         library = self.library(self.FISH)
         self.assertEqual(list(library.animset_data), ['characters/ambient/amb_fish_01/amb_fish_01.animset'])
         self.assertEqual(len(library.clips), 5)
@@ -412,7 +412,7 @@ class RealAnimationTests(unittest.TestCase):
             np.testing.assert_allclose(got, want, atol=1e-12)
 
     def test_ratchet_animates_without_tearing(self):
-        from rc2016.viewer.animation import BASIS
+        from nwo.viewer.animation import BASIS
         data = self.data(self.RATCHET)
         decoded = rm.decode_model(self.RATCHET, data=data, as_arrays=True, lod='Highest')
         self.assertTrue(all(m['skinned'] for m in decoded['meshes']))
@@ -439,7 +439,7 @@ class RealAnimationTests(unittest.TestCase):
     def test_root_motion_plants_ratchets_feet(self):
         # The joint tracks walk and turn on the spot, so a planted foot slides; the root motion moves the body
         # under it. Speed of the slower foot (the planted one), median over the clip, in units per second.
-        from rc2016.formats.clips import worlds_batch
+        from nwo.formats.clips import worlds_batch
         library = self.library(self.RATCHET)
         names = [r['name'] for r in library.rows]
         feet = [names.index('LF_ball'), names.index('RT_ball')]
@@ -461,7 +461,7 @@ class RealAnimationTests(unittest.TestCase):
 
     def test_foot_phase_marks_ratchets_contacts(self):
         # Kind-3 clips carry a foot phase per record: -1 where the left foot lands, +1 where the right foot lands.
-        from rc2016.formats.clips import worlds_batch
+        from nwo.formats.clips import worlds_batch
         library = self.library(self.RATCHET)
         names = [r['name'] for r in library.rows]
         ankles = [names.index('LF_ankle'), names.index('RT_ankle')]
@@ -475,7 +475,7 @@ class RealAnimationTests(unittest.TestCase):
             self.assertLess(height[right, 1], height[right, 0], name)    # right foot down at +1
 
     def test_face_performances_open_ratchets_jaw(self):
-        from rc2016.games.rcra.clip_library import PERFORMANCE
+        from nwo.games.rcra.clip_library import PERFORMANCE
         library = self.library(self.RATCHET).with_performances()
         faces = [i for i, c in enumerate(library.clips) if c.get('source') == PERFORMANCE]
         self.assertEqual(len(faces), 1535)   # every line of the 'ratc' speaker

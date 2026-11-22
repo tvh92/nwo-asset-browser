@@ -1,11 +1,11 @@
-"""Lightgrid indirect light of the Level atmosphere lighting (rc2016.levels.lightgrid; synthetic cells, no game data, no GL)."""
+"""Lightgrid indirect light of the Level atmosphere lighting (nwo.levels.lightgrid; synthetic cells, no game data, no GL)."""
 import unittest
 
 import numpy as np
 
-from rc2016.levels import lightgrid as lg
-from rc2016.levels import scene_effects
-from rc2016.viewer import shading
+from nwo.levels import lightgrid as lg
+from nwo.levels import scene_effects
+from nwo.viewer import shading
 
 
 def word(r, g, b):

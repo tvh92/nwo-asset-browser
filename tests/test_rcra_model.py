@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.games.rcra import model as rm
-from rc2016.viewer.loader import mesh_payload
+from nwo.games.rcra import model as rm
+from nwo.viewer.loader import mesh_payload
 
 GAME = os.environ.get('RCRA_GAME')
 
@@ -38,7 +38,7 @@ def pack_tangent(t, sign=1, e=31):
 def engine_vertex_programs(root):
     """The engine model vertex programs in RiftApart.exe: vertex programs that pull g_MainVBNrmTanView, write TEXCOORD to
     TEXCOORD7 and bind nothing beyond the model streams and per-draw views."""
-    from rc2016.shaders import dxbc
+    from nwo.shaders import dxbc
     standard = {'g_MainPaintVBView', 'g_SkinVBNrmTanView', 'g_SkinVBPosView', 'g_SkinVBPosPrevView', 'g_MainVBPosView',
                 'g_MainVBNrmTanView', 'g_MainVBUV0View', 'g_MainVBUV1View', 'g_MainColorVBView', 'g_ModelSubsetView',
                 'g_MaterialView', 'g_SceneObjectView', 'g_DynamicObjectView', 'MatDrawCB', 'GlobalViewportCBuffer',
@@ -107,7 +107,7 @@ class SyntheticModelTests(unittest.TestCase):
     def test_export_carries_the_tangent_and_w(self):
         """A Rift Apart mesh writes its tangent and TEXCOORD3.w as one glTF custom attribute (VEC4); a mesh without
         tangent_w (R&C 2016) writes none."""
-        from rc2016.export import models
+        from nwo.export import models
         mesh = rm.decode_model('synthetic', data=build_model())['meshes'][0]   # the exporter's list mode
         other = dict(mesh, tangent_w=None)
         parts = [dict(name='a', material=None, arrays=models.mesh_arrays(mesh, 0)),
@@ -200,7 +200,7 @@ class SyntheticModelTests(unittest.TestCase):
             rm.decode_model('t', data=model)
 
     def test_locators_become_gltf_nodes(self):
-        from rc2016.export import models
+        from nwo.export import models
         d = rm.decode_model('synthetic', data=build_model())
         parts = [dict(name='a', material=None, arrays=models.mesh_arrays(d['meshes'][0], 0))]
         exporter = models.ModelExporter.__new__(models.ModelExporter)
@@ -253,7 +253,7 @@ class SyntheticModelTests(unittest.TestCase):
 class RealModelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 
@@ -292,8 +292,8 @@ class RealModelTests(unittest.TestCase):
     def test_tangent_matches_the_engine_vertex_program(self):
         """The engine model vertex programs in the exe, translated and run on Ratchet's vertex streams, write
         TEXCOORD3 = the decoder's tangent and TEXCOORD3.w; render flag 0x10000 negates w."""
-        from rc2016.games.rcra import vertex as rv
-        from rc2016.shaders import sm5
+        from nwo.games.rcra import vertex as rv
+        from nwo.shaders import sm5
         programs = engine_vertex_programs(GAME)
         self.assertGreaterEqual(len(programs), 1)
         key = self.source.resolve('characters/hero/hero_ratchet/hero_ratchet.model')[0]
@@ -350,7 +350,7 @@ class RealModelTests(unittest.TestCase):
             self.decode(path)
 
     def test_listing_marks_the_models_without_geometry(self):
-        from rc2016.games.rcra_game import _no_geometry
+        from nwo.games.rcra_game import _no_geometry
         flagged = [k for k in self.source.ids_of_type('model') if _no_geometry(self.source.asset_header(k))]
         self.assertEqual(len(flagged), 24)
         for key in flagged[:3]:

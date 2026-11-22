@@ -8,10 +8,10 @@ import hashlib
 import unittest
 from unittest.mock import patch
 
-from rc2016.formats.materials import final_shader_status, shader_build_status, viewer_graph_rule
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT, GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.formats.materials import final_shader_status, shader_build_status, viewer_graph_rule
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT, GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 from tests.test_viewer_textures import FakeArchive, dat1, flags
 
 EMISSIVE = 'materialgraph/global/basic_emissive/basic_emissive.materialgraph'
@@ -35,8 +35,8 @@ def extract(graph, defaults, material_rows=(), flag_word=0x230):
     mat = dat1([graph], lambda at: [(tp.MATERIAL_FLAGS_SECTION, flags(flag_word))])
     archive = FakeArchive({'m/x.material': ('material', mat), graph: ('materialgraph', dat1([], lambda at: []))})
     params = dict(parameters=[], unsupported_parameters=list(material_rows))
-    with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+    with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+          patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
         return archive, tp.material_texture_paths(archive, 'm/x.material')
 
 
@@ -88,7 +88,7 @@ class FlatSurfaceTests(unittest.TestCase):
         graph_hash = hashlib.sha256(graph_data).hexdigest()
         mat = dat1([BASIC_FLAT], lambda at: [(tp.MATERIAL_FLAGS_SECTION, flags(0x230))])
         archive = FakeArchive({'m/x.material': ('material', mat), BASIC_FLAT: ('materialgraph', graph_data)})
-        from rc2016.formats.archive import asset_data
+        from nwo.formats.archive import asset_data
         graph_hash = hashlib.sha256(asset_data(archive, archive.resolve(BASIC_FLAT)[0])).hexdigest()
         defaults = {0x7F058428: [0.0, 0.0, 0.0], 0x77591534: 0.0,
                     0x62835AF9: 0.0, 0x24F4CA4C: 0.0}
@@ -97,8 +97,8 @@ class FlatSurfaceTests(unittest.TestCase):
         rules = (('materialgraph/global/basic_flat_color/basic_flat_color.',
                   dict(flat_surface='basic_flat_color', _graph_sha256=graph_hash)),)
         with (patch.object(tp, 'GRAPH_RULES', rules),
-              patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+              patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             got = tp.material_texture_paths(archive, 'm/x.material')
             viewer = viewer_graph_rule(archive, 'm/x.material', set())
         # The synthetic graph bytes are hash-guarded with their own test digest; model the
@@ -119,9 +119,9 @@ class FlatSurfaceTests(unittest.TestCase):
         self.assertIn('VR flat surface emission colour', names)
         self.assertNotIn('VR flat surface self-lit mask', names)
         with (patch.object(tp, 'GRAPH_RULES', rules),
-              patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params),
-              patch('rc2016.viewer.native_glsl.selected_translation', return_value=None)):
+              patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params),
+              patch('nwo.viewer.native_glsl.selected_translation', return_value=None)):
             entries = tp.material_textures(archive, [dict(index=3, path='m/x.material')], {}, previews=False)
         self.assertEqual(entries[3]['flat_surface'], flat)
         preflight = [dict(family='basic_flat_color', status='supported_partial')]
@@ -132,8 +132,8 @@ class FlatSurfaceTests(unittest.TestCase):
         signed = dict(parameters=[row(0x7F058428, (-0.25, 0.5, 0.75)), row(0x77591534, -2.0),
                                   row(0x62835AF9, -0.2), row(0x24F4CA4C, -0.4)], unsupported_parameters=[])
         with (patch.object(tp, 'GRAPH_RULES', rules),
-              patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=signed)):
+              patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=signed)):
             signed_flat = tp.material_texture_paths(archive, 'm/x.material')['flat_surface']
         self.assertEqual(signed_flat['colour'], [-0.25, 0.5, 0.75])
         self.assertEqual(signed_flat['emission_scale'], -2.0)
@@ -146,7 +146,7 @@ class FlatSurfaceTests(unittest.TestCase):
         graph_data = dat1([], lambda at: [])
         mat = dat1([BASIC_FLAT], lambda at: [(tp.MATERIAL_FLAGS_SECTION, flags(0x230))])
         archive = FakeArchive({'m/x.material': ('material', mat), BASIC_FLAT: ('materialgraph', graph_data)})
-        from rc2016.formats.archive import asset_data
+        from nwo.formats.archive import asset_data
         graph_hash = hashlib.sha256(asset_data(archive, archive.resolve(BASIC_FLAT)[0])).hexdigest()
         defaults = {0x7F058428: [0.0, 0.0, 0.0], 0x77591534: 0.0, 0x62835AF9: 0.2, 0x24F4CA4C: 0.4}
         rules = (('materialgraph/global/basic_flat_color/basic_flat_color.',
@@ -160,8 +160,8 @@ class FlatSurfaceTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 params = dict(parameters=valid, unsupported_parameters=[bad])
                 with (patch.object(tp, 'GRAPH_RULES', rules),
-                      patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
-                      patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+                      patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in defaults]], defaults)),
+                      patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
                     got = tp.material_texture_paths(archive, 'm/x.material')
                     viewer = viewer_graph_rule(archive, 'm/x.material', set())
                 self.assertNotIn('flat_surface', got)
@@ -205,7 +205,7 @@ class DetailEmissiveTests(unittest.TestCase):
                 self.assertEqual(got['bng']['detail'], (10.0, 20.0, 1.5))
                 _, defaulted = extract(graph, defaults)
                 self.assertEqual(defaulted['bng']['detail'], (1.0, 1.0, 0.75))
-                from rc2016.viewer.textures import GRAPH_RULES
+                from nwo.viewer.textures import GRAPH_RULES
                 self.assertTrue(any(prefix.endswith('.') and graph.startswith(prefix) for prefix, _ in GRAPH_RULES))
                 rule = dict(applies=True, ported=['bng', 'bng_detail'], k=1.0,
                             terms={'bng': dict(kind=kind, colour=[1, 1, 1], params=[1, 1, 0, 0], detail=[10.0, 20.0, 1.5])},
@@ -239,9 +239,9 @@ class AmoeboidBodyTests(unittest.TestCase):
         rules = tuple((p, dict(r, graph_sha256=digest) if r.get('bng') == 12 else r) for p, r in tp.GRAPH_RULES)
         params = dict(parameters=[], unsupported_parameters=self.ROWS)
         with (patch.object(tp, 'GRAPH_RULES', rules),
-              patch('rc2016.shaders.families.graph_parameter_tables',
+              patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in self.DEFAULTS]], self.DEFAULTS)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             return archive, tp.material_texture_paths(archive, 'm/x.material')
 
     def test_captured_cb2_values(self):
@@ -268,9 +268,9 @@ class AmoeboidBodyTests(unittest.TestCase):
                        if r.get('bng') == 12 else r) for p, r in tp.GRAPH_RULES)
         params = dict(parameters=[], unsupported_parameters=self.ROWS)
         with (patch.object(tp, 'GRAPH_RULES', rules),
-              patch('rc2016.shaders.families.graph_parameter_tables',
+              patch('nwo.shaders.families.graph_parameter_tables',
                     return_value=([[dict(key_hash=k) for k in self.DEFAULTS]], self.DEFAULTS)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             rule = viewer_graph_rule(archive, 'm/x.material', set())
         self.assertIn('bng', rule.get('ported', []))
         self.assertIn('spec_tint', rule.get('ported', []))
@@ -292,7 +292,7 @@ class ProjectileGraphTests(unittest.TestCase):
         archive, got = extract(SWAP, defaults, [row(0xF8C61683, 15.0)])
         self.assertEqual((got['g_mode'], got['k']), ('colored', 15.0))
         self.assertNotIn('swap', got)
-        from rc2016.formats.links import EXACT, rule_coverage
+        from nwo.formats.links import EXACT, rule_coverage
         self.assertEqual(rule_coverage([SWAP])[0], EXACT)
         self.assertEqual(extract(SWAP, defaults)[1]['k'], 5.0)
         # A nonzero swap weight would blend in the V5 textures, which no rule builds: it must stay visible.
@@ -332,7 +332,7 @@ class NumberDisplayTests(unittest.TestCase):
         self.assertEqual(glass_uniforms(qwark['forward'])[1][3], 1.0)
 
     def test_clip_clock_jitters_the_vignette_per_game_frame(self):
-        from rc2016.viewer.shading import frame_fade
+        from nwo.viewer.shading import frame_fade
         _, got = extract(SHIV, {})
         forward = got['forward']
         self.assertEqual(glass_uniforms(forward)[1][2], 0.5)                         # static: CB0[107] = 0
@@ -341,7 +341,7 @@ class NumberDisplayTests(unittest.TestCase):
         self.assertEqual(widths[7], 0.5 + 0.1 * frame_fade(7 / 30.0 + 0.01, 30.0))
         self.assertGreater(len(set(widths)), 290)                                     # a new value each 30 Hz frame
         self.assertEqual(glass_uniforms(forward, 10.01)[1][2], glass_uniforms(forward, 10.03)[1][2])
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         self.assertIn('number_display', ModelViewport.EFFECT_KINDS)
 
     def test_glsl_and_rule(self):

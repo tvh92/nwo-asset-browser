@@ -7,10 +7,10 @@ import os
 import unittest
 from pathlib import Path
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.grey_g_graphs import GREY_G_GRAPHS
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.grey_g_graphs import GREY_G_GRAPHS
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 
 ROOT = Path(__file__).resolve().parents[1]
 GRAPH = 'materialgraph/environment/global/decal/mo_decal_gnormal.materialgraph'
@@ -73,7 +73,7 @@ class RuleTests(unittest.TestCase):
         names, roles = validation._viewer_required(rule, False)
         self.assertTrue(set(names) <= set(validation._viewer_expected_constants(rule)))
         self.assertEqual(roles, ['_window_c', '_window_g'])
-        text = (ROOT / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (ROOT / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         self.assertIn("'decal_gnormal'", text.split('GLASS_VIEWER_KINDS =')[1].split('\n')[0])
         body = text.split("elif key == 'decal_gnormal':")[1].split("elif key == 'window_glass':")[0]
         for name in ['glass ' + n for n in validation.GLASS_CONSTANTS['decal_gnormal']] + ['glass decal colour map', 'glass decal gloss map']:
@@ -87,7 +87,7 @@ class ArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -108,7 +108,7 @@ class ArchiveTests(unittest.TestCase):
         self.assertAlmostEqual(p['alpha_cut'], 7 / 255, places=6)
 
     def test_blender_rule(self):
-        from rc2016.formats.materials import viewer_graph_rule
+        from nwo.formats.materials import viewer_graph_rule
         rule = viewer_graph_rule(self.archive, MATERIAL)
         self.assertTrue(rule['applies'])
         self.assertEqual((rule['ported'], rule['unported']), (['decal_gnormal'], []))

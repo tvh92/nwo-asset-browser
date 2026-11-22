@@ -10,7 +10,7 @@ import types
 import unittest
 from unittest import mock
 
-from rc2016.app import workers
+from nwo.app import workers
 TINY_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/"
     "lXcAAAAASUVORK5CYII="

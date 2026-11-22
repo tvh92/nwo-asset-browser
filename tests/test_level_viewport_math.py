@@ -3,9 +3,9 @@ source contracts. No window is opened; the Tk-dependent imports are skipped when
 import unittest
 
 try:
-    from rc2016.levels.viewport import merge_ranges, pick_colour, pick_index
-    from rc2016.viewer.viewport import RIG_TO_WORLD, column_major3, light_frames
-    from rc2016.viewer import shading
+    from nwo.levels.viewport import merge_ranges, pick_colour, pick_index
+    from nwo.viewer.viewport import RIG_TO_WORLD, column_major3, light_frames
+    from nwo.viewer import shading
     IMPORT_ERROR = None
 except ImportError as exc:   # no Tk / no ctypes.wintypes on this platform
     IMPORT_ERROR = exc

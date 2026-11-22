@@ -1,10 +1,10 @@
 """Fail-closed tests for explicit static-vector preview input selection."""
 import unittest
 
-from rc2016.shaders.static_vectors import StaticCompiler
-from rc2016.shaders.translator import Compiler
-from rc2016.viewer.viewport import ModelViewport
-from rc2016.levels.viewport import LevelViewport
+from nwo.shaders.static_vectors import StaticCompiler
+from nwo.shaders.translator import Compiler
+from nwo.viewer.viewport import ModelViewport
+from nwo.levels.viewport import LevelViewport
 from tests.test_vertex_context import run, s_buffer_load
 
 

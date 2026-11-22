@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.shaders.bindings import (
+from nwo.shaders.bindings import (
     GAUGE_NEEDLE_SOURCE_PREVIEW,
     MAP_O_MATIC_SCREEN_SOURCE_PREVIEW,
     SOURCE_PREVIEW_POLICIES,
@@ -92,7 +92,7 @@ class ArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -101,11 +101,11 @@ class ArchiveTests(unittest.TestCase):
             cls.archive.close()
 
     def test_exact_writers_are_ready_with_labelled_frozen_inputs(self):
-        from rc2016.formats.index import references
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.bindings import prepare_translation
-        from rc2016.viewer.native_glsl import evaluate_surface
+        from nwo.formats.index import references
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.bindings import prepare_translation
+        from nwo.viewer.native_glsl import evaluate_surface
         for rule, contract, apis, expected in CASES:
             with self.subTest(rule=rule['label']):
                 graph_data = asset_bytes(self.archive, rule['graph_path'])

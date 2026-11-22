@@ -1,7 +1,7 @@
 import unittest
 
-from rc2016.formats.texture import tiled_top_mip_size, top_mip_size
-from rc2016.research.mip_layout import classify
+from nwo.formats.texture import tiled_top_mip_size, top_mip_size
+from nwo.research.mip_layout import classify
 
 
 class MipLayoutTests(unittest.TestCase):

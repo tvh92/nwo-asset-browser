@@ -8,8 +8,8 @@ from unittest import mock
 
 import numpy as np
 
-from rc2016.games.rcra import blender_export as bexp
-from rc2016.viewer import rcra_glsl
+from nwo.games.rcra import blender_export as bexp
+from nwo.viewer import rcra_glsl
 
 
 def face_direction(face, s, t):
@@ -157,7 +157,7 @@ class ViewportCubeTests(unittest.TestCase):
                          pixels=faces[k].tobytes()) for k in range(6)]
         with tempfile.TemporaryDirectory() as appdata, mock.patch.dict(os.environ, {'APPDATA': appdata}):
             import tkinter as tk
-            from rc2016.viewer.viewport import ModelViewport
+            from nwo.viewer.viewport import ModelViewport
             root = tk.Tk()
             try:
                 root.geometry('64x64')

@@ -1,4 +1,4 @@
-"""Which lighting zone feeds the lightgrid and how its tables decode (rc2016.levels.lightgrid; synthetic zones, no game data)."""
+"""Which lighting zone feeds the lightgrid and how its tables decode (nwo.levels.lightgrid; synthetic zones, no game data)."""
 import struct
 import tempfile
 import unittest
@@ -7,8 +7,8 @@ from unittest import mock
 
 import numpy as np
 
-from rc2016.levels import lightgrid as lg
-from rc2016.pipeline.lighting import NOVALIS_LIGHTING_ZONE, ZONE_GRID_COORDINATES, ZONE_GRID_PATHS
+from nwo.levels import lightgrid as lg
+from nwo.pipeline.lighting import NOVALIS_LIGHTING_ZONE, ZONE_GRID_COORDINATES, ZONE_GRID_PATHS
 from tests.test_level_volumes import dat1
 
 REGION = 'levels/veldin/openarea/openworld/default_region/day'
@@ -85,7 +85,7 @@ class LevelLightgridTests(unittest.TestCase):
         self.assertIsNone(lg.level_lightgrid(object(), ['levels/x/atmosphere.zone']))
 
     def test_a_lighting_zone_without_grid_tables_gives_none(self):
-        with mock.patch('rc2016.levels.scene.asset_bytes', return_value=dat1({})):
+        with mock.patch('nwo.levels.scene.asset_bytes', return_value=dat1({})):
             self.assertIsNone(lg.level_lightgrid(object(), [LGT]))
 
     def test_other_levels_read_their_zone_and_cache_under_a_zone_name(self):
@@ -97,7 +97,7 @@ class LevelLightgridTests(unittest.TestCase):
         archive.entries[0].pop('loose_path')
         cells = np.zeros((lg.CELLS_PER_TILE, lg.CELL_BYTES), np.uint8)
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(lg, 'CACHE_DIR', Path(folder)), \
-                mock.patch('rc2016.levels.scene.asset_bytes', return_value=dat1({ZONE_GRID_PATHS: b'', ZONE_GRID_COORDINATES: b''})) as read, \
+                mock.patch('nwo.levels.scene.asset_bytes', return_value=dat1({ZONE_GRID_PATHS: b'', ZONE_GRID_COORDINATES: b''})) as read, \
                 mock.patch.object(lg, 'zone_grid_map', return_value=rows) as grid_map, \
                 mock.patch.object(lg, '_tile_cells', return_value=(cells, ['probe.texture'])):
             grid = lg.level_lightgrid(archive, [LGT_NIGHT, LGT])
@@ -119,8 +119,8 @@ class LevelLightgridTests(unittest.TestCase):
         archive.entries = {0: dict(occurrences=[dict(archive='a', offset=0, size=1, available=True)])}
         cells = np.zeros((lg.CELLS_PER_TILE, lg.CELL_BYTES), np.uint8)
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(lg, 'CACHE_DIR', Path(folder)), \
-                mock.patch('rc2016.levels.scene.asset_bytes', return_value=b'zone') as read, \
-                mock.patch('rc2016.pipeline.lighting._decode_lighting_zone_grid_map', return_value=dict(grids=rows)) as novalis, \
+                mock.patch('nwo.levels.scene.asset_bytes', return_value=b'zone') as read, \
+                mock.patch('nwo.pipeline.lighting._decode_lighting_zone_grid_map', return_value=dict(grids=rows)) as novalis, \
                 mock.patch.object(lg, 'zone_grid_map') as generic, mock.patch.object(lg, '_tile_cells', return_value=(cells, [])):
             grid = lg.level_lightgrid(archive, ['levels/Novalis/atmosphere.zone', NOVALIS_LIGHTING_ZONE], night=True)
             self.assertEqual(grid.tile_count, 1)

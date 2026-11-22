@@ -1,6 +1,6 @@
 import unittest
 
-from rc2016.levels.scene_effects import SHADOW_REFRESH_SECONDS, SceneEffects
+from nwo.levels.scene_effects import SHADOW_REFRESH_SECONDS, SceneEffects
 
 
 class View:
@@ -61,7 +61,7 @@ class ShadowRefreshTests(unittest.TestCase):
 
 class AOSettleTests(unittest.TestCase):
     def test_ao_waits_for_the_camera_to_rest_then_renders(self):
-        from rc2016.levels.scene_effects import AO_SETTLE_SECONDS
+        from nwo.levels.scene_effects import AO_SETTLE_SECONDS
         e, view = effects(), View()
         e.ao_retry = None
         view._camera_changed_at = 100.0
@@ -86,19 +86,19 @@ if __name__ == '__main__':
 
 class ShadowedAmbientTests(unittest.TestCase):
     def test_lit_and_back_facing_surfaces_keep_all_sky_light(self):
-        from rc2016.levels.scene_effects import shadowed_ambient_factor
+        from nwo.levels.scene_effects import shadowed_ambient_factor
         self.assertEqual(shadowed_ambient_factor(1.0, 0.7, 0.05), 1.0)        # lit: sunlit brightness untouched
         self.assertEqual(shadowed_ambient_factor(0.0, 0.0, 0.05), 1.0)        # facing away: the map's self-shadow is not a cast shadow
         self.assertEqual(shadowed_ambient_factor(0.0, -0.3, 0.05), 1.0)
 
     def test_cast_shadow_on_a_surface_the_sun_reaches_scales_the_sky_light(self):
-        from rc2016.levels.scene_effects import shadowed_ambient_factor
+        from nwo.levels.scene_effects import shadowed_ambient_factor
         self.assertAlmostEqual(shadowed_ambient_factor(0.0, 0.7, 0.05), 0.05)
         self.assertAlmostEqual(shadowed_ambient_factor(0.5, 0.7, 0.05), 0.525)  # penumbra blends
         self.assertAlmostEqual(shadowed_ambient_factor(0.0, 0.125, 0.05), 0.525)  # grazing light fades the effect in
 
     def test_shader_and_python_forms_agree_on_the_formula_and_the_uniform_is_declared(self):
-        from rc2016.levels.scene_effects import HELPERS, SCENE_UNIFORMS, SHADOW_AMBIENT
+        from nwo.levels.scene_effects import HELPERS, SCENE_UNIFORMS, SHADOW_AMBIENT
         self.assertIn('uSceneShadowAmbient', SCENE_UNIFORMS)
         self.assertIn('uniform float uSceneShadowAmbient', HELPERS)
         self.assertIn('1.0-(1.0-uSceneShadowAmbient)*(1.0-shadow)*clamp(ndl*4.0,0.0,1.0)', HELPERS)
@@ -106,5 +106,5 @@ class ShadowedAmbientTests(unittest.TestCase):
 
     def test_surface_lighting_applies_it_to_the_diffuse_sky_term(self):
         import inspect
-        from rc2016.viewer import shading
+        from nwo.viewer import shading
         self.assertIn('ambientLight(N)*A*sceneShadowedAmbient(Sh,NdK)', inspect.getsource(shading))

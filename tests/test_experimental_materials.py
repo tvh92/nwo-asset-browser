@@ -3,12 +3,12 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.shaders.ir import DAG
-from rc2016.viewer.experimental_materials import CONTRACT, CODE_SHA, GRAPH_SHA, MATERIAL_SHA, build_preview
-from rc2016.viewer.native_glsl import emit_surface, evaluate_surface
-from rc2016.viewer.viewport import ModelViewport
-from rc2016.levels.viewport import LevelViewport
-from rc2016.levels.panel import LevelPanel
+from nwo.shaders.ir import DAG
+from nwo.viewer.experimental_materials import CONTRACT, CODE_SHA, GRAPH_SHA, MATERIAL_SHA, build_preview
+from nwo.viewer.native_glsl import emit_surface, evaluate_surface
+from nwo.viewer.viewport import ModelViewport
+from nwo.levels.viewport import LevelViewport
+from nwo.levels.panel import LevelPanel
 
 
 def tiny_preview():
@@ -73,12 +73,12 @@ class OnDemandPreviewTests(unittest.TestCase):
 
     def test_material_textures_skip_preview_analysis_unless_asked(self):
         from unittest.mock import patch
-        from rc2016.viewer.textures import material_textures
-        from rc2016.viewer.experimental_materials import MATERIAL
-        with patch('rc2016.viewer.textures.material_texture_paths',return_value={}), \
-             patch('rc2016.viewer.native_glsl.selected_translation',return_value=None), \
-             patch('rc2016.viewer.native_glsl.exact_rule_wins',return_value=False), \
-             patch('rc2016.viewer.experimental_materials.prepare_preview') as prepare:
+        from nwo.viewer.textures import material_textures
+        from nwo.viewer.experimental_materials import MATERIAL
+        with patch('nwo.viewer.textures.material_texture_paths',return_value={}), \
+             patch('nwo.viewer.native_glsl.selected_translation',return_value=None), \
+             patch('nwo.viewer.native_glsl.exact_rule_wins',return_value=False), \
+             patch('nwo.viewer.experimental_materials.prepare_preview') as prepare:
             entry=material_textures(None,[dict(index=0,path=MATERIAL)],{},previews=False)[0]
             prepare.assert_not_called()
             self.assertNotIn('experimental_preview',entry)
@@ -88,8 +88,8 @@ class OnDemandPreviewTests(unittest.TestCase):
     def test_panel_prepares_enabled_previews_once_beside_the_load(self):
         import threading
         from unittest.mock import patch
-        from rc2016.levels import scene
-        from rc2016.shaders import terrain_preview
+        from nwo.levels import scene
+        from nwo.shaders import terrain_preview
         class Var:
             def __init__(self,value):self.value=value
             def get(self):return self.value
@@ -120,8 +120,8 @@ class OnDemandPreviewTests(unittest.TestCase):
             if path=='broken.material':raise ValueError('source changed')
             return None if path=='none.material' else {'status':'experimental'}
         with patch.object(scene,'material_entries',side_effect=entries), patch('threading.Thread',Thread), \
-             patch('rc2016.levels.panel.ThreadPoolExecutor',Pool), \
-             patch('rc2016.viewer.experimental_materials.prepare_preview',side_effect=preview):
+             patch('nwo.levels.panel.ThreadPoolExecutor',Pool), \
+             patch('nwo.viewer.experimental_materials.prepare_preview',side_effect=preview):
             panel._prepare_previews(paths)
             self.assertEqual(calls,[])   # disabled: no analysis
             panel.experimental_var.value=True
@@ -147,8 +147,8 @@ class OnDemandPreviewTests(unittest.TestCase):
 class MountainSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.levels.scene import open_archive,asset_bytes
-        from rc2016.viewer.experimental_materials import MATERIAL,GRAPH
+        from nwo.levels.scene import open_archive,asset_bytes
+        from nwo.viewer.experimental_materials import MATERIAL,GRAPH
         root=Path(os.environ['RC2016_RESEARCH'])
         game=root.parents[1]/'Ratchet & Clank (EUR)'/'CUSA01073'
         if not game.is_dir():raise unittest.SkipTest('validated source archive unavailable')
@@ -181,9 +181,9 @@ class MountainSourceTests(unittest.TestCase):
                 self.assertIn((8,(.4,.6)),coords)
 
     def test_actual_texture_loader_prepares_preview_without_advertising_native_readiness(self):
-        from rc2016.levels.scene import open_archive
-        from rc2016.viewer.experimental_materials import MATERIAL
-        from rc2016.viewer.textures import material_textures
+        from nwo.levels.scene import open_archive
+        from nwo.viewer.experimental_materials import MATERIAL
+        from nwo.viewer.textures import material_textures
         archive = open_archive(str(self.game))
         try:
             entry = material_textures(archive,[dict(index=0,path=MATERIAL)],{})[0]
@@ -197,7 +197,7 @@ class MountainSourceTests(unittest.TestCase):
 
 class GenericPreviewFallbackTests(unittest.TestCase):
     def receipt(self, normal_albedo=True):
-        from rc2016.shaders.bindings import WORLD_POSITION_CONTRACT
+        from nwo.shaders.bindings import WORLD_POSITION_CONTRACT
         ir = DAG()
         normal = ir.node('input', kind='preview_normal', channel=1, name='preview_normal.1')
         position = ir.node('input', kind='preview_position', channel=0, name='preview_position.0')
@@ -208,7 +208,7 @@ class GenericPreviewFallbackTests(unittest.TestCase):
                                  F0=[normal]*3, gloss=zero, emission=zero))
 
     def test_normal_dependent_albedo_retains_normal_mapped_fallback(self):
-        from rc2016.viewer.experimental_materials import preview_with_fallback
+        from nwo.viewer.experimental_materials import preview_with_fallback
         raw = self.receipt()
         guarded = preview_with_fallback(raw, {'_n': {'path': 'source-normal'}})
         self.assertFalse(guarded['viewer_override'])
@@ -223,7 +223,7 @@ class GenericPreviewFallbackTests(unittest.TestCase):
         self.assertIs(view._selected_surface(entry, 2)[0], raw)
 
     def test_position_only_albedo_and_noncolour_normal_use_remain_selected(self):
-        from rc2016.viewer.experimental_materials import preview_with_fallback
+        from nwo.viewer.experimental_materials import preview_with_fallback
         raw = self.receipt(normal_albedo=False)
         self.assertIs(preview_with_fallback(raw, {'_n': 'normal'}), raw)
         raw = self.receipt()
@@ -232,7 +232,7 @@ class GenericPreviewFallbackTests(unittest.TestCase):
         self.assertIs(preview_with_fallback(raw, {'_n': 'normal'}), raw)
 
     def test_pinned_and_unsupported_receipts_keep_their_contracts(self):
-        from rc2016.viewer.experimental_materials import preview_with_fallback
+        from nwo.viewer.experimental_materials import preview_with_fallback
         raw = tiny_preview()
         self.assertIs(preview_with_fallback(raw, {'_n': 'normal'}), raw)
         unsupported = {'status': 'unsupported'}

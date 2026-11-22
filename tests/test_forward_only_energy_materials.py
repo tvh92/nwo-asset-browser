@@ -31,7 +31,7 @@ class ForwardOnlyEnergyTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -40,8 +40,8 @@ class ForwardOnlyEnergyTests(unittest.TestCase):
             cls.archive.close()
 
     def programs(self, path, sha):
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.translator import pixel_programs
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.translator import pixel_programs
         data = bytes(asset_bytes(self.archive, path))
         self.assertEqual(hashlib.sha256(data).hexdigest(), sha)
         return pixel_programs(data)
@@ -53,7 +53,7 @@ class ForwardOnlyEnergyTests(unittest.TestCase):
                 self.assertEqual({k: p['shader_id'] for k, p in enumerate(programs)}, ids)
 
     def test_no_deferred_or_masked_program_carries_colour(self):
-        from rc2016.shaders.translator import Compiler, decoder
+        from nwo.shaders.translator import Compiler, decoder
         for path, sha, _ in GRAPHS:
             programs = self.programs(path, sha)
             for k in DEFERRED_OR_MASKED:
@@ -69,8 +69,8 @@ class ForwardOnlyEnergyTests(unittest.TestCase):
                                 self.assertEqual(c.ir.value(node), 0.0)
 
     def test_visible_programs_are_single_target_forward_loops(self):
-        from rc2016.shaders.translator import compile_graph
-        from rc2016.levels.scene import asset_bytes
+        from nwo.shaders.translator import compile_graph
+        from nwo.levels.scene import asset_bytes
         for path, sha, _ in GRAPHS:
             with self.subTest(graph=path):
                 graph = compile_graph(bytes(asset_bytes(self.archive, path)))

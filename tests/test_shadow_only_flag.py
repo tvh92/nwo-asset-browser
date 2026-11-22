@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-from rc2016.pipeline import render_state
+from nwo.pipeline import render_state
 
 ROOT = Path(__file__).resolve().parents[1]
 SHADOW_CAST_ONLY = 'material/global/shadow_cast_only/shadow_cast_only.material'
@@ -25,18 +25,18 @@ class ShadowOnlyFlagTests(unittest.TestCase):
         self.assertFalse(render_state.shadow_only(None))
 
     def test_every_front_end_skips_the_colour_pass(self):
-        model = (ROOT / 'rc2016/viewer/viewport.py').read_text(encoding='utf-8')
+        model = (ROOT / 'nwo/viewer/viewport.py').read_text(encoding='utf-8')
         self.assertIn('"shadow_only", "zurkon"', model)
         self.assertIn('.get("shadow_only")]', model)
-        level = (ROOT / 'rc2016/levels/viewport.py').read_text(encoding='utf-8')
+        level = (ROOT / 'nwo/levels/viewport.py').read_text(encoding='utf-8')
         self.assertIn('if not shadow and entry.get("shadow_only"):', level)
-        geometry = (ROOT / 'rc2016/pipeline/geometry.py').read_text(encoding='utf-8')
+        geometry = (ROOT / 'nwo/pipeline/geometry.py').read_text(encoding='utf-8')
         self.assertIn('render_state.shadow_only(material_path)', geometry)
         self.assertIn('obj.visible_shadow=True', geometry)
-        export = (ROOT / 'rc2016/export/models.py').read_text(encoding='utf-8')
+        export = (ROOT / 'nwo/export/models.py').read_text(encoding='utf-8')
         self.assertIn('game.shadow_only(', export)   # through the game seam; R&C 2016's record asks the census
-        adapter = (ROOT / 'rc2016/games/rc2016.py').read_text(encoding='utf-8')
-        self.assertIn('from rc2016.pipeline.render_state import shadow_only', adapter)
+        adapter = (ROOT / 'nwo/games/rc2016.py').read_text(encoding='utf-8')
+        self.assertIn('from nwo.pipeline.render_state import shadow_only', adapter)
 
 
 if __name__ == '__main__':

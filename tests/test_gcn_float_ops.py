@@ -3,9 +3,9 @@ import math
 import struct
 import unittest
 
-from rc2016.shaders import gcn
-from rc2016.shaders.ir import DAG
-from rc2016.shaders.translator import Compiler, decoder
+from nwo.shaders import gcn
+from nwo.shaders.ir import DAG
+from nwo.shaders.translator import Compiler, decoder
 
 
 def op(table, name):
@@ -130,7 +130,7 @@ class FloatOpcodeTests(unittest.TestCase):
         self.assertEqual(compiler.ir.nodes[compiler.v[9]]['op'], 'unsupported')
 
     def test_new_ops_reach_glsl(self):
-        from rc2016.viewer.native_glsl import emit_surface
+        from nwo.viewer.native_glsl import emit_surface
         nodes = DAG()
         uv = nodes.node('input', name='attribute0.0', kind='attribute', attribute=0, channel=0)
         floor, fract = nodes.op('floor', uv), nodes.op('fract', uv)

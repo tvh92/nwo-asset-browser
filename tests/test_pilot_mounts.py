@@ -4,8 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from rc2016.pipeline.pilot_mounts import NEFARIOUS, NEFARIOUS_MECH, clip_suffix, pilot_mounts
-from rc2016.pipeline.run import GROUP_STATUSES, assemble_group_blend
+from nwo.pipeline.pilot_mounts import NEFARIOUS, NEFARIOUS_MECH, clip_suffix, pilot_mounts
+from nwo.pipeline.run import GROUP_STATUSES, assemble_group_blend
 
 
 class PilotMountTests(unittest.TestCase):
@@ -31,7 +31,7 @@ class PilotMountTests(unittest.TestCase):
             manifest = dict(models={k: dict(status=GROUP_STATUSES[0], model=k, final=str(v)) for k, v in finals.items()},
                             errors=[])
             captured = {}
-            with patch('rc2016.pipeline.run.run_group_blend', lambda name, members, *a: captured.update(members=members)):
+            with patch('nwo.pipeline.run.run_group_blend', lambda name, members, *a: captured.update(members=members)):
                 assemble_group_blend(list(finals), manifest, SimpleNamespace(group_blend='mech', group_actors=''),
                                      lambda *a, **k: None)
         mech, pilot = captured['members']

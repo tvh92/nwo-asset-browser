@@ -5,9 +5,9 @@ import struct
 import sys
 import unittest
 
-from rc2016.levels import scene
-from rc2016.levels.viewport import draw_items
-from rc2016.levels.zone_format import (OVERRIDE_MATERIALS, DATA_HEAP, INSTANCE_OFFSETS, MODEL_PATHS,
+from nwo.levels import scene
+from nwo.levels.viewport import draw_items
+from nwo.levels.zone_format import (OVERRIDE_MATERIALS, DATA_HEAP, INSTANCE_OFFSETS, MODEL_PATHS,
                                        decode_zone, name_crc32, path_crc64)
 
 GLASS = 'material/env/glass_default.material'

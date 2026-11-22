@@ -3,9 +3,9 @@ import unittest
 
 import numpy as np
 
-import rc2016.levels.scene as scene
-from rc2016.levels.scene import instance_vertex_alpha, keyed_vertex_colours, zone_scene
-from rc2016.levels.zone_format import decode_zone_arrays, vertex_colour_block, name_crc32, path_crc64
+import nwo.levels.scene as scene
+from nwo.levels.scene import instance_vertex_alpha, keyed_vertex_colours, zone_scene
+from nwo.levels.zone_format import decode_zone_arrays, vertex_colour_block, name_crc32, path_crc64
 from tests.test_level_material_overrides import RED, record, zone
 
 
@@ -119,7 +119,7 @@ class KeyedColourTests(unittest.TestCase):
 
     def test_ground_candidate_retains_key_presence_instead_of_inventing_unlisted_colours(self):
         from array import array
-        from rc2016.levels.scene import instance_vertex_paint
+        from nwo.levels.scene import instance_vertex_paint
         geometry=dict(positions=array('f',[0,0,0,5,5,5]))
         alpha,paint,note=instance_vertex_paint(geometry,[self.block],1)
         self.assertEqual(list(alpha),[0.,0.])

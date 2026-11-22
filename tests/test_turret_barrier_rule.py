@@ -1,7 +1,7 @@
 """Blarg turret energy barrier 19D0F1FA and targeting display 678C5C0E (docs/material-decoding/turret-barrier.md).
 
 Synthetic checks (rule binding, uniform packing, GLSL text, validator constants) always run. The archive-backed checks pin the
-program identities, evaluate the project's own GCN decode of both programs (rc2016.research.forward_loops, independent of the
+program identities, evaluate the project's own GCN decode of both programs (nwo.research.forward_loops, independent of the
 shadPS4 IR the rules were first read from) against the closed forms restated below, and read the viewer rules from the
 archive; they skip without RC2016_RESEARCH / RC2016_GAME_ROOT.
 """
@@ -13,10 +13,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016.pipeline.render_state import material_flags
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.pipeline.render_state import material_flags
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 
 SHIELD_GRAPH = 'materialgraph/character/enemy/enm_blarg_turret_shield_lg/enm_blarg_turret_shield_lg.materialgraph'
 SHIELD_MATERIAL = 'material/character/enemy/enm_Blarg_Turret_Shield_Lg/enm_Blarg_Turret_Shield_Lg.material'
@@ -99,8 +99,8 @@ class RuleBindingTests(unittest.TestCase):
         self.assertEqual(tp.TURRET_BARRIER_FITTED_AMPLITUDE, 0.20)
         self.assertEqual((tp.TURRET_SHIELD_CONSTANTS['amplitude'], tp.TURRET_HUD_CONSTANTS['amplitude']), (0.20, 0.20))
         # Both blend in the viewer's float scene target (tonemapped once, as the game's HDR target), not per fragment.
-        from rc2016.viewer.shading import HDR_RESOLVE_FRAGMENT
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.shading import HDR_RESOLVE_FRAGMENT
+        from nwo.viewer.viewport import ModelViewport
         self.assertTrue({'turret_shield', 'turret_hud'} <= ModelViewport.HDR_FORWARD_KINDS)
         self.assertIn('max(cover, max(rgb.r, max(rgb.g, rgb.b)))', HDR_RESOLVE_FRAGMENT)   # straight alpha keeps added light
 
@@ -127,7 +127,7 @@ class RuleBindingTests(unittest.TestCase):
                          ('gain', 'emission', 'amplitude', 'fog transmittance', 'time', 'alpha cut', 'alpha scale'))
         self.assertEqual(validation.GLASS_CONSTANTS['turret_hud'],
                          ('variant', 'amplitude', 'fog transmittance', 'time', 'alpha cut', 'alpha scale'))
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         self.assertIn("'turret_shield', 'turret_hud'", text.split('GLASS_VIEWER_KINDS =')[1].split('\n')[0])
         body = text.split("elif key in ('turret_shield', 'turret_hud'):")[1].split("elif key == 'glass_taxi':")[0]
         for key, kind in (('turret_shield', dict(gain=1.0, emission=0.0, amplitude=0.1, time=0.0, alpha_cut=0.1, alpha_scale=0.2,
@@ -153,8 +153,8 @@ class ArchiveProgramTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders import translator
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders import translator
         cls.archive = open_archive(root)
         cls.shield_graph = asset_bytes(cls.archive, SHIELD_GRAPH)
         cls.hud_graph = asset_bytes(cls.archive, HUD_GRAPH)
@@ -173,7 +173,7 @@ class ArchiveProgramTests(unittest.TestCase):
         self.assertEqual(self.hud['code_sha256'], HUD_CODE_SHA)
 
     def test_shield_matches_the_program_numerically(self):
-        from rc2016.research import forward_loops as loops
+        from nwo.research import forward_loops as loops
         compiler = loops.compile_opaque(self.shield)
         roots = compiler.exports[0]
         rng = random.Random(20261107)
@@ -191,7 +191,7 @@ class ArchiveProgramTests(unittest.TestCase):
         self.assertLess(worst, 5e-5)
 
     def test_hud_alpha_matches_the_program_numerically(self):
-        from rc2016.research import forward_loops as loops
+        from nwo.research import forward_loops as loops
         compiler = loops.compile_opaque(self.hud)
         roots, _subs = loops.bind_frozen(compiler, flags=0x0, time=0.0)
         rng = random.Random(20261107)
@@ -207,7 +207,7 @@ class ArchiveProgramTests(unittest.TestCase):
         self.assertLess(worst, 5e-5)
 
     def test_viewer_rules_from_the_archive(self):
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         for material, graph_sha, kind, writer, flags, textures, alpha_scale in (
                 (SHIELD_MATERIAL, SHIELD_SHA, 'turret_shield', '19D0F1FA', 0x20000E, SHIELD_TEXTURES, 19 / 255.0),
                 (HUD_MATERIAL, HUD_SHA, 'turret_hud', '678C5C0E', 0x20023E, HUD_TEXTURES, 191 / 255.0)):

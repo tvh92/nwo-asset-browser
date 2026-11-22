@@ -1,4 +1,4 @@
-"""Tk variables remembered in the settings file (rc2016/common.remember_var); needs a display."""
+"""Tk variables remembered in the settings file (nwo/common.remember_var); needs a display."""
 import json
 import os
 import tempfile
@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rc2016 import common
+from nwo import common
 
 
 class RememberVarTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class RememberVarTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def settings(self):
-        return json.loads((Path(self.tmp.name) / "RC2016 Asset Browser" / "settings.json").read_text(encoding="utf-8"))
+        return json.loads((Path(self.tmp.name) / "NWO Asset Browser" / "settings.json").read_text(encoding="utf-8"))
 
     def test_flag_is_saved_on_change_and_restored_by_a_new_variable(self):
         first = common.remember_var(self.tk.BooleanVar(value=True), "test.flag")
@@ -42,11 +42,11 @@ class RememberVarTests(unittest.TestCase):
         common.remember_var(self.tk.StringVar(value="a"), "test.choice", ("a", "b")).set("b")
         restored = common.remember_var(self.tk.StringVar(value="a"), "test.choice", ("a", "b"))
         self.assertEqual(restored.get(), "b")
-        (Path(self.tmp.name) / "RC2016 Asset Browser" / "settings.json").write_text('{"test.choice": "zzz"}', encoding="utf-8")
+        (Path(self.tmp.name) / "NWO Asset Browser" / "settings.json").write_text('{"test.choice": "zzz"}', encoding="utf-8")
         self.assertEqual(common.remember_var(self.tk.StringVar(value="a"), "test.choice", ("a", "b")).get(), "a")
 
     def test_other_settings_are_kept(self):
-        folder = Path(self.tmp.name) / "RC2016 Asset Browser"
+        folder = Path(self.tmp.name) / "NWO Asset Browser"
         folder.mkdir(parents=True)
         (folder / "settings.json").write_text('{"source": "D:/game"}', encoding="utf-8")
         common.remember_var(self.tk.BooleanVar(value=False), "test.flag").set(True)
@@ -64,7 +64,7 @@ class RememberVarTests(unittest.TestCase):
         self.assertEqual(self.settings()["test.choice"], "a")
 
     def test_reset_keeps_settings_that_are_not_remembered_variables(self):
-        folder = Path(self.tmp.name) / "RC2016 Asset Browser"
+        folder = Path(self.tmp.name) / "NWO Asset Browser"
         folder.mkdir(parents=True)
         (folder / "settings.json").write_text('{"source": "D:/game", "window.split": "0.4"}', encoding="utf-8")
         common.remember_var(self.tk.BooleanVar(value=False), "test.flag")

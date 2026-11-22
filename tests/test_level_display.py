@@ -1,13 +1,13 @@
-"""The captured game display chain of the Level atmosphere lighting (rc2016.levels.display; no GL)."""
+"""The captured game display chain of the Level atmosphere lighting (nwo.levels.display; no GL)."""
 import re
 import unittest
 
 import numpy as np
 
-from rc2016.levels import display
-from rc2016.levels.viewport import LevelViewport
-from rc2016.viewer import shading
-from rc2016.viewer.viewport import ModelViewport
+from nwo.levels import display
+from nwo.levels.viewport import LevelViewport
+from nwo.viewer import shading
+from nwo.viewer.viewport import ModelViewport
 
 
 class CurveTests(unittest.TestCase):

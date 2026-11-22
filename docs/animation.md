@@ -12,21 +12,21 @@ Rift Apart clips reuse this sample layout with four header and table differences
 
 | Module | Role |
 | --- | --- |
-| `rc2016/formats/container.py` | DAT1 (`1TAD`) container and section inspection; clip inventory. CLI: `python rc2016/formats/container.py file.animset [--json report.json] [--bones names.txt]`. |
-| `rc2016/formats/animation_samples.py` | Lower-level integer sampler: lossless frame-major unsigned deltas plus the packed base records and runtime component offsets. No rotation or translation conversion. |
-| `rc2016/formats/animation_transforms.py` | Model-independent S/Q/T extractor: reads an animset and its original model, resolves joint hashes against the model skeleton, and exports raw clips plus source-scale, source-time JSON. No bone names or authored curves are assumed. Its CLI is the loose-file backend of the GUI. |
-| `rc2016/formats/clips.py` | All embedded clips of an animset in directory order: exact samples, classification, inheritance rule, unsupported rows. `extract_set(..., clip_names=)` extracts only the named containers of a file. |
-| `rc2016/formats/animation_sources.py` | Clip sources beyond a model's referenced animsets: cutscene (`cinematic2`) clip directories named by CRC32, `cinematic_sources`, the matching-rig comparison and `borrowed_animset`. |
-| `rc2016/export/cutscene_animations.py` | Cutscene animation library: manifest plus GLB per model (see [Cutscene animation library](#cutscene-animation-library)). |
-| `rc2016/pipeline/animation_bake.py` | Affine bone baking and numerical verification (`make_bake_rig`, `bake_clip`, `world_samples`, `matrix_error`); no character names. The pipeline's buffered production baker is `rc2016/pipeline/blender_support.py` (`bake`), which uses the same SVD scheme. |
-| `rc2016/pipeline/controls.py` | Embedded 3D View **Animations** panel; no external dependencies. (`legacy_controls.py` is an older panel kept so previously delivered files still validate.) |
+| `nwo/formats/container.py` | DAT1 (`1TAD`) container and section inspection; clip inventory. CLI: `python nwo/formats/container.py file.animset [--json report.json] [--bones names.txt]`. |
+| `nwo/formats/animation_samples.py` | Lower-level integer sampler: lossless frame-major unsigned deltas plus the packed base records and runtime component offsets. No rotation or translation conversion. |
+| `nwo/formats/animation_transforms.py` | Model-independent S/Q/T extractor: reads an animset and its original model, resolves joint hashes against the model skeleton, and exports raw clips plus source-scale, source-time JSON. No bone names or authored curves are assumed. Its CLI is the loose-file backend of the GUI. |
+| `nwo/formats/clips.py` | All embedded clips of an animset in directory order: exact samples, classification, inheritance rule, unsupported rows. `extract_set(..., clip_names=)` extracts only the named containers of a file. |
+| `nwo/formats/animation_sources.py` | Clip sources beyond a model's referenced animsets: cutscene (`cinematic2`) clip directories named by CRC32, `cinematic_sources`, the matching-rig comparison and `borrowed_animset`. |
+| `nwo/export/cutscene_animations.py` | Cutscene animation library: manifest plus GLB per model (see [Cutscene animation library](#cutscene-animation-library)). |
+| `nwo/pipeline/animation_bake.py` | Affine bone baking and numerical verification (`make_bake_rig`, `bake_clip`, `world_samples`, `matrix_error`); no character names. The pipeline's buffered production baker is `nwo/pipeline/blender_support.py` (`bake`), which uses the same SVD scheme. |
+| `nwo/pipeline/controls.py` | Embedded 3D View **Animations** panel; no external dependencies. (`legacy_controls.py` is an older panel kept so previously delivered files still validate.) |
 
-`rc2016/formats/animation_samples.py` and `rc2016/formats/animation_transforms.py` need only the Python standard library; `sample_transforms` uses a batched numpy path when numpy is importable (identical values) and otherwise, or for data that fails a validity check, the exact per-frame loop that raises the reference errors. `clips.worlds_batch` is the all-frames form of `skeleton.worlds` (used by `extract_set` and the portable export, which also batches the local-TRS decomposition and memoises per-clip tracks). Exports refuse existing output directories; choose a new one.
+`nwo/formats/animation_samples.py` and `nwo/formats/animation_transforms.py` need only the Python standard library; `sample_transforms` uses a batched numpy path when numpy is importable (identical values) and otherwise, or for data that fails a validity check, the exact per-frame loop that raises the reference errors. `clips.worlds_batch` is the all-frames form of `skeleton.worlds` (used by `extract_set` and the portable export, which also batches the local-TRS decomposition and memoises per-clip tracks). Exports refuse existing output directories; choose a new one.
 
 ```text
-python rc2016/formats/animation_transforms.py <actor.animset> --model <actor.model> [--prefix <clip prefix>] --out <new directory>
-python rc2016/formats/animation_samples.py <file.animset> [--bones names.txt] --out <new directory>
-python rc2016/formats/animation_samples.py --validate-tree <folder> [--report validation.json]
+python nwo/formats/animation_transforms.py <actor.animset> --model <actor.model> [--prefix <clip prefix>] --out <new directory>
+python nwo/formats/animation_samples.py <file.animset> [--bones names.txt] --out <new directory>
+python nwo/formats/animation_samples.py --validate-tree <folder> [--report validation.json]
 ```
 
 `animation_transforms.py` writes, per clip, `NNN_<name>.json` (times, joint names and hashes, frames as scale / rotation xyzw or null / translation per joint) and the verbatim `NNN_<name>.animclip`, plus `manifest.json` with source hashes (schema `ps4-v15-source-sqt-v1`). `--prefix` is repeatable; omit it for the whole set. `animation_samples.py` writes `integer_deltas.json` and raw clips. Its bundle export needs a root lookup pointing directly at embedded clips (verified on Sheepinator); complex character animset lookups are deliberately rejected. `--validate-tree` checks embedded clips independently and does not imply support for every lookup format.
@@ -121,7 +121,7 @@ The panel and catalog travel inside the blend: no add-on, script path or prefere
 ### Python usage
 
 ```python
-from rc2016.pipeline.animation_bake import make_bake_rig, bake_clip
+from nwo.pipeline.animation_bake import make_bake_rig, bake_clip
 
 rig = make_bake_rig(source_rig, rows, 'Actor | animation rig')
 actions = []
@@ -135,10 +135,10 @@ For the full pipeline path (clip selection, inheritance profiles, caching, NLA a
 
 ## Cutscene animation library
 
-Characters without an idle animset only move in real-time cutscene (`cinematic2`) assets. `rc2016/export/cutscene_animations.py` exports every such performance of a model, reusing the portable exporter (`rc2016/export/models.py`) with the cutscene shots as its only animation source (`ExportOptions.cinematic_only`; `cinematic` adds them to the model's animset clips; `AnimationLibrary.with_cinematic` builds the clip list):
+Characters without an idle animset only move in real-time cutscene (`cinematic2`) assets. `nwo/export/cutscene_animations.py` exports every such performance of a model, reusing the portable exporter (`nwo/export/models.py`) with the cutscene shots as its only animation source (`ExportOptions.cinematic_only`; `cinematic` adds them to the model's animset clips; `AnimationLibrary.with_cinematic` builds the clip list):
 
 ```text
-python -m rc2016.export.cutscene_animations <game or asset_archive root> --model <archive path or unique stem> [--model ...]
+python -m nwo.export.cutscene_animations <game or asset_archive root> --model <archive path or unique stem> [--model ...]
         --out <folder> [--no-textures] [--overwrite]
 ```
 

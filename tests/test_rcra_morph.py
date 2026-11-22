@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from rc2016.games.rcra import morph
-from rc2016.games.rcra.toc import sections
+from nwo.games.rcra import morph
+from nwo.games.rcra.toc import sections
 
 GAME = os.environ.get('RCRA_GAME')
 
@@ -125,7 +125,7 @@ class ClipWeightTests(unittest.TestCase):
             morph.clip_weights(raw, sections(raw), 40)
 
     def test_library_maps_channels_to_the_model_shapes(self):
-        from rc2016.games.rcra.clip_library import RcraAnimationLibrary
+        from nwo.games.rcra.clip_library import RcraAnimationLibrary
         from tests.test_rcra_animation import build_clip
         clip = build_clip([(0, 0)] * 3, extra=clip_morph_sections(self.FRAMES, [11, 22, 33, 44, 55, 66]))
         library = RcraAnimationLibrary.__new__(RcraAnimationLibrary)
@@ -142,7 +142,7 @@ class ClipWeightTests(unittest.TestCase):
 
 class PlumbingTests(unittest.TestCase):
     def test_payload_offsets_and_basis(self):
-        from rc2016.viewer.loader import _morph_payload
+        from nwo.viewer.loader import _morph_payload
         meshes = [dict(positions=np.zeros((4, 3))),
                   dict(positions=np.zeros((3, 3)), morphs=[(1, np.array([0, 2]), np.array([[1.0, 2.0, 3.0], [0, 0, 1.0]]),
                                                             np.zeros((2, 3)))])]
@@ -157,7 +157,7 @@ class PlumbingTests(unittest.TestCase):
 
     def test_viewport_blends_and_restores(self):
         import ctypes
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         vertices = np.zeros((3, 3))
         normals = np.tile([0.0, 0.0, 1.0], (3, 1))
         arrays = ((ctypes.c_float * 9)(*vertices.ravel()), (ctypes.c_float * 9)(*normals.ravel()))
@@ -175,7 +175,7 @@ class PlumbingTests(unittest.TestCase):
         self.assertFalse(view._morphed)
 
     def test_sparse_accessor(self):
-        from rc2016.export.models import GLTF
+        from nwo.export.models import GLTF
         g = GLTF('test')
         sparse = g.doc['accessors'][g.sparse(10, np.array([7, 2]), np.array([[1, 2, 3], [-1, 0, 4]], np.float32), 'VEC3', minmax=True)]
         self.assertEqual((sparse['count'], sparse['sparse']['count'], sparse['sparse']['indices']['componentType']), (10, 2, 5123))
@@ -194,7 +194,7 @@ class RealMorphTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, Path(cls.temp.name) / 'out')
 
@@ -207,7 +207,7 @@ class RealMorphTests(unittest.TestCase):
         return self.source.bytes(self.source.resolve(path)[0])[0]
 
     def test_ratchet_shapes_mirror(self):
-        from rc2016.games.rcra import model as rm
+        from nwo.games.rcra import model as rm
         data = self.data(self.RATCHET)
         decoded = rm.decode_model(self.RATCHET, data=data, as_arrays=True)
         raw = data[36:]
@@ -225,8 +225,8 @@ class RealMorphTests(unittest.TestCase):
             self.assertGreater(float(lt['positions'][:, 1].max()), 0.01)                          # the brow goes up
 
     def test_phoneme_silence_and_a_line(self):
-        from rc2016.games.rcra.animation import clip_dat1, header
-        from rc2016.games.rcra.clip_library import animation_library
+        from nwo.games.rcra.animation import clip_dat1, header
+        from nwo.games.rcra.clip_library import animation_library
         data = self.data('characters/hero/hero_ratchet/animations/ratchet_phonemes.animclip')
         raw, table = clip_dat1(data)
         found = morph.clip_weights(raw, table, header(data)['original_frame_count'])

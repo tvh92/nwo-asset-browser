@@ -8,10 +8,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from rc2016.formats.materials import viewer_graph_rule
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT
+from nwo.formats.materials import viewer_graph_rule
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT
 from tests.test_viewer_textures import FakeArchive, dat1, slot_rows
 
 GRAPH = 'required/materials/basic_normal_gloss_aniso_incan.materialgraph'
@@ -30,8 +30,8 @@ def extract(material_rows=()):
                  lambda at: [(tp.GRAPH_SLOT_SECTION, slot_rows([(at[0], c), (at[1], g), (at[2], n)]))])
     archive = FakeArchive({'m/wing.material': ('material', dat1([GRAPH], lambda at: [])), GRAPH: ('materialgraph', graph)})
     params = dict(parameters=[], unsupported_parameters=list(material_rows))
-    with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+    with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
+          patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
         return archive, tp.material_texture_paths(archive, 'm/wing.material'), params
 
 
@@ -75,8 +75,8 @@ class AnisoRuleTests(unittest.TestCase):
 
     def test_viewer_rule_ports_the_lobe(self):
         archive, _, params = extract([row(GLOSS_T, 0.7), row(GLOSS_B, 0.0)])
-        with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
-              patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+        with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
+              patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
             rule = viewer_graph_rule(archive, 'm/wing.material', None)
         self.assertTrue(rule.get('applies'), rule)
         self.assertIn('bng', rule['ported'])

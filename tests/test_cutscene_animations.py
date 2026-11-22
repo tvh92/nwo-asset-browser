@@ -10,10 +10,10 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.export import cutscene_animations as C
-from rc2016.export.models import ModelExporter, clip_tracks, write_glb
-from rc2016.formats import animation_sources as S
-from rc2016.viewer.animation import AnimationLibrary
+from nwo.export import cutscene_animations as C
+from nwo.export.models import ModelExporter, clip_tracks, write_glb
+from nwo.formats import animation_sources as S
+from nwo.viewer.animation import AnimationLibrary
 from tests.test_animation_sources import FakeArchive, animset, clip, model, rig
 
 JOINTS = [('root', -1, (0, 0, 0)), ('spine', 0, (0, 1, 0))]
@@ -164,12 +164,12 @@ class GlbAnimationTests(unittest.TestCase):
 
 class OptionsTests(unittest.TestCase):
     def test_new_options_do_not_change_the_key_of_existing_exports(self):
-        from rc2016.export.models import ExportOptions
+        from nwo.export.models import ExportOptions
         self.assertNotIn('cinematic', ExportOptions().key())
         self.assertEqual(ExportOptions(cinematic_only=True, file_suffix='_cutscenes').key()['file_suffix'], '_cutscenes')
 
     def test_borrowed_animsets_stay_out_of_the_key_unless_asked_for(self):
-        from rc2016.export.models import ExportOptions
+        from nwo.export.models import ExportOptions
         self.assertNotIn('borrowed', ExportOptions().key())
         self.assertTrue(ExportOptions(borrowed=True).key()['borrowed'])
 
@@ -178,7 +178,7 @@ class BrowserLoaderTests(unittest.TestCase):
     """The browser's clip library offers cutscene shots; the export load does not unless asked to."""
 
     def build(self, purpose):
-        from rc2016.viewer.loader import SourcePreviewLoader
+        from nwo.viewer.loader import SourcePreviewLoader
         loader = SourcePreviewLoader.__new__(SourcePreviewLoader)
         loader.archive = archive()
         decoded = dict(joint_count=2, animation_note='', animsets=[], _archive_path='character/npc/npc_test/npc_test.model')

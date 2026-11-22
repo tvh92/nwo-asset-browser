@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from rc2016.levels import sky
+from nwo.levels import sky
 
 
 class AtmosphereZoneTests(unittest.TestCase):
@@ -26,8 +26,8 @@ class DomeConstantTests(unittest.TestCase):
         instance = dict(parameters=[], unsupported_parameters=[
             dict(key_hash=2, raw_hex=struct.pack('<f', 9.0).hex()),
             dict(key_hash=14, raw_hex=struct.pack('<3f', 1.0, 2.0, 3.0).hex())])   # dword 4 row, 3 values
-        with mock.patch('rc2016.shaders.families.graph_parameter_tables', return_value=([rows], defaults)), \
-                mock.patch('rc2016.formats.materials.extract_material_parameters', return_value=instance):
+        with mock.patch('nwo.shaders.families.graph_parameter_tables', return_value=([rows], defaults)), \
+                mock.patch('nwo.formats.materials.extract_material_parameters', return_value=instance):
             values = sky.dome_constants(b'', b'')
         self.assertEqual(values[:4], [0.5, 0.25, 0.125, 9.0])
         self.assertEqual(values[4:7], [1.0, 2.0, 3.0])
@@ -35,8 +35,8 @@ class DomeConstantTests(unittest.TestCase):
 
     def test_missing_dword_raises(self):
         rows = [dict(dword=d, key_hash=d) for d in range(22)]
-        with mock.patch('rc2016.shaders.families.graph_parameter_tables', return_value=([rows], {d: 1.0 for d in range(22)})), \
-                mock.patch('rc2016.formats.materials.extract_material_parameters', return_value={}):
+        with mock.patch('nwo.shaders.families.graph_parameter_tables', return_value=([rows], {d: 1.0 for d in range(22)})), \
+                mock.patch('nwo.formats.materials.extract_material_parameters', return_value={}):
             with self.assertRaises(ValueError):
                 sky.dome_constants(b'', b'')
 
@@ -63,7 +63,7 @@ class FlatDomeConstantTests(unittest.TestCase):
         rows = [dict(dword=0, key_hash=1), dict(dword=3, key_hash=2), *(dict(dword=d, key_hash=10 + d) for d in range(4, 15))]
         defaults = {1: [0.1, 0.5, 1.0], 2: 0.0, **{10 + d: float(d) for d in range(4, 15)}}
         instance = dict(parameters=[], unsupported_parameters=[dict(key_hash=2, raw_hex=struct.pack('<f', 2.0).hex())])
-        with mock.patch('rc2016.shaders.families.graph_parameter_tables', return_value=([rows], defaults)),                 mock.patch('rc2016.formats.materials.extract_material_parameters', return_value=instance):
+        with mock.patch('nwo.shaders.families.graph_parameter_tables', return_value=([rows], defaults)),                 mock.patch('nwo.formats.materials.extract_material_parameters', return_value=instance):
             values = sky.flat_constants(b'', b'')
         self.assertEqual(len(values), sky.FLAT_DWORDS)
         self.assertEqual(values[:4], [0.1, 0.5, 1.0, 2.0])
@@ -71,7 +71,7 @@ class FlatDomeConstantTests(unittest.TestCase):
 
     def test_a_missing_dword_raises(self):
         rows = [dict(dword=d, key_hash=d) for d in range(14)]
-        with mock.patch('rc2016.shaders.families.graph_parameter_tables', return_value=([rows], {d: 1.0 for d in range(14)})),                 mock.patch('rc2016.formats.materials.extract_material_parameters', return_value={}):
+        with mock.patch('nwo.shaders.families.graph_parameter_tables', return_value=([rows], {d: 1.0 for d in range(14)})),                 mock.patch('nwo.formats.materials.extract_material_parameters', return_value={}):
             with self.assertRaises(ValueError):
                 sky.flat_constants(b'', b'')
 
@@ -107,7 +107,7 @@ class AridiaFlatDomeArchiveTests(unittest.TestCase):
         research = os.environ.get('RC2016_RESEARCH')
         if not research:
             raise unittest.SkipTest('RC2016_RESEARCH is required')
-        from rc2016.levels import scene
+        from nwo.levels import scene
         try:
             cls.archive = scene.open_archive(Path(research))
             cls.sky = sky.level_sky(cls.archive, scene.level_zone_paths(cls.archive, 'levels/aridia/aridia.level'))
@@ -148,7 +148,7 @@ class ClearSkyHdrTests(unittest.TestCase):
     def test_clear_sky_profile_decodes_the_probe_in_hdr(self):
         import numpy as np
         faces = [np.full((8, 8, 3), 0.4, np.float32) * np.array([0.25, 0.5, 1.0], np.float32) for _ in range(6)]
-        with mock.patch('rc2016.levels.probe_lighting.probe_faces', return_value=(faces, {})) as probe:
+        with mock.patch('nwo.levels.probe_lighting.probe_faces', return_value=(faces, {})) as probe:
             profile = sky.clear_sky_profile(object(), 'x.texture')
         probe.assert_called_once()
         np.testing.assert_allclose(profile[0], [0.1, 0.2, 0.4], atol=1e-6)
@@ -158,7 +158,7 @@ class DomeFogTests(unittest.TestCase):
     PROFILE = dict(heights=(-100.0, -52.0, 386.0, 926.0, 400.0), densities=(1.0, 0.1, 0.002, 0.0, 0.0))   # Novalis
 
     def ramps(self, cam_y):
-        from rc2016.levels.fog import build_ramps
+        from nwo.levels.fog import build_ramps
         return build_ramps(self.PROFILE, cam_y)
 
     def test_transmittance_rises_with_elevation_and_is_a_fraction(self):
@@ -170,14 +170,14 @@ class DomeFogTests(unittest.TestCase):
         self.assertGreater(values[-1], 0.95)  # the zenith is nearly clear
 
     def test_distance_beyond_a_few_thousand_units_no_longer_matters(self):
-        from rc2016.levels.fog import fog_T
+        from nwo.levels.fog import fog_T
         ramps = self.ramps(150.0)
         near = fog_T((3000 * 0.866, 3000 * 0.5, 0.0), (0.0, 0.0, 0.0), ramps)
         self.assertAlmostEqual(near, sky.dome_fog_transmittance(0.5, ramps), places=3)
 
     def test_dome_and_geometry_share_one_fog_colour(self):
-        from rc2016.levels import fog
-        from rc2016.viewer import shading
+        from nwo.levels import fog
+        from nwo.viewer import shading
         self.assertNotIn('SKY_FOG_BRIGHTNESS', shading.SKY_FRAGMENT)       # no second, dome-only factor
         self.assertIn('mix(uFogColour, rgb,', shading.SKY_FRAGMENT)
         profile = [(0.4, 0.7, 0.9), (0.1, 0.2, 0.3)]
@@ -188,7 +188,7 @@ class DomeFogTests(unittest.TestCase):
 
     def test_glsl_constants_match_the_python_reference(self):
         import re
-        from rc2016.viewer import shading
+        from nwo.viewer import shading
         source = shading.SKY_FRAGMENT
         for name, value in (('SKY_FOG_DISTANCE', sky.DOME_FOG_DISTANCE), ('SKY_EXPOSURE', sky.SKY_EXPOSURE)):
             found = re.search(rf'const float {name} = ([0-9.]+);', source)

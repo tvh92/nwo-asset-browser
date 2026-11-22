@@ -3,10 +3,10 @@ import hashlib
 import os
 from pathlib import Path
 import unittest
-from rc2016.levels.scene import open_archive, asset_bytes
-from rc2016.shaders import bindings, interpolants
-from rc2016.viewer.experimental_materials import prepare_preview
-from rc2016.viewer.native_glsl import prepare_material_translation, evaluate_surface, emit_surface
+from nwo.levels.scene import open_archive, asset_bytes
+from nwo.shaders import bindings, interpolants
+from nwo.viewer.experimental_materials import prepare_preview
+from nwo.viewer.native_glsl import prepare_material_translation, evaluate_surface, emit_surface
 
 GRAPH='materialgraph/environment/global/rock/mo_blend_01/rp_mo_blend_01_glow_vert_paint.materialgraph'
 MATERIALS=(

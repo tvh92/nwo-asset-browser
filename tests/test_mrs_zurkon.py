@@ -9,10 +9,10 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.formats.materials import viewer_graph_rule
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT, OPAQUE_UNIFORMS
+from nwo.formats.materials import viewer_graph_rule
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT, OPAQUE_UNIFORMS
 from tests.test_viewer_textures import FakeArchive, dat1
 
 GRAPH = 'materialgraph/character/enemy/enm_mrs_zurkon/enm_mrs_zurkon.materialgraph'
@@ -45,8 +45,8 @@ def extract(values=REMIX, sha=None):
     params = dict(parameters=[], unsupported_parameters=[row(k, v) for k, v in values.items()])
     with (patch.object(tp, 'GRAPH_RULES', rules),
           patch.object(tp, 'texture_slots', side_effect=lambda data, tag: dict(SLOTS)),
-          patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value=params)):
+          patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
+          patch('nwo.formats.materials.extract_material_parameters', return_value=params)):
         return archive, tp.material_texture_paths(archive, 'm/z.material')
 
 
@@ -91,7 +91,7 @@ class MrsZurkonRuleTests(unittest.TestCase):
     def test_viewer_entry_and_blender_rule(self):
         archive, paths = extract()
         with (patch.object(tp, 'material_texture_paths', return_value=paths),
-              patch('rc2016.viewer.native_glsl.selected_translation', return_value=None)):
+              patch('nwo.viewer.native_glsl.selected_translation', return_value=None)):
             entry = tp.material_textures(archive, [dict(index=0, path='m/z.material')], {}, previews=False)[0]
             self.assertEqual(entry['zurkon'], paths['zurkon'])
             rule = viewer_graph_rule(archive, 'm/z.material', set(SLOTS.values()))
@@ -118,12 +118,12 @@ class MrsZurkonRuleTests(unittest.TestCase):
 class MrsZurkonArchiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(os.environ['RC2016_RESEARCH'])
 
     def test_graph_programs_and_remix_reading(self):
-        from rc2016.formats.archive import asset_data
-        from rc2016.shaders.translator import pixel_programs
+        from nwo.formats.archive import asset_data
+        from nwo.shaders.translator import pixel_programs
         ids = [i for i in self.archive.resolve(GRAPH) if self.archive.entries[i]['type'] == 'materialgraph']
         data = bytes(asset_data(self.archive, ids[0]))
         self.assertEqual(hashlib.sha256(data).hexdigest(), GRAPH_SHA)

@@ -7,7 +7,7 @@ import os
 import re
 import unittest
 
-from rc2016.viewer import shading, textures
+from nwo.viewer import shading, textures
 
 
 class FoliageFaceTests(unittest.TestCase):
@@ -25,7 +25,7 @@ class FoliageFaceTests(unittest.TestCase):
                          textures.NO_SHADOW_CAST_MATERIALS)
 
     def test_level_viewer_skips_them_only_in_the_shadow_pass(self):
-        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'rc2016', 'levels', 'viewport.py')
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'nwo', 'levels', 'viewport.py')
         source = open(path, encoding='utf-8').read()
         self.assertIn('if shadow and entry.get("no_shadow_cast"):', source)
         self.assertNotIn('if geometry and entry.get("no_shadow', source)
@@ -39,8 +39,8 @@ class GrassPatchArchiveTests(unittest.TestCase):
         root = os.environ.get('RC2016_RESEARCH')
         if not root:
             raise unittest.SkipTest('RC2016_RESEARCH is required')
-        from rc2016.formats import native_model
-        from rc2016.levels.scene import asset_bytes, open_archive
+        from nwo.formats import native_model
+        from nwo.levels.scene import asset_bytes, open_archive
         cls.decoded = native_model.decode_model(cls.MODEL, 'All', data=asset_bytes(open_archive(root), cls.MODEL), as_arrays=True)
 
     def test_vertex_normals_point_up_and_faces_point_down(self):

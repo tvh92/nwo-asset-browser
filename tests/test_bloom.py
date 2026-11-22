@@ -1,9 +1,9 @@
-"""The decoded bloom (rc2016/viewer/bloom.py): pass plan, kernel invariants and the CPU reference."""
+"""The decoded bloom (nwo/viewer/bloom.py): pass plan, kernel invariants and the CPU reference."""
 import unittest
 
 import numpy as np
 
-from rc2016.viewer import bloom
+from nwo.viewer import bloom
 
 
 class BloomPlanTests(unittest.TestCase):

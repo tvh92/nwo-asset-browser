@@ -3,7 +3,7 @@ import math
 import struct
 import unittest
 
-from rc2016.levels import scene_ao
+from nwo.levels import scene_ao
 
 
 class SceneAOControls(unittest.TestCase):

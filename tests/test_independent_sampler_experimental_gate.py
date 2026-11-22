@@ -6,7 +6,7 @@ a source graph or establish runtime draw selection or sampler-state behavior.
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders import bindings
+from nwo.shaders import bindings
 
 
 class IndependentSamplerExperimentalGateTests(unittest.TestCase):

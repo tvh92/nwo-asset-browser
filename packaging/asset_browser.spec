@@ -1,4 +1,4 @@
-# PyInstaller one-file build of the R&C 2016 Asset Browser.
+# PyInstaller one-file build of the NWO Asset Browser.
 # Build from the repository root with:
 #   pyinstaller --noconfirm --clean packaging/asset_browser.spec
 # The exe runs the pipeline from the repository checkout it sits in (dist/).
@@ -8,7 +8,7 @@ import sys
 
 
 project_root = Path(SPECPATH).resolve().parent
-gui_script = project_root / "rc2016" / "app" / "main.py"
+gui_script = project_root / "nwo" / "app" / "main.py"
 python_root = Path(sys.prefix)
 
 
@@ -42,9 +42,9 @@ a = Analysis(
     hiddenimports=[
         "_tkinter",
         "tkinter",
-        "rc2016.formats.container",
-        "rc2016.formats.animation_samples",
-        "rc2016.formats.animation_transforms",
+        "nwo.formats.container",
+        "nwo.formats.animation_samples",
+        "nwo.formats.animation_transforms",
         # The Textures tab decodes BCn and writes PNG through Pillow (imported lazily).
         "PIL.Image",
         "PIL.DdsImagePlugin",
@@ -64,7 +64,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="RC2016 Asset Browser",
+    name="NWO Asset Browser",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

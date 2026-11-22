@@ -5,10 +5,10 @@ import unittest
 
 import numpy as np
 
-from rc2016.export import models
-from rc2016.formats import animation_transforms as at
-from rc2016.formats.clips import worlds_batch
-from rc2016.formats.skeleton import worlds
+from nwo.export import models
+from nwo.formats import animation_transforms as at
+from nwo.formats.clips import worlds_batch
+from nwo.formats.skeleton import worlds
 
 
 # ---- reference copies of the previous export code

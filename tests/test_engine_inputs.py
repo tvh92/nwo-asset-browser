@@ -1,9 +1,9 @@
 """World-position reconstruction shapes are recognised up to arrangement and scale."""
 import unittest
 
-from rc2016.shaders import bindings
-from rc2016.shaders.engine_inputs import analyse, reconstruct_view_offset, reconstruct_world_position
-from rc2016.shaders.ir import DAG
+from nwo.shaders import bindings
+from nwo.shaders.engine_inputs import analyse, reconstruct_view_offset, reconstruct_world_position
+from nwo.shaders.ir import DAG
 
 
 def inputs(ir, *names):
@@ -81,7 +81,7 @@ class ReconstructionTests(unittest.TestCase):
         self.assertEqual(reconstruct_view_offset(ir, roots), (roots, 0))
 
     def test_experimental_receipt_reaches_glsl_only_as_experimental(self):
-        from rc2016.viewer.native_glsl import emit_surface
+        from nwo.viewer.native_glsl import emit_surface
         ir = DAG()
         p = ir.node('input', name='preview_position.0', kind='preview_position', channel=0)
         a = ir.node('input', name='preview_vertex_alpha_squared', kind='preview_vertex_alpha_squared')

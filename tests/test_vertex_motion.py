@@ -10,10 +10,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from rc2016.export import models
-from rc2016.games.rcra import vertex as rv
-from rc2016.shaders import sm5
-from rc2016.viewer.loader import _motion_payload
+from nwo.export import models
+from nwo.games.rcra import vertex as rv
+from nwo.shaders import sm5
+from nwo.viewer.loader import _motion_payload
 
 GAME = os.environ.get('RCRA_GAME')
 
@@ -84,7 +84,7 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(_motion_payload(decoded, meshes[:1]), {})   # the moving mesh is not shown
 
     def test_viewport_replaces_then_restores(self):
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         vertices, normals = np.zeros((3, 3)), np.tile([0.0, 0.0, 1.0], (3, 1))
         arrays = ((ctypes.c_float * 9)(*vertices.ravel()), (ctypes.c_float * 9)(*normals.ravel()))
         drawn = []
@@ -135,7 +135,7 @@ class RealMotionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, str(Path(cls.temp.name) / 'out'))
 
@@ -145,7 +145,7 @@ class RealMotionTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def decode(self, path):
-        from rc2016.games.rcra.model import decode_for_viewer
+        from nwo.games.rcra.model import decode_for_viewer
         return decode_for_viewer(self.source, self.source.resolve(path)[0], path, True)[0]
 
     def test_time_zero_is_the_rest_pose_and_later_times_move(self):

@@ -2,8 +2,8 @@
 import unittest
 from unittest import mock
 
-from rc2016.shaders import bindings, interpolants
-from rc2016.shaders.ir import DAG
+from nwo.shaders import bindings, interpolants
+from nwo.shaders.ir import DAG
 
 
 def _channel_ir(source, ir=None):

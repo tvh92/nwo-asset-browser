@@ -1,4 +1,4 @@
-"""Level atmosphere lighting maps (rc2016/levels/probe_lighting.py) on synthetic cubes."""
+"""Level atmosphere lighting maps (nwo/levels/probe_lighting.py) on synthetic cubes."""
 import math
 from pathlib import Path
 import tempfile
@@ -7,7 +7,7 @@ from unittest import mock
 
 import numpy as np
 
-from rc2016.levels import probe_lighting as pl
+from nwo.levels import probe_lighting as pl
 
 FACE_COLOURS = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0), (1.0, 1.0, 0.0), (1.0, 0.0, 1.0), (0.0, 1.0, 1.0)]
 
@@ -157,7 +157,7 @@ ONE = 960 | (960 << 11) | (480 << 22)   # R11G11B10_FLOAT word of (1, 1, 1)
 
 def vertical_grid(valid=255):
     """One lightgrid tile whose cells hold A = 1 facing native up (d = +Y), B = C = 0 (so E(n) = 0.5 + 0.5 n.y)."""
-    from rc2016.levels.lightgrid import pack_tiles
+    from nwo.levels.lightgrid import pack_tiles
     cells = np.zeros((1, 4096, 24), np.uint8)
     words = cells.view('<u4').reshape(1, 4096, 6)
     words[..., 0] = 128 | (255 << 8) | (128 << 16)
@@ -168,7 +168,7 @@ def vertical_grid(valid=255):
 
 class LevelExposureTests(unittest.TestCase):
     def test_a_fitted_level_gets_its_multiplier_in_stops_and_others_the_captured_exposure(self):
-        from rc2016.levels.display import EXPOSURE_MULTIPLIER
+        from nwo.levels.display import EXPOSURE_MULTIPLIER
         stops = pl.level_exposure_stops('atmosphere/atm_Aridia/atm_Aridia.atmosphere')
         self.assertAlmostEqual(EXPOSURE_MULTIPLIER * 2.0 ** stops, 8.2, places=6)
         self.assertAlmostEqual(EXPOSURE_MULTIPLIER * 2.0 ** pl.level_exposure_stops('atmosphere/atm_Novalis/atm_Novalis.atmosphere'), 3.60977, places=4)
@@ -187,7 +187,7 @@ class LevelExposureTests(unittest.TestCase):
         cells = grid.cells.copy()
         words = cells.view('<u4').reshape(len(cells), 4096, 6)
         words[..., 3] = ONE    # C = 1
-        from rc2016.levels.lightgrid import pack_tiles
+        from nwo.levels.lightgrid import pack_tiles
         graded = pack_tiles(cells, [[8, 8, 8]])
         low, high = pl.grid_mean_irradiance(graded, 1.0)[0], pl.grid_mean_irradiance(graded, 2.0)[0]
         np.testing.assert_allclose(high - low, 0.5, atol=0.02)   # 0.5 S C in the mean
@@ -209,7 +209,7 @@ class GridEnvironmentTests(unittest.TestCase):
             pl.grid_mean_irradiance(vertical_grid(valid=0))
 
     def test_sh_holds_the_grid_irradiance_in_ambient_units(self):
-        from rc2016.levels.lightgrid import AMBIENT_SCALE
+        from nwo.levels.lightgrid import AMBIENT_SCALE
         k0, k, _cells = pl.grid_mean_irradiance(vertical_grid())
         sh, bands = pl.grid_environment_maps(k0, k, pl.DIFFUSE_LIGHT_SCALE)
         # native up is Blender +Z, native +X is Blender +X, native +Z is Blender -Y

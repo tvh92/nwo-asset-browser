@@ -1,7 +1,7 @@
 import time
 import unittest
 
-from rc2016.app.texture_grid import ThumbnailFeed
+from nwo.app.texture_grid import ThumbnailFeed
 
 
 class ThumbnailFeedTests(unittest.TestCase):

@@ -4,7 +4,7 @@ Synthetic data only: no archive, no GPU, no Blender.
 """
 import unittest
 
-from rc2016.viewer import textures as tp
+from nwo.viewer import textures as tp
 from tests.test_viewer_textures import FakeArchive, dat1, flags, slot_rows
 
 GRAPH = 'required/materials/basic_normal_gloss.materialgraph'

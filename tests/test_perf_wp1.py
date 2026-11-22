@@ -9,14 +9,14 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.common import asset_path, sha
-from rc2016.formats.archive import lz4_block
-from rc2016.formats.linear_png import SRGB_LINEAR16_CONTAINER, SRGB_LINEAR16_CONVERSION
-from rc2016.formats.texture import (BLOCK_BYTES, UNCOMPRESSED_BPP, decode_texture, parse_header,
+from nwo.common import asset_path, sha
+from nwo.formats.archive import lz4_block
+from nwo.formats.linear_png import SRGB_LINEAR16_CONTAINER, SRGB_LINEAR16_CONVERSION
+from nwo.formats.texture import (BLOCK_BYTES, UNCOMPRESSED_BPP, decode_texture, parse_header,
     ps4_deswizzle_top, read, top_mip_size)
-from rc2016.formats.texture_transport import (TextureDecodeCache, _limited, _occurrence_summary,
+from nwo.formats.texture_transport import (TextureDecodeCache, _limited, _occurrence_summary,
     image_interpretation_identity, validate_reopened_texture_bindings, validate_source_transport)
-from rc2016.pipeline import bulk_checks as bc
+from nwo.pipeline import bulk_checks as bc
 
 
 # Reference copies of the former texture_transport functions (before the cached/indexed rewrite).
@@ -481,7 +481,7 @@ class TextureTransportTests(unittest.TestCase):
                     self.assertEqual(json.dumps(got),json.dumps(want))
 
     def test_decode_cache_serves_identical_report_and_bytes(self):
-        from rc2016.formats.materials import _decode_texture_cached
+        from nwo.formats.materials import _decode_texture_cached
         with tempfile.TemporaryDirectory() as root:
             _binding,_b,_s,stream,_dds,_=self.fixture(root)
             built_path=Path(root)/'t.built';built_sha=sha(built_path.read_bytes())
@@ -560,7 +560,7 @@ class FakeIndex:
 
 class RunCacheTests(unittest.TestCase):
     def setUp(self):
-        from rc2016.pipeline import run
+        from nwo.pipeline import run
         self.run=run
 
     def test_verified_cache_hit_without_previews(self):
@@ -615,13 +615,13 @@ class RunCacheTests(unittest.TestCase):
             self.assertEqual(len(list((Path(root)/'cache'/'actor_index').glob('*.json'))),1)
 
     def test_lz4_warning_names_the_interpreter(self):
-        from rc2016.formats import archive as archive_module
+        from nwo.formats import archive as archive_module
         warning=self.run.lz4_warning()
         if archive_module._lz4_c is None:self.assertIn('pip install lz4',warning)
         else:self.assertIsNone(warning)
 
     def test_no_preview_plumbing_left(self):
-        from rc2016.app.batch import PipelineBatchRunner
+        from nwo.app.batch import PipelineBatchRunner
         with tempfile.TemporaryDirectory() as root:
             root=Path(root)
             runner=PipelineBatchRunner(['hero'],root/'src',root/'out',root/'py.exe',root/'blender.exe')

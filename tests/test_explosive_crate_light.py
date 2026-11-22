@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.shaders.bindings import (
+from nwo.shaders.bindings import (
     EXPLOSIVE_CRATE_LIGHT_SOURCE_PREVIEW as RULE,
     SOURCE_PREVIEW_POLICIES,
     _source_preview_policy,
@@ -48,7 +48,7 @@ class ExplosiveCrateArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -57,10 +57,10 @@ class ExplosiveCrateArchiveTests(unittest.TestCase):
             cls.archive.close()
 
     def test_light_writer_is_ready_and_reads_the_emblem(self):
-        from rc2016.formats.index import references
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.bindings import prepare_translation
+        from nwo.formats.index import references
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.bindings import prepare_translation
         graph_data = asset_bytes(self.archive, RULE['graph_path'])
         material_data = asset_bytes(self.archive, RULE['material_path'])
         self.assertEqual(hashlib.sha256(bytes(graph_data)).hexdigest(), RULE['graph_sha256'])
@@ -78,7 +78,7 @@ class ExplosiveCrateArchiveTests(unittest.TestCase):
         self.assertNotIn('source_preview_inputs', context_free)
 
     def test_additive_glass_is_the_decoded_forward_program(self):
-        from rc2016.viewer.textures import material_texture_paths
+        from nwo.viewer.textures import material_texture_paths
         glass = material_texture_paths(self.archive, 'material/equipment/pickup/pup_rcps4_explosive_crate_glass/pup_rcps4_explosive_crate_glass.material')
         forward = glass['forward']
         self.assertEqual((forward['kind'], forward['writer'], forward['blend']), ('glass_patterned_add', '90542658', 'additive'))
@@ -95,8 +95,8 @@ class ExplosiveCrateArchiveTests(unittest.TestCase):
         self.assertNotIn('forward', material_texture_paths(self.archive, RULE['material_path']))
 
     def test_glass_uniforms_are_the_thumper_packing_without_noise_or_glow(self):
-        from rc2016.viewer.shading import GLASS_KINDS, glass_uniforms
-        from rc2016.viewer.textures import material_texture_paths
+        from nwo.viewer.shading import GLASS_KINDS, glass_uniforms
+        from nwo.viewer.textures import material_texture_paths
         forward = material_texture_paths(self.archive, 'material/equipment/pickup/pup_rcps4_explosive_crate_glass/pup_rcps4_explosive_crate_glass.material')['forward']
         kind, a, b, c, d, e = glass_uniforms(forward, 0.0)
         self.assertEqual(kind, GLASS_KINDS['glass_thumper'])
@@ -104,10 +104,10 @@ class ExplosiveCrateArchiveTests(unittest.TestCase):
         self.assertAlmostEqual(c[0], 0.5); self.assertAlmostEqual(c[3], 5.0)
 
     def test_opaque_material_of_the_same_graph_keeps_its_translation(self):
-        from rc2016.formats.links import GENERIC, NATIVE, rule_coverage
-        from rc2016.viewer.native_glsl import selected_translation
+        from nwo.formats.links import GENERIC, NATIVE, rule_coverage
+        from nwo.viewer.native_glsl import selected_translation
         path = 'material/character/enemy/enm_extermitank_glass/enm_extermitank_glass.material'
-        from rc2016.viewer.textures import material_texture_paths
+        from nwo.viewer.textures import material_texture_paths
         self.assertNotEqual((material_texture_paths(self.archive, path).get('forward') or {}).get('kind'), 'glass_patterned_add')
         translation = selected_translation(self.archive, path)
         self.assertIsNotNone(translation)   # the gated rule must not make the graph an exact match that beats it

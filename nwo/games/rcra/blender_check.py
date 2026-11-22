@@ -1,0 +1,244 @@
+"""Check emitted Blender materials against the translated recipe, texel by texel.
+
+    python -m nwo.games.rcra.blender_check --game <install> --blender <blender.exe> --output-root <folder> <material path> ...
+
+For each material: the Blender entry (nwo.games.rcra.blender_export) is built, nwo/export/rcra_blender_check.py
+bakes every surface output of the emitted node tree on a UV-unit plane in Cycles, and the result is compared with the
+recipe evaluated by nwo.shaders.sm5 for the same inputs and the same unit textures (bilinear repeat on both sides). A cube
+map is compared with the exact D3D cube lookup of the stored faces (blender_export.cube_lookup), not with the equirectangular
+image Blender reads, so its difference includes the resampling.
+A blended material's forward colour and alpha are baked too, with the view inputs held at FORWARD_VIEW.
+A pixel whose recipe samples a texture at a non-finite coordinate (a neutral profile value used as a divisor, such as a
+custom object value of 0) has no defined colour on either side; it is left out of the comparison and counted.
+Prints and returns the worst absolute difference per surface term.
+"""
+import argparse
+import json
+import math
+import os
+import subprocess
+import sys
+import tempfile
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+
+from nwo.games.rcra import blender_export, lighting, surface as rsurface
+
+CHECK_SCRIPT = Path(__file__).resolve().parents[2] / 'export' / 'rcra_blender_check.py'
+# Forward view inputs for the bake: a camera 3 units in front of the plane, seen at an angle (game space; the plane's
+# normal is game +y).
+FORWARD_VIEW = {'VIEW.x': -0.6, 'VIEW.y': -2.4, 'VIEW.z': 0.9, 'CAMERA.x': 0.6, 'CAMERA.y': 2.4, 'CAMERA.z': -0.9}
+TERMS = {'albedo': ('albedo.r', 'albedo.g', 'albedo.b'), 'f0': ('f0.r', 'f0.g', 'f0.b'),
+         'scalars': ('gloss', 'occlusion', 'emission'), 'unlit': ('unlit.r', 'unlit.g', 'unlit.b')}
+
+
+class UndefinedSample(ArithmeticError):
+    """The recipe sampled a texture at a non-finite coordinate."""
+
+
+class Volume(list):
+    """A 3D texture's slices (from its padded atlas)."""
+
+
+class CubeFaces:
+    """A cube map's six faces (6, n, n, 4), linear colour, as the program's sampler returns them."""
+
+    def __init__(self, faces):
+        self.faces = faces
+
+
+def load_cube(source, row):
+    from nwo.games.rcra.texture import load_texture_full
+    texture = load_texture_full(source, row['source'])
+    index = row['cube']['slice']
+    faces = np.stack([blender_export.texel_array(texture, index * 6 + k) for k in range(6)])
+    if row['colourspace'] == 'sRGB':
+        faces[..., :3] = blender_export._srgb_to_linear(faces[..., :3])
+    return CubeFaces(faces)
+
+
+def load_unit(row, source=None):
+    if 'cube' in row:
+        return load_cube(source, row)
+    if 'slices' in row:
+        return [load_unit(r) for r in row['slices']]
+    if 'volume' in row:
+        v = dict(row['volume'])
+        atlas = load_unit({k: x for k, x in row.items() if k != 'volume'})
+        h, w = v['height'], v['width']
+        return Volume(atlas[r * (h + 2) + 1:r * (h + 2) + 1 + h, c * (w + 2) + 1:c * (w + 2) + 1 + w]
+                      for r, c in (divmod(k, v['columns']) for k in range(v['depth'])))
+    if row['kind'] == 'float':
+        return np.fromfile(row['path'], dtype='<f4').reshape(row['height'], row['width'], 4)
+    if row['kind'] == 'png16':   # already linear (blender_export._save)
+        return read_png16(row['path'])
+    from PIL import Image
+    data = np.asarray(Image.open(row['path']).convert('RGBA'), np.float32) / 255.0
+    if row['colourspace'] == 'sRGB':   # the sampler returns linear rgb
+        rgb = data[..., :3]
+        data[..., :3] = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    return data
+
+
+def read_png16(path):
+    """(h, w, 4) float32 of a 16-bit RGBA PNG as blender_export.png16 writes it (filter 0 rows)."""
+    import struct
+    import zlib
+    raw = Path(path).read_bytes()
+    at, data, size = 8, b'', None
+    while at < len(raw):
+        length, tag = struct.unpack_from('>I4s', raw, at)
+        body = raw[at + 8:at + 8 + length]
+        if tag == b'IHDR':
+            size = struct.unpack_from('>II', body)
+        elif tag == b'IDAT':
+            data += body
+        at += 12 + length
+    w, h = size
+    rows = np.frombuffer(zlib.decompress(data), np.uint8).reshape(h, 1 + w * 8)
+    if rows[:, 0].any():
+        raise ValueError('Unsupported PNG row filter in %s' % path)
+    return rows[:, 1:].copy().view('>u2').reshape(h, w, 4).astype(np.float32) / 65535.0
+
+
+def bilinear(image, u, v):
+    """Bilinear repeat lookup at game (u, v), texel centres at (k + 0.5) / size, as Blender's 'Linear'."""
+    h, w = image.shape[:2]
+    x, y = u * w - 0.5, v * h - 0.5
+    x0, y0 = math.floor(x), math.floor(y)
+    fx, fy = x - x0, y - y0
+    rows, cols = [y0 % h, (y0 + 1) % h], [x0 % w, (x0 + 1) % w]
+    top = image[rows[0], cols[0]] * (1 - fx) + image[rows[0], cols[1]] * fx
+    bottom = image[rows[1], cols[0]] * (1 - fx) + image[rows[1], cols[1]] * fx
+    return [float(c) for c in top * (1 - fy) + bottom * fy]
+
+
+def window(entry, size):
+    """(origin, span) of the baked UV window: each bake pixel covers at most a 32nd of the largest texture's texel, so
+    the bake's sub-pixel jitter (Cycles' minimum filter width) moves a lookup by a negligible fraction of a texel even
+    where the material tiles its UV up to 8 times."""
+    widths = [r.get('volume', r).get('width', 1) for row in entry['images'].values() for r in row.get('slices', [row])
+              if 'cube' not in r]
+    span = min(1.0, size / (32.0 * max(widths + [1])))
+    return 0.3, span
+
+
+def expected(entry, size, source=None):
+    """{term: (size*size, 3)} from the recipe, pixel rows from Blender v = 0, plane normal +Z, tangent +X. ``source`` reads a
+    cube map's faces."""
+    units = {b: load_unit(row, source) for b, row in entry['images'].items()}
+
+    def sample(node, args):
+        if not all(math.isfinite(a) for a in args[:3]):
+            raise UndefinedSample(node['binding'])
+        image = units[node['binding']]
+        if isinstance(image, CubeFaces):
+            return [float(c) for c in blender_export.cube_lookup(image.faces, args[:3])]
+        if isinstance(image, Volume):   # trilinear, wrapping in depth
+            s = args[2] * len(image) - 0.5
+            k = math.floor(s)
+            a, b = bilinear(image[k % len(image)], args[0], args[1]), bilinear(image[(k + 1) % len(image)], args[0], args[1])
+            return [x + (s - k) * (y - x) for x, y in zip(a, b)]
+        if isinstance(image, list):
+            image = image[int(min(max(math.floor(args[2] + 0.5), 0), len(image) - 1))]
+        return bilinear(image, args[0], args[1])
+    out = defaultdict(list)
+    origin, span = window(entry, size)
+    for j in range(size):
+        for i in range(size):
+            ub, vb = origin + span * (i + 0.5) / size, origin + span * (j + 0.5) / size
+            inputs = {'TEXCOORD.x': ub, 'TEXCOORD.y': 1.0 - vb, 'TEXCOORD2.x': 0.0, 'TEXCOORD2.y': 1.0, 'TEXCOORD2.z': 0.0,
+                      'TEXCOORD3.x': 1.0, 'TEXCOORD3.y': 0.0, 'TEXCOORD3.z': 0.0, 'TEXCOORD3.w': 1.0,
+                      'TEXCOORD4.x': 1.0, 'TEXCOORD4.y': 1.0, 'TEXCOORD4.z': 1.0, 'TEXCOORD4.w': 1.0, 'SV_IsFrontFace': True}
+            if entry.get('recipe'):
+                try:
+                    terms = rsurface.evaluate_recipe(entry['recipe'], dict(inputs, **FORWARD_VIEW), sample)
+                except UndefinedSample:
+                    for name in (*TERMS, 'normal', 'alpha'):
+                        out[name].append([math.nan] * 3)
+                else:
+                    for name, keys in TERMS.items():
+                        out[name].append([terms.get(k, 0.0) for k in keys])   # unlit: 0 without the terms
+                    if lighting.anisotropic(entry['recipe']):   # the class-4 fields the anisotropic group reads
+                        out['extra_a'].append([terms['extra.%d' % k] for k in range(3)])
+                        out['extra_b'].append([terms['extra.3'], terms['extra.4'], 0.0])
+                    n = np.array([terms['normal.x'], -terms['normal.z'], terms['normal.y']])   # game -> Blender
+                    out['normal'].append(list(n / max(np.linalg.norm(n), 1e-12)))
+                    out['alpha'].append([0.0 if terms['clip'] else 1.0] * 3)
+            if entry.get('forward'):
+                try:
+                    terms = rsurface.evaluate_recipe(entry['forward'], dict(inputs, **FORWARD_VIEW), sample)
+                except UndefinedSample:
+                    for name in ('forward_colour', 'forward_alpha', 'forward_background'):
+                        out[name].append([math.nan] * 3)
+                else:
+                    out['forward_colour'].append([terms['colour.r'], terms['colour.g'], terms['colour.b']])
+                    out['forward_alpha'].append([0.0 if terms['clip'] else terms['alpha']] * 3)
+                    out['forward_background'].append([terms.get('background.' + c, 0.0) for c in 'rgb'])
+    return {k: np.array(v) for k, v in out.items()}
+
+
+def bake(entry, blender, size, folder):
+    Path(folder).mkdir(parents=True, exist_ok=True)   # a material without texture units writes nothing before
+    job = Path(folder) / 'job.json'
+    out = Path(folder) / 'baked.json'
+    origin, span = window(entry, size)
+    job.write_text(json.dumps(dict(recipe=entry.get('recipe'), forward=entry.get('forward'), fixed=FORWARD_VIEW,
+                                   images=entry['images'], size=size, uv_origin=origin, uv_span=span, out=str(out))),
+                   encoding='utf-8')
+    env = dict(os.environ, BLENDER_USER_RESOURCES=str(Path(folder) / 'user'),
+               PYTHONPATH=str(Path(__file__).resolve().parents[3]))
+    run = subprocess.run([str(blender), '--background', '--factory-startup', '--python-exit-code', '1', '--python',
+                          str(CHECK_SCRIPT), '--', '--job', str(job)], capture_output=True, text=True, env=env,
+                         encoding='utf-8', errors='replace', timeout=900)
+    if run.returncode or not out.is_file():
+        raise RuntimeError('Blender check failed:\n' + '\n'.join((run.stdout + run.stderr).splitlines()[-25:]))
+    return {k: np.array(v) for k, v in json.loads(out.read_text(encoding='utf-8')).items()}
+
+
+def check(source, material_path, blender, folder, size=37):
+    """{term: worst absolute difference} of one material, with the count of pixels left out as undefined; raises when it
+    has no Blender entry."""
+    entry = blender_export.material_entry(source, material_path, Path(folder) / 'units')
+    if 'error' in entry:
+        raise rsurface.Unsupported(entry['error'])
+    want = expected(entry, size, source)
+    got = bake(entry, blender, size, folder)
+    report = {}
+    for name, values in want.items():
+        defined = ~np.isnan(values).any(axis=1)
+        if not defined.any():
+            report[name] = dict(undefined=int(len(values)))
+            continue
+        diff = np.abs(got[name][defined, :3] - values[defined]).max(axis=1)
+        report[name] = dict(max=float(diff.max()), p99=float(np.percentile(diff, 99)))
+        if not defined.all():
+            report[name]['undefined'] = int((~defined).sum())
+    return report
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--game', required=True)
+    parser.add_argument('--blender', required=True)
+    parser.add_argument('--output-root', required=True)
+    parser.add_argument('--size', type=int, default=37)
+    parser.add_argument('materials', nargs='+')
+    args = parser.parse_args(argv)
+    from nwo.games.rcra.source import RcraSource
+    source = RcraSource(args.game, args.output_root)
+    results = {}
+    for path in args.materials:
+        with tempfile.TemporaryDirectory(dir=args.output_root) as tmp:
+            try:
+                results[path] = check(source, path, args.blender, tmp, args.size)
+            except (rsurface.Unsupported, RuntimeError) as error:
+                results[path] = dict(error=str(error))
+        print(path, json.dumps(results[path]), flush=True)
+    return results
+
+
+if __name__ == '__main__':
+    sys.exit(0 if main() else 1)

@@ -1,6 +1,6 @@
 import unittest
 
-from rc2016.levels.panel import zone_order
+from nwo.levels.panel import zone_order
 
 
 class ZoneOrderTests(unittest.TestCase):

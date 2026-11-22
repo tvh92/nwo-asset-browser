@@ -1,7 +1,7 @@
 """Telepathipus brain case AE2B0B81, brain FBA51F6C and the inside shell (docs/material-decoding/telepathipus-brain-case.md).
 
 Synthetic checks (rule binding, uniform packing, GLSL text, validator constants) always run. The archive-backed checks pin the
-program identity, evaluate the project's own GCN decode of the brain case program (rc2016.research.forward_loops, independent of
+program identity, evaluate the project's own GCN decode of the brain case program (nwo.research.forward_loops, independent of
 the shadPS4 IR the rule was read from) against the closed form restated below, and read the three viewer readings from the
 archive; they skip without RC2016_RESEARCH / RC2016_GAME_ROOT.
 """
@@ -12,9 +12,9 @@ import random
 import unittest
 from pathlib import Path
 
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import GLASS_FRAGMENT, GLASS_KINDS, glass_uniforms
 
 CASE_GRAPH = ('materialgraph/environment/metropolis/ambient/met_amb_water_pool_01/'
               'enm_telepathipus_brain_case_exterior.materialgraph')
@@ -98,7 +98,7 @@ class RuleBindingTests(unittest.TestCase):
                      'clamp(uC.w * mix(uC.rgb, uB.rgb, pow(e, uB.w)), 0.0, 1.0)', 'sat(pow(10.0 * pow(e, 4.0), 5.0))',
                      '- 1.0) / 3.0)', rim, 'color = (rest + wbg * bg) * Ld + S', 'alpha = sat(uE.x) * (1.0 - wbg)'):
             self.assertIn(text, body)
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         self.assertIn('brain_case', ModelViewport.HDR_FORWARD_KINDS)   # the scene copy is scene-linear
 
     def test_blender_front_end_and_validator_agree(self):
@@ -115,7 +115,7 @@ class RuleBindingTests(unittest.TestCase):
         names, roles = validation._viewer_required(rule, False)
         self.assertTrue(set(names) <= set(validation._viewer_expected_constants(rule)))
         self.assertEqual(roles, ['_window_mask', '_window_n1', '_window_n2', '_window_c'])
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         self.assertIn("'brain_case'", text.split('GLASS_VIEWER_KINDS =')[1].split('\n')[0])
         body = text.split("elif key == 'brain_case':")[1].split("elif key == 'glass_taxi':")[0]
         for name in ['glass ' + n for n in validation.GLASS_CONSTANTS['brain_case']]:
@@ -129,8 +129,8 @@ class ArchiveProgramTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', os.environ['RC2016_RESEARCH']))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders import translator
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders import translator
         cls.archive = open_archive(root)
         cls.case_graph = asset_bytes(cls.archive, CASE_GRAPH)
         cls.case = next(p for p in translator.pixel_programs(cls.case_graph) if p['shader_id'] == '0xae2b0b81')
@@ -141,13 +141,13 @@ class ArchiveProgramTests(unittest.TestCase):
             cls.archive.close()
 
     def test_identities(self):
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         self.assertEqual(hashlib.sha256(self.case_graph).hexdigest(), CASE_SHA)
         self.assertEqual(hashlib.sha256(asset_bytes(self.archive, BRAIN_GRAPH)).hexdigest(), BRAIN_SHA)
         self.assertEqual(self.case['code_sha256'], CASE_CODE_SHA)
 
     def test_brain_case_matches_the_program_numerically(self):
-        from rc2016.research import forward_loops as loops
+        from nwo.research import forward_loops as loops
         compiler = loops.compile_opaque(self.case)
         roots, _subs = loops.bind_frozen(compiler, flags=0x0)
         rng = random.Random(20261107)

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import unittest
 
-from rc2016.shaders.bindings import SOURCE_PREVIEW_POLICIES
+from nwo.shaders.bindings import SOURCE_PREVIEW_POLICIES
 
 CASES = (
     ('materialgraph/equipment/weapon/wpn_thumper_glove_glass/wpn_thumper_glove_glass.materialgraph',
@@ -31,7 +31,7 @@ class ThumperArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -40,9 +40,9 @@ class ThumperArchiveTests(unittest.TestCase):
             cls.archive.close()
 
     def test_materials_stay_unsupported(self):
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.bindings import prepare_translation
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.bindings import prepare_translation
         for graph, material, graph_sha in CASES:
             with self.subTest(graph=graph):
                 graph_data = asset_bytes(self.archive, graph)

@@ -8,7 +8,7 @@ import random
 import unittest
 from pathlib import Path
 
-from rc2016.viewer import textures as tp
+from nwo.viewer import textures as tp
 
 MUD_GRAPH = 'materialgraph/environment/pokitaru/rock/pok_rock_blend_01/rp_ari_sand_mud_blend_colorbreak_01.materialgraph'
 SLUDGE_GRAPH = 'materialgraph/environment/kalebo/rp_ari_sludge_puddle.materialgraph'
@@ -33,14 +33,14 @@ class AridiaGroundRuleTests(unittest.TestCase):
         self.assertEqual(tp._graph_rule([SLUDGE_GRAPH]), {})
 
     def test_term_is_registered_for_the_blender_front_end(self):
-        from rc2016.formats import materials
+        from nwo.formats import materials
         self.assertIn('mud_blend', materials.VIEWER_RULE_EXTRAS)
         self.assertIn('mud_blend', materials.VIEWER_RULE_BUILT)
         self.assertIn('mud_blend', materials.VIEWER_LINEAR_Z_TERMS)
         self.assertEqual(materials.VIEWER_TERM_ROLES['mud_blend'], ('_mud_h', '_mud_c', '_mud_g2', '_mud_n7', '_mud_n8'))
 
     def test_camera_collision_proxies_are_hidden_by_default(self):
-        from rc2016.levels.scene import hidden_by_default
+        from nwo.levels.scene import hidden_by_default
         self.assertTrue(hidden_by_default('environment/aridia/ground/tj_ari_gnd_Sludge_camera_coll/tj_ari_gnd_Sludge_camera_coll.model'))
         self.assertFalse(hidden_by_default('environment/aridia/ground/tj_ari_gnd_Sludge_main/tj_ari_gnd_Sludge_main.model'))
 
@@ -121,8 +121,8 @@ class AridiaGroundArchiveTests(unittest.TestCase):
         research = os.environ.get('RC2016_RESEARCH')
         if not research:
             raise unittest.SkipTest('RC2016_RESEARCH is required')
-        from rc2016.levels.scene import asset_bytes, open_archive
-        from rc2016.shaders.translator import compile_graph
+        from nwo.levels.scene import asset_bytes, open_archive
+        from nwo.shaders.translator import compile_graph
         try:
             cls.archive = open_archive(Path(research))
             cls.mud_graph = bytes(asset_bytes(cls.archive, MUD_GRAPH))
@@ -171,9 +171,9 @@ class AridiaGroundArchiveTests(unittest.TestCase):
         self.assertEqual(paths['graph_identity']['sha256'], tp.SLUDGE_PUDDLE_GRAPH_SHA256)
 
     def test_pass_zero_constants_are_the_pinned_cb2(self):
-        from rc2016.formats.archive import asset_data
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.shaders.bindings import _parameter_values, pass_contracts
+        from nwo.formats.archive import asset_data
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.shaders.bindings import _parameter_values, pass_contracts
         for graph, material, expected in ((self.mud_graph, MUD_MATERIAL, MUD_CB2), (self.sludge_graph, SLUDGE_MATERIAL, SLUDGE_CB2)):
             contract = pass_contracts(graph)[0]
             instance = extract_material_parameters(asset_data(self.archive, self.archive.resolve(material)[0]))
@@ -183,13 +183,13 @@ class AridiaGroundArchiveTests(unittest.TestCase):
                 self.assertAlmostEqual(got[index], value, places=5)
 
     def test_sludge_deferred_writers_are_black_and_pass_zero_is_the_forward_program(self):
-        from rc2016.shaders.translator import compile_graph
+        from nwo.shaders.translator import compile_graph
         programs = {p['code_sha256']: p for p in compile_graph(self.sludge_graph, allow_independent_samplers=True)['programs']}
         forward = programs[SLUDGE_CODE]
         self.assertEqual(forward['status'], 'unsupported')
         self.assertIn('forward-pass program', forward['reason'])
-        from rc2016.shaders.ir import DAG
-        from rc2016.shaders.translator import lower_deferred
+        from nwo.shaders.ir import DAG
+        from nwo.shaders.translator import lower_deferred
         zero = [p for p in programs.values() if p['status'] == 'compiled']
         self.assertEqual(len(zero), 2)
         for program in zero:
@@ -199,8 +199,8 @@ class AridiaGroundArchiveTests(unittest.TestCase):
                 self.assertEqual(ir.evaluate(root), 0.0)
 
     def test_mud_writer_matches_the_decoded_kernel(self):
-        from rc2016.shaders.ir import DAG
-        from rc2016.shaders.translator import lower_deferred
+        from nwo.shaders.ir import DAG
+        from nwo.shaders.translator import lower_deferred
         lowered = lower_deferred(self.mud['ir'])
         ir = DAG(lowered['nodes'])
         subs = {i: ir.const(0.0) for i, node in enumerate(ir.nodes) if node['op'] == 'unsupported'}   # strength fade: close range
@@ -242,7 +242,7 @@ class AridiaGroundArchiveTests(unittest.TestCase):
 
     def test_sludge_forward_front_end_matches_the_decoded_terms(self):
         """Run the CC985D80 program up to its first light-list loop and evaluate the F0 and gloss-input registers."""
-        from rc2016.shaders import translator
+        from nwo.shaders import translator
         program = next(p for p in translator.pixel_programs(self.sludge_graph) if p['code_sha256'] == SLUDGE_CODE)
 
         def compiler():

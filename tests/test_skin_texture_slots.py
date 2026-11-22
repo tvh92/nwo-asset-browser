@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 
 from tests.test_viewer_textures import FakeArchive, dat1, slot_rows
-from rc2016.viewer import textures as tp
-from rc2016.shaders.families import FAMILY_REGISTRY, SKIN_TEXTURE_SLOTS
+from nwo.viewer import textures as tp
+from nwo.shaders.families import FAMILY_REGISTRY, SKIN_TEXTURE_SLOTS
 
 
 ARCHIVE = Path(__file__).resolve().parents[1] / 'Research' / '2026-10-22_from-PS4-animation-pipeline'
@@ -56,8 +56,8 @@ class SkinSlotTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get('RC2016_RESEARCH'), 'requires research workspace')
     def test_live_pufferfish_model_and_level_material_loaders_agree(self):
-        from rc2016.research.source import Corpus
-        from rc2016.levels.scene import material_entries
+        from nwo.research.source import Corpus
+        from nwo.levels.scene import material_entries
         evidence = ARCHIVE / 'levels/Actors/out/corpus_validation.json'
         if not evidence.is_file():
             self.skipTest('actor source-root receipt unavailable')

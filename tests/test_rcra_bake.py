@@ -1,4 +1,4 @@
-"""Rift Apart material terms baked over UV0 for the portable export (rc2016.games.rcra.bake), plus a real-install check
+"""Rift Apart material terms baked over UV0 for the portable export (nwo.games.rcra.bake), plus a real-install check
 (RCRA_GAME, skipped without it): the vectorised bake equals the scalar reference evaluator at random texels."""
 import os
 import random
@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from rc2016.games.rcra import bake
+from nwo.games.rcra import bake
 
 GAME = os.environ.get('RCRA_GAME')
 
@@ -139,9 +139,9 @@ class BakeTests(unittest.TestCase):
 class InstallTests(unittest.TestCase):
     def test_the_bake_equals_the_scalar_evaluator(self):
         import tempfile
-        from rc2016.games import rcra_export
-        from rc2016.games.rcra import surface as rsurface
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games import rcra_export
+        from nwo.games.rcra import surface as rsurface
+        from nwo.games.rcra.source import RcraSource
         with tempfile.TemporaryDirectory() as tmp:
             source = RcraSource(Path(GAME), Path(tmp))
             path = 'material/characters/hero/hero_ratchet_head/hero_ratchet_head.material'

@@ -7,7 +7,7 @@ import sys
 from types import SimpleNamespace
 from unittest import mock
 
-MODULE = Path(__file__).resolve().parents[1] / "rc2016" / "pipeline" / "review.py"
+MODULE = Path(__file__).resolve().parents[1] / "nwo" / "pipeline" / "review.py"
 SPEC = importlib.util.spec_from_file_location("review_blender", MODULE)
 review = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(review)

@@ -1,4 +1,4 @@
-"""Vertex frame binding (rc2016/shaders/bindings.py, vertex_frame=True).
+"""Vertex frame binding (nwo/shaders/bindings.py, vertex_frame=True).
 
 attribute2.xyz and attribute3.xyz become the decoded vertex normal and tangent, and the integer sign chain of
 attribute3.w (the bitangent handedness) becomes an explicit input, supplied from the stored position-w sign;
@@ -8,8 +8,8 @@ RC2016_RESEARCH.
 import os
 import unittest
 
-from rc2016.shaders import bindings
-from rc2016.shaders.ir import DAG
+from nwo.shaders import bindings
+from nwo.shaders.ir import DAG
 
 
 def _input(ir, name, kind, attribute, channel):
@@ -41,7 +41,7 @@ class FrameAndEquivalenceTests(unittest.TestCase):
         self.assertIsNone(bindings.numeric_equivalence([first, other]))
 
     def test_frame_inputs_emit_only_in_experimental_glsl(self):
-        from rc2016.viewer.native_glsl import emit_surface, fragment_source
+        from nwo.viewer.native_glsl import emit_surface, fragment_source
         ir = DAG([])
         h = ir.node('input', name='vertex_handedness', kind='vertex_handedness')
         t = ir.node('input', name='vertex_tangent.0', kind='vertex_tangent', channel=0)
@@ -89,9 +89,9 @@ class BoulderVertexFrameTests(unittest.TestCase):
     MATERIAL = 'material/environment/aridia/rock/ari_rock_boulder_01/tj_ari_rock_boulder_01.material'
 
     def _receipt(self, vertex_frame, world_position=False):
-        from rc2016.formats.archive import asset_data, asset_references
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.levels.scene import open_archive
+        from nwo.formats.archive import asset_data, asset_references
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.levels.scene import open_archive
         archive = open_archive(os.environ['RC2016_RESEARCH'])
         try:
             ids = [i for i in archive.resolve(self.MATERIAL) if archive.entries[i]['type'] == 'material']

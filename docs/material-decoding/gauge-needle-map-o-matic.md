@@ -1,6 +1,6 @@
 # Gauge needle and Map-o-matic screen previews
 
-Two deferred writers bind through the native translator once their unbound engine words are replaced by labelled constants. Each policy is in `SOURCE_PREVIEW_POLICIES` (`rc2016/shaders/bindings.py`) and requires the exact graph path and SHA-256, material path and SHA-256, shader id and code SHA-256. A source-identical writer in another graph or material gets nothing, and a translation without the source context stays unsupported. Every frozen word is a named entry of the policy and its receipt (`source_preview_inputs`, one row per word, each with its own meaning text). All previews carry `game_equivalence = False`. Archive-backed checks are in `tests/test_gauge_needle_map_o_matic_previews.py`.
+Two deferred writers bind through the native translator once their unbound engine words are replaced by labelled constants. Each policy is in `SOURCE_PREVIEW_POLICIES` (`nwo/shaders/bindings.py`) and requires the exact graph path and SHA-256, material path and SHA-256, shader id and code SHA-256. A source-identical writer in another graph or material gets nothing, and a translation without the source context stays unsupported. Every frozen word is a named entry of the policy and its receipt (`source_preview_inputs`, one row per word, each with its own meaning text). All previews carry `game_equivalence = False`. Archive-backed checks are in `tests/test_gauge_needle_map_o_matic_previews.py`.
 
 | Material | Graph | Writer (pass contract) | Textures by API | Frozen words |
 |---|---|---|---|---|

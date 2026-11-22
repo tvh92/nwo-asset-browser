@@ -6,7 +6,7 @@ from pathlib import Path
 import random
 import unittest
 
-from rc2016.shaders.bindings import (
+from nwo.shaders.bindings import (
     HEALTH_CRATE_BODY_MATERIAL as BODY,
     HEALTH_CRATE_PANE_MATERIAL as PANE,
     HEALTH_CRATE_PASS0_SOURCE_PREVIEW as RULE,
@@ -15,7 +15,7 @@ from rc2016.shaders.bindings import (
     _preview_input_nodes,
     _source_preview_policy,
 )
-from rc2016.shaders.ir import DAG, compute
+from nwo.shaders.ir import DAG, compute
 
 FAR_WRITER = ('0xe5f05839', '631f89a5a8bbdf88fbd741bac16eff6fb327e564de2a72edf344357e4e66b6ec')
 
@@ -61,7 +61,7 @@ class HealthCratePolicyTests(unittest.TestCase):
         self.assertEqual(_preview_input_nodes(ir, RULE['input']), [cb])
 
     def test_vertex_frame_normal_is_emitted_only_when_named(self):
-        from rc2016.viewer.native_glsl import emit_surface
+        from nwo.viewer.native_glsl import emit_surface
         ir = DAG()
         u = ir.node('input', name='attribute0.0', kind='attribute', attribute=0, channel=0)
         v = ir.node('input', name='attribute0.1', kind='attribute', attribute=0, channel=1)
@@ -111,7 +111,7 @@ class HealthCrateArchiveTests(unittest.TestCase):
         root = Path(os.environ.get('RC2016_GAME_ROOT', str(Path(research).parents[1] / 'Ratchet & Clank (EUR)' / 'Image0')))
         if not root.exists():
             raise unittest.SkipTest('Source archive not available')
-        from rc2016.levels.scene import open_archive
+        from nwo.levels.scene import open_archive
         cls.archive = open_archive(root)
 
     @classmethod
@@ -120,10 +120,10 @@ class HealthCrateArchiveTests(unittest.TestCase):
             cls.archive.close()
 
     def _translation(self, material, context=True):
-        from rc2016.formats.index import references
-        from rc2016.formats.materials import extract_material_parameters
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.bindings import prepare_translation
+        from nwo.formats.index import references
+        from nwo.formats.materials import extract_material_parameters
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.bindings import prepare_translation
         graph = asset_bytes(self.archive, RULE['graph_path'])
         data = asset_bytes(self.archive, material)
         paths = [r['path'] for r in references(data) if r['path'].endswith('.materialgraph')]
@@ -132,8 +132,8 @@ class HealthCrateArchiveTests(unittest.TestCase):
 
     def test_unfrozen_writer_normal_is_the_decoded_closed_form(self):
         """5C03EF34: x, y = s (_n.rg - 0.5), z = 1 - x^2 - y^2, s = 2 CB0[95] (1 - sat(rec[62] + POS_W rec[63]))."""
-        from rc2016.levels.scene import asset_bytes
-        from rc2016.shaders.bindings import _lowered, compiled
+        from nwo.levels.scene import asset_bytes
+        from nwo.shaders.bindings import _lowered, compiled
         program = next(p for p in compiled(bytes(asset_bytes(self.archive, RULE['graph_path'])))['programs']
                        if p['shader_id'] == RULE['shader_id'])
         self.assertEqual(program['code_sha256'], RULE['code_sha256'])
@@ -161,7 +161,7 @@ class HealthCrateArchiveTests(unittest.TestCase):
                 self.assertTrue(math.isclose(got, want, rel_tol=1e-9, abs_tol=1e-9), (got, want))
 
     def test_both_materials_bind_the_pass0_writer_and_keep_the_far_colour(self):
-        from rc2016.viewer.native_glsl import evaluate_surface
+        from nwo.viewer.native_glsl import evaluate_surface
         for material in (BODY, PANE):
             with self.subTest(material=material):
                 near = self._translation(material)
@@ -194,7 +194,7 @@ class HealthCrateArchiveTests(unittest.TestCase):
                         self.assertAlmostEqual(got, want, places=6)
 
     def test_validation_accepts_the_receipt_and_rejects_edits(self):
-        from rc2016.shaders.validation import validate_health_crate_translation
+        from nwo.shaders.validation import validate_health_crate_translation
         translation = self._translation(BODY)
         result = validate_health_crate_translation(translation)
         self.assertEqual(result['status'], 'passed_health_crate_pass0')
@@ -213,7 +213,7 @@ class HealthCrateArchiveTests(unittest.TestCase):
                 validate_health_crate_translation(edited)
 
     def test_viewer_program_uses_the_vertex_frame(self):
-        from rc2016.viewer.native_glsl import fragment_source
+        from nwo.viewer.native_glsl import fragment_source
         translation = self._translation(PANE)
         source = fragment_source(translation, alpha_api=5, alpha_discard=4.0 / 255.0)['source']
         self.assertIn('N = nativeVertexTangentNormal(N, nativeNormal);', source)

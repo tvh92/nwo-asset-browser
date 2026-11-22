@@ -5,10 +5,10 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.formats.materials import viewer_graph_rule
-from rc2016.shaders import validation
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import FRAGMENT
+from nwo.formats.materials import viewer_graph_rule
+from nwo.shaders import validation
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import FRAGMENT
 from tests.test_viewer_textures import FakeArchive, dat1, flags
 
 GRAPH = 'materialgraph/global/crate_chunks_damage/crate_chunks_damage.materialgraph'
@@ -28,8 +28,8 @@ def setup(material_rows=(), sha=None):
     rules = tuple((p, dict(r, _graph_sha256=digest) if r.get('crate_tint') else r) for p, r in tp.GRAPH_RULES)
     params = dict(parameters=[], unsupported_parameters=list(material_rows))
     patches = (patch.object(tp, 'GRAPH_RULES', rules),
-               patch('rc2016.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
-               patch('rc2016.formats.materials.extract_material_parameters', return_value=params))
+               patch('nwo.shaders.families.graph_parameter_tables', return_value=([[dict(key_hash=k) for k in DEFAULTS]], DEFAULTS)),
+               patch('nwo.formats.materials.extract_material_parameters', return_value=params))
     return archive, patches
 
 
@@ -69,7 +69,7 @@ class CrateRuleTests(unittest.TestCase):
     def test_viewer_texture_entry_keeps_the_tint(self):
         archive, paths = extract()
         with (patch.object(tp, 'material_texture_paths', return_value=paths),
-              patch('rc2016.viewer.native_glsl.selected_translation', return_value=None)):
+              patch('nwo.viewer.native_glsl.selected_translation', return_value=None)):
             entry = tp.material_textures(archive, [dict(index=0, path='m/crate.material')], {}, previews=False)[0]
         self.assertEqual(entry['crate_tint'], paths['crate_tint'])
 

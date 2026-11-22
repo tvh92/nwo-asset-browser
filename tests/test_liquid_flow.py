@@ -10,7 +10,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from rc2016.shaders.liquids import (
+from nwo.shaders.liquids import (
     GASPAR_LAVA_FLOW_GRAPH, GASPAR_LAVA_FLOW_GRAPH_SHA256,
     GASPAR_LAVA_FLOW_WRITERS, GASPAR_LAVA_FLOW_PARAMETERS,
     gaspar_lava_flow_contract,
@@ -39,8 +39,8 @@ class LavaFlowSourceTests(unittest.TestCase):
         if not Path(research).exists():
             self.skipTest('RC2016_RESEARCH path is absent')
         try:
-            from rc2016.formats.archive import Archive, locate
-            from rc2016.formats.archive import asset_data
+            from nwo.formats.archive import Archive, locate
+            from nwo.formats.archive import asset_data
             root = locate(Path(research))
             archive = Archive(root, Path(__file__).resolve().parents[1] / '.cache/liquid-flow-test',
                               lambda *_a, **_k: None)
@@ -50,7 +50,7 @@ class LavaFlowSourceTests(unittest.TestCase):
             material_ids = archive.resolve(material_path)
             if not graph_ids or not material_ids:
                 self.skipTest('Gaspar lava-flow graph/material are not indexed in this archive')
-            from rc2016.shaders.liquids import liquid_flow_rule
+            from nwo.shaders.liquids import liquid_flow_rule
             graph_blob = asset_data(archive, graph_ids[0])
             result = liquid_flow_rule(graph_blob, asset_data(archive, material_ids[0]))
             self.assertEqual(result['status'], 'source_decoded_partial', result)
@@ -64,8 +64,8 @@ class LavaFlowSourceTests(unittest.TestCase):
             self.assertEqual(len(result['writers']), 2)
             self.assertEqual(result['writers'][0]['effective_uv_offsets_at_frozen_time']['uv_b'],
                              tuple(result['uv_offset']))
-            from rc2016.viewer.textures import material_texture_paths
-            from rc2016.formats.materials import viewer_graph_rule
+            from nwo.viewer.textures import material_texture_paths
+            from nwo.formats.materials import viewer_graph_rule
             payload = material_texture_paths(archive, material_path)
             self.assertEqual(payload['liquid_flow']['graph_sha256'], GASPAR_LAVA_FLOW_GRAPH_SHA256)
             self.assertEqual(payload['_c'], payload['liquid_flow']['texture_slots']['albedo']['texture_path'])
@@ -78,8 +78,8 @@ class LavaFlowSourceTests(unittest.TestCase):
             # Compile and evaluate the actual GCN writer DAG. These assertions
             # compare source outputs to the decoded channel/phase equations;
             # the chosen texels and CB0 time are explicit controls.
-            from rc2016.shaders.translator import compile_graph, lower_deferred
-            from rc2016.shaders.ir import DAG
+            from nwo.shaders.translator import compile_graph, lower_deferred
+            from nwo.shaders.ir import DAG
             compiled = compile_graph(graph_blob, allow_independent_samplers=True)['programs']
             by_writer = {row['shader_id']: row for row in compiled
                          if row['shader_id'] in ('0xea6006f6', '0xbacb8758')}
@@ -112,9 +112,9 @@ class LavaFlowSourceTests(unittest.TestCase):
             # real graph contracts, while keeping the archive material parser
             # out of the mutation test. The production decoder still supplies
             # the graph and source pass contracts.
-            from rc2016.formats import index as index_format, materials as material_format
-            from rc2016.shaders import bindings
-            from rc2016.shaders.liquids import liquid_flow_rule
+            from nwo.formats import index as index_format, materials as material_format
+            from nwo.shaders import bindings
+            from nwo.shaders.liquids import liquid_flow_rule
             defaults = {dword: spec['default'] for dword, spec in GASPAR_LAVA_FLOW_PARAMETERS.items()}
             slot_path = {
                 0x49A7866BABDAD780: 'override/albedo.texture',

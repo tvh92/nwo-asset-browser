@@ -1,6 +1,6 @@
 """Decoded pok_uniq_water closure (F4D47ECE; docs/material-decoding/novalis-water.md).
 
-The synthetic tests pin the closed forms in rc2016.shaders.water, the viewer rule binding, the uniform packing, the GLSL
+The synthetic tests pin the closed forms in nwo.shaders.water, the viewer rule binding, the uniform packing, the GLSL
 branch and the Blender/validator agreement. The archive tests (skipped without RC2016_RESEARCH / RC2016_GAME_ROOT) bind
 the material through the pass-0 table and compare the decoded alpha with the loop-opaque translation of the program.
 """
@@ -10,10 +10,10 @@ import random
 import unittest
 from pathlib import Path
 
-from rc2016.shaders import validation
-from rc2016.shaders import water as W
-from rc2016.viewer import textures as tp
-from rc2016.viewer.shading import (GLASS_FRAGMENT, GLASS_UNIFORMS, SCENE_DEPTH_TEXTURE_UNIT, WATER_FOAM_TEXTURE_UNITS,
+from nwo.shaders import validation
+from nwo.shaders import water as W
+from nwo.viewer import textures as tp
+from nwo.viewer.shading import (GLASS_FRAGMENT, GLASS_UNIFORMS, SCENE_DEPTH_TEXTURE_UNIT, WATER_FOAM_TEXTURE_UNITS,
                                    glass_uniforms, water_surface_uniforms)
 
 MATERIAL = 'material/visualeffect/environment/pokitaru/unique/pok_uniq_water/pok_uniq_water.material'
@@ -126,7 +126,7 @@ class ViewerRuleTests(unittest.TestCase):
     def test_level_clock_runs_holds_and_wraps(self):
         from types import SimpleNamespace
         from unittest import mock
-        from rc2016.levels import viewport as lv
+        from nwo.levels import viewport as lv
         view = SimpleNamespace(animate_time=False, _time_held=12.5, _time_origin=None, _time_used=False,
                                TIME_PERIOD=lv.LevelViewport.TIME_PERIOD, _schedule_draw=lambda: None)
         clock = lambda: lv.LevelViewport.game_time(view)
@@ -162,7 +162,7 @@ class ViewerRuleTests(unittest.TestCase):
         self.assertEqual(len({*WATER_FOAM_TEXTURE_UNITS, SCENE_DEPTH_TEXTURE_UNIT, 0, 1, 2, 4, 6, 18}), 9)
 
     def test_viewer_uploads_the_foam_tiles(self):
-        from rc2016.viewer.viewport import GL_TEXTURE_ROLES, MIPMAP_ROLES
+        from nwo.viewer.viewport import GL_TEXTURE_ROLES, MIPMAP_ROLES
         for role in ('_water_foam_a', '_water_foam_b'):
             self.assertIn(role, GL_TEXTURE_ROLES)
             self.assertIn(role, MIPMAP_ROLES)
@@ -179,7 +179,7 @@ class ViewerRuleTests(unittest.TestCase):
         self.assertEqual(expected['VR water decoded shallow colour'], s['shallow_colour'])
         self.assertEqual(expected['VR water presentation opacity'], 0.4)
         self.assertNotIn('VR water presentation F0', names)
-        text = (Path(__file__).resolve().parents[1] / 'rc2016/pipeline/game_shader.py').read_text(encoding='utf-8')
+        text = (Path(__file__).resolve().parents[1] / 'nwo/pipeline/game_shader.py').read_text(encoding='utf-8')
         body = text.split('def _viewer_rule_water_surface')[1].split('\ndef ')[0]
         for label, _key in validation.WATER_SURFACE_CONSTANTS:
             self.assertIn("'water decoded %s'" % label, body)
@@ -192,14 +192,14 @@ def _archive():
     root = os.environ.get('RC2016_GAME_ROOT') or os.environ.get('RC2016_RESEARCH')
     if not root or not Path(root).exists():
         raise unittest.SkipTest('RC2016_RESEARCH is required')
-    from rc2016.levels.scene import open_archive
+    from nwo.levels.scene import open_archive
     return open_archive(root)
 
 
 class ArchiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rc2016.levels.scene import asset_bytes
+        from nwo.levels.scene import asset_bytes
         cls.archive = _archive()
         cls.graph = asset_bytes(cls.archive, W.WATER_GRAPH)
         cls.material = asset_bytes(cls.archive, MATERIAL)
@@ -232,8 +232,8 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(paths['_water_foam_a'], 'textures/visualeffect/water/water_beachfoam_tile_01.texture')
 
     def test_alpha_matches_the_loop_opaque_program(self):
-        from rc2016.research import forward_loops
-        from rc2016.shaders import translator
+        from nwo.research import forward_loops
+        from nwo.shaders import translator
         program = next(p for p in translator.pixel_programs(self.graph) if p['shader_id'] == '0xf4d47ece')
         self.assertEqual(program['code_sha256'], CODE_SHA)
         compiler = forward_loops.compile_opaque(program)

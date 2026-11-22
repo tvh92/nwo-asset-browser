@@ -5,9 +5,9 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.formats.links import EXACT, rule_coverage
-from rc2016.formats.materials import final_shader_status, viewer_graph_rule
-from rc2016.viewer import textures as tp
+from nwo.formats.links import EXACT, rule_coverage
+from nwo.formats.materials import final_shader_status, viewer_graph_rule
+from nwo.viewer import textures as tp
 from tests.test_viewer_textures import FakeArchive, dat1, flags, slot_rows
 
 GRAPH = ('materialgraph/visualeffect/character/enemy/enm_victor_reticle/'
@@ -44,8 +44,8 @@ class _Digest:
 
 
 def extract(archive, rows=()):
-    with (patch('rc2016.shaders.families.graph_parameter_tables', return_value=([], {})),
-          patch('rc2016.formats.materials.extract_material_parameters', return_value={
+    with (patch('nwo.shaders.families.graph_parameter_tables', return_value=([], {})),
+          patch('nwo.formats.materials.extract_material_parameters', return_value={
               'parameters': [], 'unsupported_parameters': list(rows)})):
         return tp.material_texture_paths(archive, MATERIAL)
 
@@ -60,19 +60,19 @@ class VictorReticleRuleTests(unittest.TestCase):
         archive = archive_for()
         graph_id = archive.resolve(GRAPH)[0]
         graph_blob = archive.blobs[graph_id][4:]
-        with patch('rc2016.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)):
+        with patch('nwo.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)):
             accepted = extract(archive)
         self.assertEqual(accepted['forward']['kind'], 'victor_reticle')
         rejected_archive = archive_for(graph_blob=dat1([TRIGGER], lambda at: [
             (tp.GRAPH_SLOT_SECTION, slot_rows([(at[0], TRIGGER_SLOT)]))]))
-        with patch('rc2016.viewer.textures.hashlib.sha256', side_effect=REAL_SHA256):
+        with patch('nwo.viewer.textures.hashlib.sha256', side_effect=REAL_SHA256):
             rejected = extract(rejected_archive)
         self.assertNotIn('forward', rejected)
 
     def test_api8_slot_gain_flags_and_named_presentation_input(self):
         archive = archive_for()
         graph_blob = archive.blobs[archive.resolve(GRAPH)[0]][4:]
-        with patch('rc2016.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)):
+        with patch('nwo.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)):
             got = extract(archive, [f32(GAIN_KEY, 4.0)])
         self.assertEqual(got['_reticle'], TRIGGER)
         self.assertEqual(got['forward']['params']['texture_gain'], 4.0)
@@ -84,7 +84,7 @@ class VictorReticleRuleTests(unittest.TestCase):
     def test_missing_bound_api8_does_not_claim_the_rule_is_ready(self):
         archive = archive_for()
         graph_blob = archive.blobs[archive.resolve(GRAPH)[0]][4:]
-        with patch('rc2016.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)):
+        with patch('nwo.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)):
             ready = viewer_graph_rule(archive, MATERIAL, {TRIGGER})
             missing = viewer_graph_rule(archive, MATERIAL, {'textures/other.texture'})
         self.assertIn('victor_reticle', ready['ported'])
@@ -114,7 +114,7 @@ class VictorReticleRuleTests(unittest.TestCase):
             with self.subTest(rows=rows):
                 archive = archive_for()
                 graph_blob = archive.blobs[archive.resolve(GRAPH)[0]][4:]
-                with (patch('rc2016.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)),
+                with (patch('nwo.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)),
                       self.assertRaises(ValueError)):
                     extract(archive, rows)
 
@@ -126,11 +126,11 @@ class VictorReticleRuleTests(unittest.TestCase):
         self.assertEqual(terms['gloss'], 0.0)
 
     def test_blender_constant_expectations_include_all_reticle_source_values(self):
-        from rc2016.shaders.validation import _viewer_expected_constants
+        from nwo.shaders.validation import _viewer_expected_constants
 
         archive = archive_for()
         graph_blob = archive.blobs[archive.resolve(GRAPH)[0]][4:]
-        with patch('rc2016.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)):
+        with patch('nwo.viewer.textures.hashlib.sha256', side_effect=exact_hash_for_blob(graph_blob)):
             term_params = extract(archive)['forward']['params']
         expected = _viewer_expected_constants({
             'ported': ['victor_reticle'],
@@ -147,9 +147,9 @@ class VictorReticleRuleTests(unittest.TestCase):
 class VictorReticleBindingTests(unittest.TestCase):
     def test_api8_alias_preserves_regular_c_and_other_sampler_units(self):
         from types import SimpleNamespace
-        from rc2016.levels.viewport import _Recorder
-        from rc2016.viewer.shading import OPAQUE_UNIFORMS
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.levels.viewport import _Recorder
+        from nwo.viewer.shading import OPAQUE_UNIFORMS
+        from nwo.viewer.viewport import ModelViewport
 
         recorder = _Recorder(object(), object())
         view = SimpleNamespace(_gl=recorder.gl, _shading=recorder.shading, native_translation=False,

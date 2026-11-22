@@ -12,12 +12,12 @@ from unittest.mock import patch
 
 import numpy as np
 
-from rc2016.formats import archive as ar
-from rc2016.formats import native_model as nm
-from rc2016.formats import texture as tx
-from rc2016.formats.container import read_container
-from rc2016.viewer import loader as ld
-from rc2016.viewer import textures as tp
+from nwo.formats import archive as ar
+from nwo.formats import native_model as nm
+from nwo.formats import texture as tx
+from nwo.formats.container import read_container
+from nwo.viewer import loader as ld
+from nwo.viewer import textures as tp
 
 
 # ------------------------------------------------------------------ reference copies of the former code
@@ -216,7 +216,7 @@ class ModelDecodeTests(unittest.TestCase):
             self.assertTrue(np.any(np.abs(np.linalg.norm(raw, axis=1) - 1.0) > 0.1))
             payload = ld.mesh_payload(dict(decoded, meshes=[listed]), 'All')
             np.testing.assert_allclose(payload['raw_vectors'], np.column_stack((raw[:, 0], -raw[:, 2], raw[:, 1])))
-            from rc2016.viewer.viewport import prepare_viewport
+            from nwo.viewer.viewport import prepare_viewport
             _mesh, prepared, _bounds = prepare_viewport(payload)
             np.testing.assert_allclose(np.frombuffer(prepared[6], np.float32).reshape(-1, 3), payload['raw_vectors'])
         flagged = nm.decode_model('alternate', 'All', data=build_model(rng, [(3, 0, 0, 0x40)], [], b''))
@@ -225,7 +225,7 @@ class ModelDecodeTests(unittest.TestCase):
     def test_position_w_sign_is_the_tangent_sign_through_the_viewer_arrays(self):
         w = [-300, 0, 1, 32767]
         data = build_model(np.random.default_rng(5), [(4, 0, 0, 0)], [], b'', position_w=w)
-        from rc2016.viewer.viewport import prepare_viewport
+        from nwo.viewer.viewport import prepare_viewport
         for as_arrays in (False, True):
             decoded = nm.decode_model('signs', 'All', data=data, as_arrays=as_arrays)
             self.assertEqual(list(decoded['meshes'][0]['tangent_signs']), [-1.0, 0.0, 1.0, 1.0])
@@ -264,7 +264,7 @@ class ModelDecodeTests(unittest.TestCase):
                 self.assertEqual(old[key], new[key].tolist(), key)
             self.assertEqual(old['static_vector_eligible'], new['static_vector_eligible'])
             self.assertEqual(old['raw_vectors'], new['raw_vectors'])
-            from rc2016.viewer.viewport import prepare_viewport
+            from nwo.viewer.viewport import prepare_viewport
             a, b = prepare_viewport(old), prepare_viewport(new)
             for x, y in zip(a[1], b[1]):
                 self.assertEqual(bytes(x) if x is not None else None, bytes(y) if y is not None else None)
@@ -410,8 +410,8 @@ class LoaderTests(unittest.TestCase):
         archive = SimpleNamespace(entries={'m': dict(type='material')}, resolve=lambda p: ['m'])
         refs = [dict(path='materialgraph/x.materialgraph')]
         with patch.object(ld, 'asset_references', return_value=refs), \
-                patch('rc2016.viewer.textures.material_texture_paths', return_value={}), \
-                patch('rc2016.viewer.native_glsl.selected_translation', side_effect=AssertionError('selected twice')):
+                patch('nwo.viewer.textures.material_texture_paths', return_value={}), \
+                patch('nwo.viewer.native_glsl.selected_translation', side_effect=AssertionError('selected twice')):
             rules = ld.material_rules(archive, [dict(path='a.material')], {'a.material': None})
         self.assertEqual(rules['a.material']['graphs'], ['materialgraph/x.materialgraph'])
 

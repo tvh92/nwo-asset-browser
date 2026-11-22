@@ -1,0 +1,186 @@
+"""Standalone level viewer window (docs/levels.md, "Level viewer").
+
+Pick a level, load it, and toggle its zones. Everything is read straight from the archive on a
+background thread; the view fills in as models, then materials and textures, arrive.
+
+    python -m nwo.levels.viewer
+        [--source-root <extracted source root>] [--level <.level or .zone asset path>] [--zones a,b]
+        [--mode Shaded|Textured|Solid|...] [--capture out.png [--camera x,y,z,yaw,pitch]]
+
+--capture loads the level, saves one frame and exits (for proofs). The source root defaults to the
+asset browser's saved one; the last level and source root are remembered in
+%APPDATA%/NWO Asset Browser/level_viewer.json.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from nwo.app.theme import apply_theme, windows_prefers_dark  # noqa: E402
+from nwo.common import settings_dir  # noqa: E402
+from nwo.levels.panel import DEFAULT_LEVEL, LevelPanel  # noqa: E402
+from nwo.levels.viewport import LevelViewport  # noqa: E402
+
+SETTINGS_DIR = settings_dir()
+
+
+def _read_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def default_settings():
+    """Own settings first, then the asset browser's source root and appearance."""
+    own = _read_json(SETTINGS_DIR / "level_viewer.json")
+    browser = _read_json(SETTINGS_DIR / "settings.json")
+    return dict(source=own.get("source") or browser.get("source") or "",
+                level=own.get("level") or DEFAULT_LEVEL,
+                appearance=own.get("appearance") or browser.get("appearance") or "")
+
+
+def is_dark(appearance):
+    """The saved light or dark choice; without one, the Windows app mode."""
+    if appearance in ("dark", "light"):
+        return appearance == "dark"
+    return windows_prefers_dark()
+
+
+def save_settings(values):
+    try:
+        SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        (SETTINGS_DIR / "level_viewer.json").write_text(json.dumps(values, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def main(argv=None):
+    settings = default_settings()
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--source-root", default=settings["source"])
+    parser.add_argument("--level", default=None, help="a .level or a single .zone asset path")
+    parser.add_argument("--zones", type=lambda s: [z.strip() for z in s.split(",") if z.strip()],
+                        help="only these zones (short names or paths)")
+    parser.add_argument("--mode", default="Shaded", choices=LevelViewport.MODES)
+    parser.add_argument("--capture")
+    parser.add_argument("--time", type=float, default=None, metavar="SECONDS",
+                        help="hold the level clock (game time CB0[99]) at this value; a capture holds it at 0 by default")
+    parser.add_argument("--camera", type=lambda s: tuple(float(x) for x in s.split(",")))
+    parser.add_argument("--probe-position", type=lambda s: tuple(float(x) for x in s.split(",")),
+                        help="x,y,z (presentation space, as --camera): the Level atmosphere probe is the reflection volume "
+                             "containing it; default the --camera position, else the level's default volume")
+    parser.add_argument("--no-material-overrides", action="store_true",
+                        help="draw instances without their per-instance material overrides")
+    parser.add_argument("--experimental-spawns", action="store_true",
+                        help="approximate enemy factory populations; all encounter states combined")
+    parser.add_argument("--experimental-materials", action="store_true",
+                        help="enable labelled simplified material previews with unverified runtime inputs")
+    parser.add_argument("--borderless", action="store_true",
+                        help="hide the window frame and the sidebar (as the borderless full-screen mode does) before the capture")
+    parser.add_argument("--window-size", default="1500x920", metavar="WxH",
+                        help="window size in pixels, for example 1920x1080 for a capture with the game's aspect ratio")
+    parser.add_argument("--no-lighting", action="store_true", help="unlit surface inspection; disable rig/HDRI, AO, shadows and authored lights")
+    parser.add_argument("--lighting", choices=LevelViewport.LIGHTINGS, default=LevelViewport.LIGHTINGS[0],
+                        help="lighting source; Level atmosphere is the reflection probe plus atmosphere sun (review preview)")
+    parser.add_argument("--no-lightgrid", action="store_true",
+                        help="Level atmosphere lighting: keep the single-probe ambient instead of the baked lightgrid")
+    parser.add_argument("--no-actors", action="store_true", help="hide the source-placement actor layer")
+    parser.add_argument("--no-sky", action="store_true", help="draw the flat background instead of the level sky")
+    parser.add_argument("--no-native-translation", action="store_true",
+                        help="use only hand rules and generic/family material readings")
+    args = parser.parse_args(argv)
+
+    import tkinter as tk
+    from tkinter import filedialog, ttk
+    from nwo.shaders.bindings import use_compile_processes
+    use_compile_processes()
+    root = tk.Tk()
+    root.title("R&C 2016 Level Viewer")
+    root.geometry(args.window_size)
+    dark = is_dark(settings["appearance"])
+    apply_theme(root, ttk, dark)
+    top = ttk.Frame(root, padding=(8, 6)); top.pack(side="top", fill="x")
+    ttk.Label(top, text="Source root").pack(side="left")
+    source = tk.StringVar(value=args.source_root)
+    ttk.Entry(top, textvariable=source).pack(side="left", fill="x", expand=True, padx=4)
+
+    def browse():
+        chosen = filedialog.askdirectory(title="Extracted source root (holds the asset archive)", initialdir=source.get())
+        if chosen:
+            source.set(chosen)
+    ttk.Button(top, text="Browse…", command=browse).pack(side="left")
+
+    def dark_mode_changed():
+        apply_theme(root, ttk, dark_var.get())
+        values = _read_json(SETTINGS_DIR / "level_viewer.json")
+        save_settings({**values, "appearance": "dark" if dark_var.get() else "light"})
+    dark_var = tk.BooleanVar(value=dark)
+    ttk.Checkbutton(top, text="Dark mode", variable=dark_var, command=dark_mode_changed).pack(side="left", padx=(12, 0))
+
+    def finished(panel):
+        if args.camera:
+            x, y, z, yaw, pitch = args.camera
+            panel.view.set_camera((x, y, z), yaw, pitch)
+        if args.capture:
+            def capture():
+                view = panel.view
+                if args.borderless and not view.is_fullscreen:
+                    view.is_fullscreen = True
+                    panel.frame.set_second_visible(False)
+                    root.overrideredirect(True)
+                    root.geometry(args.window_size + "+0+0")
+                    root.update()
+                    root.after(600, capture)   # redraw at the new size first
+                    return
+                if view._environment_loading or (view.lighting in view.ENVIRONMENT_LIGHTINGS
+                                                 and view._environment_lighting != view.lighting):
+                    root.after(200, capture)   # the lighting maps are still being built
+                    return
+                ok = view.capture_png(args.capture)
+                print("capture", args.capture, ok, panel.progress.get("done"), view.stats(), view.lighting_note, flush=True)
+                root.destroy()
+            capture()
+
+    probe = args.probe_position or (args.camera[:3] if args.camera else None)
+    if probe is not None:
+        probe = (probe[0], probe[2], -probe[1])   # presentation (x, y, z) -> native Y-up (x, z, -y), the inverse of BASIS
+    panel = LevelPanel(root, tk, ttk, source.get, level=args.level or settings["level"], mode=args.mode, probe_position=probe,
+                       zone_filter=args.zones, on_done=finished if (args.capture or args.camera) else None,
+                       material_overrides=not args.no_material_overrides, sky=not args.no_sky,
+                       native_translation=not args.no_native_translation, actors=not args.no_actors, spawn_preview=args.experimental_spawns,
+                       experimental_materials=args.experimental_materials)
+    if args.no_lighting:
+        panel.lighting_enabled_var.set(False)
+        panel._lighting_enabled_changed()
+    if args.lighting != LevelViewport.LIGHTINGS[0]:
+        panel.lighting_var.set(args.lighting)
+        panel._lighting_changed()
+    if args.no_lightgrid:
+        panel.lightgrid_var.set(False)
+        panel.view.set_lightgrid(False)
+    if args.capture or args.time is not None:
+        panel.view.set_animate_time(False, held=args.time or 0.0)   # a capture is a static, repeatable frame; not saved
+    panel.frame.pack(side="top", fill="both", expand=True)
+
+    def close():
+        if not args.capture:
+            save_settings({**_read_json(SETTINGS_DIR / "level_viewer.json"), "source": source.get(),
+                           "level": panel.loaded_level or panel.level_var.get()})
+        panel.close()
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", close)
+    root.after(100, panel.list_levels)
+    root.after(150, panel.load)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
+    main()

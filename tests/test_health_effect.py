@@ -1,11 +1,11 @@
-"""The health crate effect for Blender (rc2016/pipeline/health_effect.py): the data side, which needs no Blender."""
+"""The health crate effect for Blender (nwo/pipeline/health_effect.py): the data side, which needs no Blender."""
 import json
 import unittest
 
 import numpy as np
 
-from rc2016.pipeline import health_effect
-from rc2016.viewer import idle_effect as fx
+from nwo.pipeline import health_effect
+from nwo.viewer import idle_effect as fx
 
 
 class EffectDescriptionTests(unittest.TestCase):

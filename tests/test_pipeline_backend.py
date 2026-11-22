@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from rc2016.app.main import PipelineBatchRunner, PipelineIndexScanner, build_command
+from nwo.app.main import PipelineBatchRunner, PipelineIndexScanner, build_command
 
 
 class PipelineGuiBackendTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class PipelineGuiBackendTests(unittest.TestCase):
                 except BaseException as exc:  # surfaced in the test thread below
                     errors.append(exc)
 
-            with patch("rc2016.app.batch.PIPELINE_CLI", fake_cli):
+            with patch("nwo.app.batch.PIPELINE_CLI", fake_cli):
                 thread = threading.Thread(target=run_batch, daemon=True)
                 thread.start()
                 deadline = time.monotonic() + 10
@@ -88,8 +88,8 @@ class PipelineGuiBackendTests(unittest.TestCase):
                 created.append(real_popen(*args, **kwargs))
                 return created[-1]
 
-            with patch("rc2016.app.batch.PIPELINE_CLI", fake_cli), \
-                    patch("rc2016.app.batch.subprocess.Popen", popen):
+            with patch("nwo.app.batch.PIPELINE_CLI", fake_cli), \
+                    patch("nwo.app.batch.subprocess.Popen", popen):
                 self.assertEqual(0, runner.run())
             self.assertTrue(created[0].stdout.closed, "finished run left the CLI output pipe open")
 
@@ -152,7 +152,7 @@ class PipelineGuiBackendTests(unittest.TestCase):
             self.assertNotIn("--cinematic-clips", command(cinematic=True, skeleton=False))
 
     def test_blend_only_keeps_deliveries_and_removes_everything_else(self):
-        from rc2016.pipeline.run import keep_only_blends
+        from nwo.pipeline.run import keep_only_blends
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder) / "out"
             model = root / "hero_1234"
@@ -182,7 +182,7 @@ class PipelineGuiBackendTests(unittest.TestCase):
             self.assertFalse((root / "variant_assemblies" / "fusion" / "Assembly.candidate.blend").exists())
 
     def test_blend_only_cleanup_keeps_viewer_index_caches_exports_and_groups(self):
-        from rc2016.pipeline.run import keep_only_blends
+        from nwo.pipeline.run import keep_only_blends
         kept = ['.cache/thumbnails/x.png', 'cache/actor_index/abc.json', 'groups/Group.blend',
                 'hero/export.json', 'hero/hero.glb', 'reports/gui_model_index.json', 'reports/gui_scan_stamp.json']
         files = {relative: b'data' for relative in kept + ['reports/logs/pipeline.jsonl', 'reports/manifest.json']}
@@ -205,7 +205,7 @@ class PipelineGuiBackendTests(unittest.TestCase):
             root = Path(folder)
             model, animset = root / "one.model", root / "one.animset"
             model.touch(); animset.touch()
-            from rc2016.app.main import discover_models
+            from nwo.app.main import discover_models
             record = discover_models(root)[0]
             command = build_command(Path(sys.executable), record, root / "staging", ("Idle",))
             self.assertIn("animation_transforms.py", " ".join(command))
@@ -230,7 +230,7 @@ class PipelineGuiBackendTests(unittest.TestCase):
                 return SimpleNamespace(stdout=iter(lines), wait=lambda: 0)
 
             seen = []
-            with patch("rc2016.app.batch.subprocess.Popen", side_effect=popen) as called:
+            with patch("nwo.app.batch.subprocess.Popen", side_effect=popen) as called:
                 records = PipelineIndexScanner(source, output, py, blender).scan(progress=seen.append)
             self.assertEqual([r.archive_path for r in records], ["equipment/hero.model", "weapons/thing.model"])
             self.assertEqual(records[0].previous_status, "COMPLETE")
@@ -246,7 +246,7 @@ class PipelineGuiBackendTests(unittest.TestCase):
             root = Path(folder)
             source, output, py, blender = (root / name for name in ("source", "out", "python.exe", "blender.exe"))
             source.mkdir(); py.touch(); blender.touch()
-            with patch("rc2016.app.batch.subprocess.Popen",
+            with patch("nwo.app.batch.subprocess.Popen",
                        return_value=SimpleNamespace(stdout=iter(["boom\n"]), wait=lambda: 3)):
                 with self.assertRaisesRegex(RuntimeError, "boom"):
                     PipelineIndexScanner(source, output, py, blender).scan()

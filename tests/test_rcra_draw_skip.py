@@ -1,5 +1,5 @@
 """Rift Apart materials the plain model-instance draw never draws: a blended material whose alpha (flags block f32 5) is
-not above 0 (rc2016.games.rcra.material.draw_skip_note), left out by the viewer and the model export.
+not above 0 (nwo.games.rcra.material.draw_skip_note), left out by the viewer and the model export.
 
 Real-install tests read RCRA_GAME and skip without it.
 """
@@ -8,7 +8,7 @@ import struct
 import unittest
 from pathlib import Path
 
-from rc2016.games.rcra import material as rmat
+from nwo.games.rcra import material as rmat
 
 GAME = os.environ.get('RCRA_GAME')
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,9 +79,9 @@ class DrawSkipRuleTests(unittest.TestCase):
         self.assertEqual(rmat.graph_switches(graph(0x11210, 0x11210)), {})
 
     def test_front_ends_leave_them_out(self):
-        viewport = (ROOT / 'rc2016/viewer/viewport.py').read_text(encoding='utf-8')
+        viewport = (ROOT / 'nwo/viewer/viewport.py').read_text(encoding='utf-8')
         self.assertIn('.get("not_drawn")]', viewport)
-        export = (ROOT / 'rc2016/export/models.py').read_text(encoding='utf-8')
+        export = (ROOT / 'nwo/export/models.py').read_text(encoding='utf-8')
         self.assertIn("decoded.get('undrawn_materials')", export)
 
 
@@ -90,7 +90,7 @@ class InstallDrawSkipTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import tempfile
-        from rc2016.games.rcra.source import RcraSource
+        from nwo.games.rcra.source import RcraSource
         cls.temp = tempfile.TemporaryDirectory()
         cls.source = RcraSource(GAME, os.path.join(cls.temp.name, 'out'))
 
@@ -99,7 +99,7 @@ class InstallDrawSkipTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def test_ratchet_head_shell_is_not_drawn(self):
-        from rc2016.games.rcra.model import decode_for_viewer
+        from nwo.games.rcra.model import decode_for_viewer
         key = next(k for k in self.source.resolve(HEAD) if self.source.entries[k]['type'] == 'model')
         decoded, _data = decode_for_viewer(self.source, key, HEAD, True)
         undrawn = list(decoded['undrawn_materials'])   # the model's own spelling (hero_Ratchet_...)
@@ -120,8 +120,8 @@ class InstallDrawSkipTests(unittest.TestCase):
         self.assertIsNone(rmat.draw_skip_note(self.source.asset_data(self.source.resolve(eyeshadow)[0])))
 
     def test_eye_is_a_forward_technique(self):
-        from rc2016.games.rcra import surface as rsurface
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra import surface as rsurface
+        from nwo.games.rcra.texture import texture_size
 
         def graph(path):
             return self.source.asset_data(next(k for k in self.source.resolve(path)
@@ -157,8 +157,8 @@ class InstallDrawSkipTests(unittest.TestCase):
 
     def test_emissive_forward_technique_draws_its_unlit_part(self):
         """A forward technique whose colour has an unlit part (an emissive eye) carries it as the terms unlit.r/g/b."""
-        from rc2016.games.rcra import surface as rsurface
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra import surface as rsurface
+        from nwo.games.rcra.texture import texture_size
         key = self.source.resolve('material/characters/npc/npc_dino_large_horns/npc_dino_large_eye.material')[0]
         self.assertTrue(rmat._graphs(self.source, key)[0].endswith('/eye_emissive.materialgraph'))
         graph = self.source.asset_data(next(k for k in self.source.resolve(rmat._graphs(self.source, key)[0])
@@ -182,14 +182,14 @@ class InstallDrawSkipTests(unittest.TestCase):
         return graph, self.source.asset_data(key)
 
     def _recipe(self, fn, path):
-        from rc2016.games.rcra import surface as rsurface
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra import surface as rsurface
+        from nwo.games.rcra.texture import texture_size
         graph, data = self._material(path)
         result = fn(graph, data, texture_sizes=lambda p: texture_size(self.source, p))
         return rsurface.fold_nan(rsurface.export_recipe(result))
 
     def _evaluate(self, recipe):
-        from rc2016.games.rcra import surface as rsurface
+        from nwo.games.rcra import surface as rsurface
         values = {name: 0.3 for name in recipe['inputs']}
         values.update({'TEXCOORD2.z': 1.0, 'TEXCOORD3.x': 1.0, 'TEXCOORD3.w': 1.0, 'VIEW.z': -2.0, 'SV_IsFrontFace': True})
         return rsurface.evaluate_recipe(recipe, values, lambda node, args: [0.5, 0.5, 0.5, 1.0])
@@ -197,7 +197,7 @@ class InstallDrawSkipTests(unittest.TestCase):
     def test_key_and_ambient_factors_share_one_albedo(self):
         """The jelly lights its colour by the key light (in a shadow select, times AO) and the ambient light with one
         coefficient: multiplied out, that coefficient is its albedo; its rim is the unlit colour."""
-        from rc2016.games.rcra import surface as rsurface
+        from nwo.games.rcra import surface as rsurface
         recipe = self._recipe(rsurface.surface, 'material/characters/npc/npc_mrfunguy_jelly/npc_mrfunguy_jelly.material')
         self.assertIn(rsurface.FORWARD_ALBEDO_NOTE, recipe['limitations'])
         out = self._evaluate(recipe)
@@ -205,7 +205,7 @@ class InstallDrawSkipTests(unittest.TestCase):
         self.assertGreater(out['unlit.r'], 0.0)
 
     def test_different_diffuse_coefficients_draw_the_own_key_light(self):
-        from rc2016.games.rcra import surface as rsurface
+        from nwo.games.rcra import surface as rsurface
         path = 'material/characters/enemy/enm_amoeboid_large/enm_amoeboid_large.material'
         recipe = self._recipe(rsurface.surface, path)
         self.assertTrue(any(line.startswith(rsurface.FORWARD_OWN_LIGHT_NOTE.split('(%s)')[0])
@@ -219,7 +219,7 @@ class InstallDrawSkipTests(unittest.TestCase):
     def test_unlit_effects_of_light_state(self):
         """Unlit materials: an exposure-scaled arc glows at the review exposure 1; a planet's terminator takes the review
         key direction; glass that reads the key light and the default probe is black (both 0 under the profile)."""
-        from rc2016.games.rcra import surface as rsurface
+        from nwo.games.rcra import surface as rsurface
         arc = self._recipe(rsurface.surface, 'material/visualeffect/global/gbl_electricity_arc_mesh_01/'
                                              'gbl_electricity_arc_mesh_01.material')
         self.assertGreater(self._evaluate(arc)['unlit.r'], 1.0)
@@ -236,21 +236,21 @@ class InstallDrawSkipTests(unittest.TestCase):
     def test_masked_unlit_colour_is_not_zero(self):
         """The rotating debris chunk's colour is masked by its texels: drawn, not taken for 0 (UVs and vertex colour in
         [0, 1] in the zero test)."""
-        from rc2016.games.rcra import surface as rsurface
+        from nwo.games.rcra import surface as rsurface
         recipe = self._recipe(rsurface.surface, 'material/visualeffect/global/gbl_debris_chunk_rotating_01/'
                                                 'gbl_debris_chunk_rotating_01_unlit.material')
         self.assertIn(rsurface.FORWARD_UNLIT_NOTE, recipe['limitations'])
 
     def test_goo_decal_lights_the_scene_behind(self):
-        from rc2016.games.rcra import surface as rsurface
+        from nwo.games.rcra import surface as rsurface
         recipe = self._recipe(rsurface.forward, 'material/visualeffect/character/enemy/enm_fx_goo_decal_simple_alt/'
                                                 'enm_fx_goo_decal_simple_alt.material')
         self.assertTrue({'lit_background.r', 'background.r'} <= set(recipe['terms']))
         self.assertTrue(any(rsurface.LIT_BACKGROUND_SPECULAR_NOTE in line for line in recipe['limitations']))
 
     def test_forward_alpha_carries_the_draw_alpha(self):
-        from rc2016.games.rcra import surface as rsurface
-        from rc2016.games.rcra.texture import texture_size
+        from nwo.games.rcra import surface as rsurface
+        from nwo.games.rcra.texture import texture_size
         path = 'material/environment/megalopolis/architecture/meg_arch_gc_float/meg_arch_gc_float_glass_01.material'
         key = self.source.resolve(path)[0]
         data = self.source.asset_data(key)

@@ -1,7 +1,7 @@
 import unittest
 
-from rc2016.formats.materials import texture_role
-from rc2016.viewer.textures import _role
+from nwo.formats.materials import texture_role
+from nwo.viewer.textures import _role
 
 
 class SpecularColourRoleTests(unittest.TestCase):

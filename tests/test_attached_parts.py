@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.export.models import ExportOptions, ModelExporter, bind_worlds, root_shift
+from nwo.export.models import ExportOptions, ModelExporter, bind_worlds, root_shift
 
 ROOT = os.environ.get('RC2016_RESEARCH')
 ZURKON = ('6d8653db864e5c7763b2', 'character/enemy/enm_mrs_zurkon/enm_mrs_zurkon.model')

@@ -4,7 +4,7 @@ import struct
 import unittest
 from unittest.mock import patch
 
-from rc2016.levels.scene_lighting import _decode_zone_lights, _decode_zone_spots, load_scene_lighting, parse_light_record, spot_half_angles
+from nwo.levels.scene_lighting import _decode_zone_lights, _decode_zone_spots, load_scene_lighting, parse_light_record, spot_half_angles
 
 
 def dat1(sections):
@@ -203,7 +203,7 @@ class AuthoredLightTests(unittest.TestCase):
                    path='atmosphere/example.atmosphere',
                    ray_direction_game_xyz=[0.0, -1.0, 0.0],
                    runtime_global_light='unobserved')
-        with patch('rc2016.levels.scene_lighting._authored_sun_note', return_value=sun):
+        with patch('nwo.levels.scene_lighting._authored_sun_note', return_value=sun):
             result = load_scene_lighting(archive, ['levels/example/point.zone'])
         self.assertEqual(len(result['lights']), 1)
         note = next(note for note in result['notes'] if note['status'] == 'authored_sun_candidate')

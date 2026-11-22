@@ -6,7 +6,7 @@ The barrel coil of the Batalia battery cannon (`environment/batalia/gameplay/rb_
 |---|---|---|---|---|
 | `wpn_Battery_Cannon_Coil` | `wpn_battery_cannon_coil` | `0x16c18bea` (0 and 1, identical) | 5 `cloud_noise_01` (graph default) | `CB0[99]` = 0, `CB0[139]` = 0 |
 
-The writer binds through the native translator with the policy `BATTERY_CANNON_COIL_SOURCE_PREVIEW` in `SOURCE_PREVIEW_POLICIES` (`rc2016/shaders/bindings.py`). It follows the rule of [gauge-needle-map-o-matic](gauge-needle-map-o-matic.md): it requires the exact graph path and SHA-256, material path and SHA-256, shader id and code SHA-256, every frozen word is a named receipt row, and the preview carries `game_equivalence = False`. The graph's other programs do not bind: `0xf6673be1` is a forward light-loop program and `0x8f221e6e` an exec-masked (discard) variant. Archive-backed checks are in `tests/test_battery_cannon_coil_preview.py`.
+The writer binds through the native translator with the policy `BATTERY_CANNON_COIL_SOURCE_PREVIEW` in `SOURCE_PREVIEW_POLICIES` (`nwo/shaders/bindings.py`). It follows the rule of [gauge-needle-map-o-matic](gauge-needle-map-o-matic.md): it requires the exact graph path and SHA-256, material path and SHA-256, shader id and code SHA-256, every frozen word is a named receipt row, and the preview carries `game_equivalence = False`. The graph's other programs do not bind: `0xf6673be1` is a forward light-loop program and `0x8f221e6e` an exec-masked (discard) variant. Archive-backed checks are in `tests/test_battery_cannon_coil_preview.py`.
 
 ## What is decoded
 

@@ -1,12 +1,12 @@
-"""Reflection-capture volume records of lighting zones (rc2016.levels.volumes; synthetic zones, no game data)."""
+"""Reflection-capture volume records of lighting zones (nwo.levels.volumes; synthetic zones, no game data)."""
 import struct
 import unittest
 
-from rc2016.levels import volumes
+from nwo.levels import volumes
 
 
 def dat1(sections):
-    """A DAT1 container with the given {label: bytes} sections (the layout of rc2016.levels.zone_format.sections)."""
+    """A DAT1 container with the given {label: bytes} sections (the layout of nwo.levels.zone_format.sections)."""
     table = 16 + 12 * len(sections)
     body, entries = b'', []
     for label, payload in sections.items():

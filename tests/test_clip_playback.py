@@ -1,7 +1,7 @@
 """Clip playback shared by the browser's viewport and the picker's: speed, loop or play once, frame steps and keys."""
 import unittest
 
-from rc2016.app.clip_playback import DEFAULT_SPEED, SPEEDS, ClipPlayback, playback_options, sequence_lengths
+from nwo.app.clip_playback import DEFAULT_SPEED, SPEEDS, ClipPlayback, playback_options, sequence_lengths
 
 
 class Recorder:

@@ -1,6 +1,6 @@
 """sRGB textures reach Cycles as linear texels, so Cycles filters decoded values as the PS4 GPU does.
 
-The Blender test runs the pipeline's own image loader (rc2016.pipeline.geometry._image) on a synthetic sRGB DDS and renders a
+The Blender test runs the pipeline's own image loader (nwo.pipeline.geometry._image) on a synthetic sRGB DDS and renders a
 lookup at the corner of four contrasting texels; it needs Blender (RC2016_BLENDER, else the default install path).
 """
 import hashlib
@@ -13,9 +13,9 @@ from pathlib import Path
 
 import numpy as np
 
-from rc2016.formats.linear_png import SRGB8_TO_LINEAR16, SRGB_LINEAR16_CONVERSION, srgb8_linear16, srgb_to_linear
-from rc2016.formats.texture import dds_bytes
-from rc2016.formats.texture_transport import blender_conversion, image_interpretation_identity
+from nwo.formats.linear_png import SRGB8_TO_LINEAR16, SRGB_LINEAR16_CONVERSION, srgb8_linear16, srgb_to_linear
+from nwo.formats.texture import dds_bytes
+from nwo.formats.texture_transport import blender_conversion, image_interpretation_identity
 
 BLENDER = os.environ.get('RC2016_BLENDER') or r'C:\Program Files\Blender Foundation\Blender 5.0\blender.exe'
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +30,7 @@ import numpy as np
 
 job = json.loads(open(sys.argv[sys.argv.index('--') + 1], encoding='utf-8').read())
 sys.path.insert(0, job['root'])
-from rc2016.pipeline import geometry
+from nwo.pipeline import geometry
 scene = bpy.context.scene
 scene.render.engine = 'CYCLES'
 scene.cycles.device = 'CPU'

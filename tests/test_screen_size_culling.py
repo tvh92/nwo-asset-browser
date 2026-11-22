@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from rc2016.levels.viewport import (FOV_DEGREES, frustum_planes, projection_matrix, screen_size_visibility,
+from nwo.levels.viewport import (FOV_DEGREES, frustum_planes, projection_matrix, screen_size_visibility,
                                     sphere_visibility)
 
 IDENTITY = (1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.)

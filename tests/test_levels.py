@@ -3,9 +3,9 @@ import math
 import unittest
 import zlib
 
-from rc2016.levels.panel import drop_uploaded_pixels, restore_native_pixels, zone_names
-from rc2016.levels.scene import core_bounds, hidden_by_default, mirrored, zone_label
-from rc2016.levels.viewport import BASIS, look_vectors, overview_camera, png_bytes, view_matrix
+from nwo.levels.panel import drop_uploaded_pixels, restore_native_pixels, zone_names
+from nwo.levels.scene import core_bounds, hidden_by_default, mirrored, zone_label
+from nwo.levels.viewport import BASIS, look_vectors, overview_camera, png_bytes, view_matrix
 
 
 def apply(m, p):   # column-major 4x4 times point
@@ -108,7 +108,7 @@ class LevelTextureCacheTests(unittest.TestCase):
             loaded.append(path);return dict(path=path,srgb=True,array_size=1,pixels=b'x')
         posted=set()
         first,second={'a.material':entry()},{'b.material':entry(),'c.material':entry()}
-        with patch('rc2016.viewer.textures.load_texture',side_effect=load):
+        with patch('nwo.viewer.textures.load_texture',side_effect=load):
             restore_native_pixels(None,first,posted)
             restore_native_pixels(None,second,posted)
         # sRGB colour (api 0) and linear normal (api 2) are two GL objects from one decode.
@@ -148,7 +148,7 @@ class LevelLoadRobustnessTests(unittest.TestCase):
 
     def test_pixels_dropped_after_one_gl_key_return_for_the_other(self):
         from unittest.mock import patch
-        from rc2016.levels.panel import restore_gl_pixels
+        from nwo.levels.panel import restore_gl_pixels
         pixels = bytes(65537)
         loaded = []
 
@@ -159,7 +159,7 @@ class LevelLoadRobustnessTests(unittest.TestCase):
         first = {'a': dict(_c=dict(stripped, pixels=pixels))}
         second = {'b': dict(_c=dict(stripped), _pick=dict(stripped)), 'c': dict(_pick=dict(stripped))}
         posted = set()
-        with patch('rc2016.viewer.textures.load_texture', side_effect=load):
+        with patch('nwo.viewer.textures.load_texture', side_effect=load):
             restore_gl_pixels(None, first, posted)
             restore_gl_pixels(None, second, posted)
         # _c was posted with pixels; the mipmapped key is uploaded, so b's _c needs none.
@@ -172,7 +172,7 @@ class LevelLoadRobustnessTests(unittest.TestCase):
         self.assertEqual(posted, {('t/shared.texture', True), ('t/shared.texture', False)})
 
     def test_gl_entry_skips_a_texture_without_pixels(self):
-        from rc2016.viewer.viewport import ModelViewport
+        from nwo.viewer.viewport import ModelViewport
         uploads = []
 
         class Fake:
@@ -192,7 +192,7 @@ class LevelLoadRobustnessTests(unittest.TestCase):
         self.assertNotIn('t/a.texture', by_path)   # not cached as failed: pixels may arrive with a later entry
 
     def test_instances_for_a_missing_model_are_ignored(self):
-        from rc2016.levels.viewport import LevelViewport
+        from nwo.levels.viewport import LevelViewport
         view = LevelViewport.__new__(LevelViewport)
         view._models, view._missing_models = {}, set()
         LevelViewport._store_instances(view, 'z', 'm/gone.model', {})
