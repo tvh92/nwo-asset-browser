@@ -2131,8 +2131,9 @@ GLASS_KINDS = {"character_glass": 1, "glass_patterned": 2, "screen": 3, "water":
 
 
 # Rift Apart gbl_arch_glass scales its emission by 4 m_AdaptedLuminance (GlobalWorldCB, offset 204) when a material sets the adapt flag. The
-# game's exposure value is not known, so the preview uses 1.0; it is a preview constant, not game data.
-RCRA_ADAPTED_LUMINANCE = 1.0
+# game's per-frame value is not known; the preview uses the review adapted luminance of the translated programs
+# (games.rcra.surface.REVIEW_ADAPTED_LUMINANCE, 0.18: the game's tone map exposes by 0.18 / L, the review render by 1). Not game data.
+RCRA_ADAPTED_LUMINANCE = 0.18
 
 
 def frame_fade(time, rate):

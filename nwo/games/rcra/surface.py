@@ -79,11 +79,17 @@ class _NotAffine(Unsupported):
     """The forward target is not an affine tint of the scene behind it (forward keeps the scene as an input instead)."""
 
 
-# Engine values a Blender material cannot supply, bound to review values (everything not listed is 0): adapted
-# luminance 1 (as the viewer's RCRA_ADAPTED_LUMINANCE), the pixel centre of a 1920x1080 view for screen-space dither.
-# The exposure a material's emission is scaled by (adapted and measured luminance, the tone-map anchor) is a review value of
-# 1: the review render has no automatic exposure. Not game data.
-REVIEW_VALUES = {'GlobalWorldCBuffer.m_AdaptedLuminance': 1.0, 'GlobalWorldCBuffer.m_ActualLuminance': 1.0,
+# The game's tone map exposes the scene by m_AcesMiddleGray / adapted luminance (RiftApart.exe: the tone-map program
+# multiplies the adaptation buffer's 1 / L by ToneMapCBuffer.m_AcesMiddleGray; its basic variant inlines 0.18). Emission
+# scaled by L / 0.18 (the planet surfaces) therefore shows at its authored value on screen at any exposure. The review
+# render exposes by 1 with no automatic exposure, which is the game's exposure at L = 0.18: the review adapted luminance.
+REVIEW_ADAPTED_LUMINANCE = 0.18
+
+# Engine values a Blender material cannot supply, bound to review values (everything not listed is 0): the adapted
+# luminance above (as the viewer's RCRA_ADAPTED_LUMINANCE), the pixel centre of a 1920x1080 view for screen-space dither.
+# The measured luminance and the tone-map anchor are a review value of 1 (their relation to the exposure is not traced).
+# Not game data.
+REVIEW_VALUES = {'GlobalWorldCBuffer.m_AdaptedLuminance': REVIEW_ADAPTED_LUMINANCE, 'GlobalWorldCBuffer.m_ActualLuminance': 1.0,
                  'GlobalWorldCBuffer.m_ToneMapAnchor': 1.0, 'SV_POSITION.x': 0.5, 'SV_POSITION.y': 0.5,
                  'SV_POSITION.z': 0.5, 'SV_POSITION.w': 1.0, 'GlobalViewportCBuffer.m_Dimensions': 1920.0,
                  'GlobalViewportCBuffer.m_Dimensions+4': 1080.0, 'GlobalViewportCBuffer.m_InvDimensions': 1 / 1920.0,
