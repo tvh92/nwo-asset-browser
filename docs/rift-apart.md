@@ -608,6 +608,16 @@ bi-blends, (`shooter_aim_idle_fwd`,
 `Shooter_Aim_Idle_Fwd_Pitch`) and its `_l090` and `_r090` siblings, so each pitch layer plays over its own idle.
 Grunthor's eye looks are added at 0.5.
 
+**Default first.** The graph order follows the stored values, as the game plays a node no variable has set
+(`animation.default_children`, `graph_reach(..., default_first=True)`): a select's current index first, a random
+node's heaviest variation first, and a blend's child nearest its current value first (the spans holding it, then
+the nearest span centre: a blend child sits at its span's centre). So the first partner, which the viewer's
+**Over**, Play all and the export's layer option start from, is the graph's default state. On the thug, Ratchet and
+Rivet this changes the first partner of 16 to 18 layers each, all toward the default: strafe aims over the forward
+strafe run (`_n`, was `_s`), the smash head aims over the plain smash (was its `_r090` variant), hover-fire aims over
+the idle turn (was turn left), and Rivet's flying-mount layers over level flight (was `fly_down`). The partner sets
+are unchanged.
+
 | Count (skeletal additive clips, by name) | Before (clip hashes shared with a class) | Graph |
 | --- | --- | --- |
 | In a class | 541 of 951 | 806 |
@@ -620,15 +630,16 @@ drives, or one stored as 0 that no variable drives (game code then sets it), pla
 
 `tests/test_layers.py` checks the parser, class fields, bindings, random and select nodes, groups, partners and
 weight on a synthetic animset, the weighted
-`layer_over`, and with `RCRA_GAME` that each thug aim pitch layer plays over its own idle and moves it, and
-Grunthor's eye-look weight of 0.5.
+`layer_over`, the default-first order, and with `RCRA_GAME` that each thug aim pitch layer plays over its own idle
+and moves it, that the thug's strafe aim starts over the forward strafe run, and Grunthor's eye-look weight of 0.5.
 
 ### Not decoded
 
 - Game state: the values game code gives the graph's variables at a moment (a blend's input, a select's index, a
   clip's time, a factor), which random variation plays, and which entry of a clip group the game picks by its tags
   (hit direction, height). These are runtime values, not in the files; `driver_graph` returns the stored values a
-  node plays without them, and playback still uses only the layer partners.
+  node plays without them, and playback uses them only to order the layer partners (default first). A layer whose
+  clip time a variable sets (the head and aim pose strips) still plays through all its frames.
 - The base of a layer whose class holds no absolute clip under the bi-blend (it plays over whatever other classes
   play), the class flag bits above bit 2, the clip node's +40 word, the types of kinds 10 and 12, and the low half
   of the variable rows' word.

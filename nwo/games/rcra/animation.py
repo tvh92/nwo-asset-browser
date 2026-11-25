@@ -522,9 +522,37 @@ def driver_graph(data):
     return classes
 
 
-def graph_reach(graph_class, start=None):
-    """Node offsets reachable from ``start`` (default the class root), depth first in child order. Nodes no path
-    reaches are not played by the class."""
+def _span_distance(value, span):
+    """(distance from ``value`` to the span, distance to its centre): a blend child sits at its span's centre, and
+    its span reaches the neighbours' positions, so several spans hold a value and the nearest centre wins."""
+    low, high = min(span), max(span)
+    outside = 0.0 if low <= value <= high else min(abs(value - low), abs(value - high))
+    return outside, abs(value - (low + high) / 2)
+
+
+def default_children(node):
+    """A node's children, the one it plays from its stored values first: a select's current index, a random node's
+    heaviest variation (stable among equals; equal odds keep their order), a blend's child nearest its current
+    value (spans holding it first, then the nearest span centre). Other kinds keep their order. The stored values are what a node plays
+    when no game variable sets them; which child plays at a moment is game state."""
+    children = list(node['children'])
+    kind = node['kind']
+    if kind == NODE_SELECT and 0 <= node.get('index', 0) < len(children):
+        first = children.pop(node['index'])
+        return [first] + children
+    if kind == NODE_RANDOM and node.get('weights'):
+        weights = node['weights']
+        return [children[k] for k in sorted(range(len(children)), key=lambda k: -weights[k])]
+    if kind == NODE_BLEND_SPACE and node.get('spans'):
+        value = node.get('value', 0.0)
+        return [children[k] for k in sorted(range(len(children)),
+                                            key=lambda k: _span_distance(value, node['spans'][k]))]
+    return children
+
+
+def graph_reach(graph_class, start=None, default_first=False):
+    """Node offsets reachable from ``start`` (default the class root), depth first in child order, or with
+    ``default_first`` in ``default_children`` order. Nodes no path reaches are not played by the class."""
     nodes = graph_class['nodes']
     start = graph_class['root'] if start is None else start
     order, stack, seen = [], [start] if start in nodes else [], set()
@@ -534,7 +562,8 @@ def graph_reach(graph_class, start=None):
             continue
         seen.add(at)
         order.append(at)
-        stack.extend(reversed(nodes[at]['children']))
+        children = default_children(nodes[at]) if default_first else nodes[at]['children']
+        stack.extend(reversed(children))
     return order
 
 

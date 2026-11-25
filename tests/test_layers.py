@@ -149,6 +149,23 @@ class DriverGraphTests(unittest.TestCase):
         found = ra._graph_node(select, 0)
         self.assertEqual((found['children'], found['index']), ([0, 72], 1))
 
+    def test_default_children(self):
+        select = dict(kind=ra.NODE_SELECT, children=[10, 20, 30], index=2)
+        self.assertEqual(ra.default_children(select), [30, 10, 20])                 # the stored index first
+        random = dict(kind=ra.NODE_RANDOM, children=[10, 20, 30], weights=[0.1, 0.8, 0.1])
+        self.assertEqual(ra.default_children(random), [20, 10, 30])                 # heaviest, then stable
+        self.assertEqual(ra.default_children(dict(random, weights=None)), [10, 20, 30])   # equal odds
+        spans = [(-180, -90), (-90, 0), (-45, 45), (0, 90), (90, 180)]               # children at their centres
+        blend = dict(kind=ra.NODE_BLEND_SPACE, children=[1, 2, 3, 4, 5], spans=spans, value=0.0)
+        self.assertEqual(ra.default_children(blend)[0], 3)                          # the span centred on 0
+        self.assertEqual(ra.default_children(dict(blend, value=170.0))[0], 5)
+        pair = dict(kind=ra.NODE_PAIR, children=[7, 8])
+        self.assertEqual(ra.default_children(pair), [7, 8])
+        graph = dict(root=0, nodes={0: select, 10: dict(kind=1, children=[]), 20: dict(kind=1, children=[]),
+                                    30: dict(kind=1, children=[])})
+        self.assertEqual(ra.graph_reach(graph), [0, 10, 20, 30])
+        self.assertEqual(ra.graph_reach(graph, default_first=True), [0, 30, 10, 20])
+
     def test_clip_references_resolve_groups(self):
         asset, (a, l_, b) = graph_animset()
         self.assertEqual(ra.clip_references(asset), {0x1111: [a], 0x2222: [l_], 0x4444: [b], 0x3333: [b]})
@@ -200,6 +217,9 @@ class RealPartnerTests(unittest.TestCase):
                 self.assertGreater(float(np.abs(a - b).max()), 0.1)   # the layer moves the base
                 adds = [i for i, c in enumerate(lib.clips) if c.get('additive')]
                 self.assertGreater(sum(1 for i in adds if lib.layer_partners(i)), 60)   # measured 72 of 160
+                # The strafe blend's stored Strafe_Angle is 0: the aim layer starts over the forward strafe run.
+                strafe = lib.layer_partners(names.index('Shooter_Strafe_Aim_Fwd_thug_brawler'))
+                self.assertEqual(names[strafe[0]], 'shooter_strafe_run_n_thug_brawler')
                 model = 'characters/enemy/enm_grunthor_rcf/enm_grunthor_rcf.model'
                 grunthor = animation_library(source, source.bytes(source.resolve(model)[0])[0], model)
                 eyes = [c['name'] for c in grunthor.clips].index('eyelook_horizontal_enm_grunthor_rcf')

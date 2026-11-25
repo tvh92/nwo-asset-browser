@@ -380,7 +380,9 @@ class RcraAnimationLibrary(AnimationLibrary):
 
         A pair node (``rcra.animation.driver_graph``) adds the additive clips under its child 1 over child 0: the
         partners are the absolute clips under child 0, a clip group's clips included (``clip_references``). The pair
-        deepest in the graph (nearest the layer) comes first, then graph order. Which partner plays at a moment (a
+        deepest in the graph (nearest the layer) comes first, then graph order with each node's default child first
+        (``default_children``: a select's stored index, a random node's heaviest variation, the blend child nearest
+        its stored value), so the first partner is the graph's default state. Which partner plays at a moment (a
         blend space's input, a group's tags) is game state, which is not decoded."""
         entry = self.clips[index]
         if not entry.get('additive') or entry.get('source') == PERFORMANCE:
@@ -426,7 +428,7 @@ class RcraAnimationLibrary(AnimationLibrary):
                 continue
             for graph_class in graph:
                 nodes, depth = graph_class['nodes'], _depths(graph_class)
-                for at in graph_reach(graph_class):
+                for at in graph_reach(graph_class, default_first=True):
                     node = nodes[at]
                     if node['kind'] != NODE_PAIR:
                         continue
@@ -508,7 +510,7 @@ def _depths(graph_class):
 def _graph_clips(graph_class, start, refs, by_asset):
     """The offered clip entries the clip nodes under ``start`` name (a group's clips included), in graph order."""
     clips = {}
-    for at in graph_reach(graph_class, start):
+    for at in graph_reach(graph_class, start, default_first=True):
         node = graph_class['nodes'][at]
         if node['kind'] == NODE_CLIP:
             for asset in refs.get(node['ref'], ()):
