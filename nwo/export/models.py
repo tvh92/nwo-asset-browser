@@ -8,7 +8,9 @@ written. One folder per model::
     <output>/<model>/textures/   material PNGs (and the original DDS textures when asked)
     <output>/<model>/export.json source identity, options, clips and limitations
     <output>/<model>.blend         the Blender scene, when asked: beside the folder, not in it. When it is the only
-                                   format, the model folder is not kept (no export.json either)
+                                   format, the model folder is not kept (no export.json either). With
+                                   ExportOptions.scene it is render-ready: review lighting, HDRI, camera, Render
+                                   Region (the Blender Scene option of a game without the research pipeline)
 
 Coordinates stay native (Y-up, right-handed, game units), which is glTF's own convention; the
 glTF importers in Blender and other tools turn that into their up axis. UVs are the game's (top
@@ -73,13 +75,14 @@ class ExportOptions:
     performances: bool = False       # also the face performances (voice-line lip sync; Rift Apart)
     layer_bases: bool = False        # additive layers over their first partner clip (layer_partners; Rift Apart)
     vertex_animation: bool = False   # bake vertex-program motion over shader time as morph-target frames (Rift Apart)
+    scene: bool = False              # the .blend as a render-ready scene: review lighting, HDRI, camera, Render Region
 
     def key(self):
         d = asdict(self)
         d.pop('blender'); d.pop('skip_existing')
         d['formats'] = sorted(d['formats']); d['clips'] = list(d['clips'])
         for name in ('cinematic', 'cinematic_only', 'borrowed', 'file_suffix', 'root_motion', 'performances',
-                     'layer_bases', 'vertex_animation'):   # absent from keys of exports that predate them
+                     'layer_bases', 'vertex_animation', 'scene'):   # absent from keys of exports that predate them
             if not d[name]:
                 d.pop(name)
         if d['skeleton']:   # the default is left out, so keys of exports that predate the option still match
@@ -1064,7 +1067,8 @@ class ModelExporter:
                     notes.append(f'{len(untranslated)} material(s) keep the glTF material in Blender: {kept}')
                 written.append(materials_json.name)
             written += self._blender_convert(folder, stem, doc, blob, needs_blender, options.blender,
-                                             materials_json=translated[0] if translated else None)
+                                             materials_json=translated[0] if translated else None,
+                                             scene=options.scene)
         if options.source_textures:
             paths = sorted({p for m in maps.values() for p in m['sources'].values()})
             rows = game.export_textures(archive, paths, tex_dir / 'game_dds', {'dds'})
@@ -1402,9 +1406,10 @@ class ModelExporter:
                 lines += ['Ke 1 1 1', 'map_Ke ' + save('emissive', m['emissive'])]
         (folder / f'{stem}.mtl').write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
-    def _blender_convert(self, folder, stem, doc, blob, formats, blender, materials_json=None):
+    def _blender_convert(self, folder, stem, doc, blob, formats, blender, materials_json=None, scene=False):
         """GLB -> FBX/USD/.blend in a background Blender with factory settings and a private user folder; with
-        ``materials_json`` the game's translated materials replace the imported ones."""
+        ``materials_json`` the game's translated materials replace the imported ones; with ``scene`` the .blend gets
+        the review lighting, camera and Render Region (blender_convert.py --scene)."""
         with tempfile.TemporaryDirectory(prefix='rcps4-export-') as tmp:
             glb = Path(tmp) / f'{stem}.glb'
             tag_model(doc, stem)
@@ -1421,6 +1426,8 @@ class ModelExporter:
                        '--glb', str(glb)] + [arg for f, path in targets.items() for arg in (f'--{f}', str(path))]
             if materials_json is not None:
                 command += ['--materials', str(materials_json)]
+            if scene and 'blend' in finals:
+                command.append('--scene')
             env = os.environ.copy()
             env['BLENDER_USER_RESOURCES'] = str(Path(tmp) / 'user')
             env['PYTHONPATH'] = str(Path(__file__).resolve().parents[2]) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
@@ -1431,7 +1438,7 @@ class ModelExporter:
             output = []
             for line in self.process.stdout:
                 output.append(line.rstrip())
-                if line.startswith(('EXPORTED', 'TRANSLATED', 'VALIDATED', 'Error', 'Traceback')):
+                if line.startswith(('EXPORTED', 'TRANSLATED', 'SCENE', 'VALIDATED', 'Error', 'Traceback')):
                     self.log('  ' + line.rstrip())
             code = self.process.wait()
             self.process.stdout.close()

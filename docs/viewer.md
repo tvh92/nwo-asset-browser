@@ -635,6 +635,8 @@ clip**, Rift Apart only, a layer with a partner is written over its first partne
 
 **Blender conversion** uses factory settings, `disable_bone_shape=True` (otherwise FBX/USD export the importer's bone-display icosphere as a mesh) and a private user folder. The `.blend` gets `apply_new_scene_defaults(configure_world=False, configure_gpu=False)` (render defaults only: no HDRI world, no OptiX device setup) and packed images. These files carry glTF Principled materials, not the RC PS4 Deferred BRDF; use the research build for that.
 
+**Blender scene without the research pipeline:** for a game without the research pipeline (Rift Apart), Options -> Blender Scene (.blend) runs this export with the `.blend` as its only format and `ExportOptions.scene` (`blender_convert.py --scene`). The `.blend` then gets `apply_new_scene_defaults` with the shared review lighting (the HDRI world, packed and checked against the shared EXR) and the OptiX GPU setup, one camera at the reference angle dollied so the visible meshes fill the frame (`frame_camera_zoom`), and the Render Region around them (`fit_render_region`). Textures are always included and the game DDS files are not written. The reopen check (`--validate`) also checks the recorded lighting (`check_shared_lighting`). The group `.blend` and the game tone curve belong to the research build and stay greyed out.
+
 **Materials** follow the viewer's per-graph `_g` reading (`material_texture_paths`: grey, skin or coloured, spec/gloss scales, self-lit K and mask):
 
 - The game's diffuse and F0/gloss are converted per pixel to metal/roughness with the Khronos specular-glossiness conversion; roughness = 2^(-2.75 x gloss).
@@ -653,7 +655,7 @@ clip**, Rift Apart only, a layer with a partner is written over its first partne
 
 ## Research Blender build and viewer rules
 
-Options -> Blender Scene (.blend) selects the research Blender build (`PipelineBatchRunner` with `--blend-only`; backend "Full archive pipeline"), which runs the pipeline in [pipeline](pipeline.md) and needs Blender. A run keeps only the .blend files and deletes the rest of the pipeline's output (reports, meshes, textures, caches); every run then rebuilds, since nothing is left to reuse. Portable exports (folders with `export.json`) are left alone. Skeleton and Include animations still apply: off passes `--no-skeleton` or `--no-animations`. When a run fails, the cleanup still runs and keeps `reports/logs/` (the pipeline log and the Blender log of each failed model), and the main window's log names that folder.
+For a game with the research pipeline (R&C 2016), Options -> Blender Scene (.blend) selects the research Blender build (`PipelineBatchRunner` with `--blend-only`; backend "Full archive pipeline"), which runs the pipeline in [pipeline](pipeline.md) and needs Blender. A run keeps only the .blend files and deletes the rest of the pipeline's output (reports, meshes, textures, caches); every run then rebuilds, since nothing is left to reuse. Portable exports (folders with `export.json`) are left alone. Skeleton and Include animations still apply: off passes `--no-skeleton` or `--no-animations`. When a run fails, the cleanup still runs and keeps `reports/logs/` (the pipeline log and the Blender log of each failed model), and the main window's log names that folder.
 
 The research build consumes the viewer's material reading:
 

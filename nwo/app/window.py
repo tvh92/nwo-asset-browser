@@ -57,9 +57,10 @@ HELP = {
     "cache": ("The app's disk cache: shader translations, decoded textures, thumbnails, archive indexes and level data. "
               "Clear cache deletes all of it; everything is rebuilt when needed, so models and thumbnails load slowly at "
               "first. Settings are kept."),
-    "blend_scene": ("Writes one validated Blender scene (.blend) per model: the RC PS4 game shader, the shared review "
-                    "lighting, the HDRI, the camera and render region framing for quick rendering, and every animation "
-                    "as an action. Slow, and needs Blender.\n\nWhile it is on, the other export formats are not written. "
+    "blend_scene": ("Writes one validated Blender scene (.blend) per model: the game's materials (R&C 2016: the RC PS4 "
+                    "game shader; Rift Apart: its translated material programs), the shared review lighting, the HDRI, "
+                    "the camera and render region framing for quick rendering, and every animation as an action. "
+                    "Slow, and needs Blender.\n\nWhile it is on, the other export formats are not written. "
                     "Skeleton and animations can still be left out."),
     "group": ("Blender Scene only. After the selected models are built, they are also placed side by side "
               "in one .blend under groups/, with one camera and one Render Region framing them all. Each model keeps "
@@ -528,7 +529,7 @@ class AssetBrowserApp:
         self.blend_check = ttk.Checkbutton(formats, text="Blender Scene (.blend) (includes local setup for quick rendering)",
                                            variable=self.blend_scene_var)
         self.blend_check.grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
-        self._gate("pipeline", HELP["blend_scene"], self.blend_check, None)   # its state follows _options_changed
+        self._tip(HELP["blend_scene"], self.blend_check)   # its state follows _options_changed
         self.group_check = ttk.Checkbutton(formats, text="Also put the selected models into one .blend, framed by one camera",
                                            variable=self.group_blend_var)
         self.group_check.grid(row=1, column=0, columnspan=3, sticky="w", padx=(22, 0), pady=(4, 2))
@@ -763,23 +764,25 @@ class AssetBrowserApp:
         return tuple(key for key, variable in self.export_format_vars.items() if variable.get())
 
     def _options_changed(self) -> None:
-        # The Blender scene is the research pipeline; Transform only ignores every export option.
+        # The Blender scene is the research pipeline for a game that has one, else the portable .blend as a
+        # render-ready scene (ExportOptions.scene); Transform only ignores every export option.
         # A game without the pipeline or animation capability (nwo.games) greys those options out.
         pipeline = self._pipeline_backend()
-        research = self._game_has("pipeline")
-        blend = pipeline and research and self.blend_scene_var.get()
+        blend = pipeline and self.blend_scene_var.get()
+        research_blend = blend and self._game_has("pipeline")
         # The Blender scene replaces the portable formats, so their boxes are greyed out while it is on.
         for box in self.format_checks:
             box.configure(state="disabled" if blend else "normal")
-        self.blend_check.configure(state="normal" if pipeline and research else "disabled")
-        group_state = "normal" if blend else "disabled"
+        self.blend_check.configure(state="normal" if pipeline else "disabled")
+        # The one-.blend group and the captured game tone curve are research-pipeline (R&C 2016) options.
+        group_state = "normal" if research_blend else "disabled"
         self.group_check.configure(state=group_state)
         self.group_name_entry.configure(state=group_state)
         self.game_tonemap_check.configure(state=group_state)
-        self.group_name_label.configure(style="Disabled.TLabel" if blend else "TLabel")
+        self.group_name_label.configure(style="TLabel" if research_blend else "Disabled.TLabel")
         # Without a skeleton there is nothing to animate, so the animation choice is switched off.
         self.skeleton_check.configure(state="normal" if pipeline else "disabled")
-        self.attachments_check.configure(state="normal" if pipeline and not blend and self.export_skeleton_var.get() else "disabled")
+        self.attachments_check.configure(state="normal" if pipeline and not research_blend and self.export_skeleton_var.get() else "disabled")
         animation = pipeline and self._game_has("animation")
         self.animation_check.configure(state="normal" if animation and self.export_skeleton_var.get() else "disabled")
         self.cutscene_check.configure(state="normal" if animation and self.export_skeleton_var.get() and self.export_animations_var.get() else "disabled")
@@ -787,15 +790,16 @@ class AssetBrowserApp:
         self.root_motion_check.configure(state="normal" if animated and self._game_has("root_motion") else "disabled")
         self.faces_check.configure(state="normal" if animated and self._game_has("face_performances") else "disabled")
         self.layers_check.configure(state="normal" if animated and self._game_has("layer_partners") else "disabled")
-        self.vertex_check.configure(state="normal" if pipeline and not blend and self._game_has("vertex_animation") else "disabled")
+        self.vertex_check.configure(state="normal" if pipeline and not research_blend and self._game_has("vertex_animation") else "disabled")
         self.picker_check.configure(state="normal" if animated else "disabled")
         self.picker_spin.configure(state="normal" if animated and self.picker_var.get() else "disabled")
         self.picker_unit.configure(style="TLabel" if animated and self.picker_var.get() else "Disabled.TLabel")
-        # Textures, the original .dds files and the LOD level are only written by the portable export.
+        # The Blender scene always packs its textures and never writes the .dds files; the LOD level is only
+        # chosen by the portable export (which also makes a game's scene without the research pipeline).
         self.texture_check.configure(state="disabled" if blend else "normal")
         self.dds_check.configure(state="disabled" if blend else "normal")
-        self.lod_label.configure(style="Disabled.TLabel" if blend else "TLabel")
-        self.lod_box.configure(state="disabled" if blend else "readonly")
+        self.lod_label.configure(style="Disabled.TLabel" if research_blend else "TLabel")
+        self.lod_box.configure(state="disabled" if research_blend else "readonly")
         if not pipeline:
             text = "Transform only: animation data from loose files"
         else:
@@ -812,16 +816,24 @@ class AssetBrowserApp:
                     parts.append("root motion")
             else:
                 parts.append("no skeleton or animations")
-            if not blend and self.export_lod_var.get() != "Highest":
+            if not research_blend and self.export_lod_var.get() != "Highest":
                 parts.append(f"{self.export_lod_var.get()} LOD")
             text = "Export: " + " · ".join(parts)
         self.export_summary_var.set(text)
 
+    def _portable_scene(self) -> bool:
+        """The Blender Scene option of a game without the research pipeline: the portable export writes the .blend
+        alone, as a render-ready scene (ExportOptions.scene)."""
+        return self._pipeline_backend() and self.blend_scene_var.get() and not self._game_has("pipeline")
+
     def export_options(self):
         from nwo.export.models import ExportOptions
         animations = self.export_animations_var.get() and self._game_has("animation")
-        return ExportOptions(formats=self._export_formats(), textures=self.export_textures_var.get(),
-                             source_textures=self.export_dds_var.get(), animations="all" if animations else "none",
+        scene = self._portable_scene()
+        return ExportOptions(formats=("blend",) if scene else self._export_formats(),
+                             textures=scene or self.export_textures_var.get(),
+                             source_textures=not scene and self.export_dds_var.get(), scene=scene,
+                             animations="all" if animations else "none",
                              skeleton=self.export_skeleton_var.get(), attachments=self.export_attachments_var.get(),
                              lod=self.export_lod_var.get(), blender=self.blender_var.get().strip(),
                              skip_existing=True, cinematic=animations and self.export_cutscenes_var.get(),
@@ -1477,7 +1489,8 @@ class AssetBrowserApp:
             self.messagebox.showerror("Python interpreter", f"File not found:\n{interpreter}")
             return
         pipeline_mode = self._pipeline_backend()
-        blend_mode = pipeline_mode and self.blend_scene_var.get()
+        # The research pipeline's Blender scene; a game without that pipeline makes its scene by the export below.
+        blend_mode = pipeline_mode and self.blend_scene_var.get() and self._game_has("pipeline")
         export_mode = pipeline_mode and not blend_mode
         if export_mode:
             options = self.export_options()
@@ -1485,10 +1498,10 @@ class AssetBrowserApp:
                 self.messagebox.showinfo("Export formats", "Choose at least one export format under Options….")
                 self.show_options()
                 return
-            needs_blender = [key for key in options.formats if key in ("fbx", "usd")]
+            needs_blender = [key for key in options.formats if key in ("fbx", "usd", "blend")]
             if needs_blender and not Path(options.blender or "\0").is_file():
-                self.messagebox.showerror("Blender needed", "FBX and USD are converted by Blender. Set its "
-                                          "location under Options…, or untick those formats.")
+                self.messagebox.showerror("Blender needed", "FBX, USD and the Blender scene are made by Blender. Set "
+                                          "its location under Options…, or untick those formats.")
                 self.show_options()
                 return
         if blend_mode:   # checked before the clips are read, so a fix under Options… does not cost the picker's ticks

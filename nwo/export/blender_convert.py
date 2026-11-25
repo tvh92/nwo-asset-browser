@@ -1,13 +1,19 @@
 """Blender side of nwo.export.models: import one .glb, write FBX / USD / .blend. Run by Blender only.
 
     blender --background --factory-startup --python blender_convert.py -- --glb in.glb [--fbx out.fbx] [--usd out.usdc] [--blend out.blend]
-        [--materials rcra_materials.json]
+        [--materials rcra_materials.json] [--scene]
     blender --background --factory-startup --python blender_convert.py -- --validate file.blend
 
 ``--materials`` (nwo.games.rcra.blender_export) replaces each named imported material with the game's translated
 material (nwo.export.rcra_blender) before any file is written, and draws fur shells in the .blend only
 (build_fur_shells, after FBX and USD are written; the .blend's Cycles transparent bounces are raised to cross them). ``--validate`` reopens a written .blend and checks
-every translated material (its surface group, the BRDF group and its images); it exits non-zero on a problem.
+every translated material (its surface group, the BRDF group and its images) and, in a file that records the shared
+review lighting, that lighting (scene_defaults.check_shared_lighting); it exits non-zero on a problem.
+
+``--scene`` makes the .blend a ready-to-render scene, as the research pipeline's Blender Scene: the shared review
+lighting with its HDRI world (assets/lighting/shared_lighting.json, packed), the Cycles OptiX GPU render setup, and
+one camera at the reference angle dollied so the model fills the frame, with the Render Region cropped around it
+(scene_defaults.frame_camera_zoom, fit_render_region). Without it the .blend gets only the plain defaults below.
 
 Factory settings, nothing saved to the user's preferences. The .blend gets the repository's
 plain scene/render defaults (nwo.pipeline.scene_defaults.apply_new_scene_defaults, without the HDRI world or OptiX GPU setup) and packs its images.
@@ -27,6 +33,7 @@ args.add_argument('--validate')
 args.add_argument('--fbx')
 args.add_argument('--usd')
 args.add_argument('--blend')
+args.add_argument('--scene', action='store_true')
 args = args.parse_args(sys.argv[sys.argv.index('--') + 1:])
 
 if args.validate:
@@ -34,6 +41,9 @@ if args.validate:
     bpy.ops.wm.open_mainfile(filepath=args.validate)
     translated = [m for m in bpy.data.materials if is_translated(m)]
     problems = [p for m in translated for p in validate_material(m)]
+    if 'shared_lighting' in bpy.context.scene:
+        from nwo.pipeline.scene_defaults import check_shared_lighting
+        problems += check_shared_lighting(bpy.context.scene)
     for problem in problems:
         print('PROBLEM', problem, flush=True)
     if problems:
@@ -83,9 +93,10 @@ if args.usd:
     bpy.ops.wm.usd_export(filepath=args.usd, export_textures_mode='NEW', export_animation=bool(actions))
     print('EXPORTED', args.usd, flush=True)
 if args.blend:
-    from nwo.pipeline.scene_defaults import apply_new_scene_defaults
-    # Plain scene/render defaults only: no shared-lighting world (HDRI load) and no OptiX device setup.
-    apply_new_scene_defaults(bpy.context.scene, configure_world=False, configure_gpu=False)
+    from nwo.pipeline import scene_defaults
+    scene = bpy.context.scene
+    # Plain scene/render defaults only, unless --scene: then the shared-lighting world and the OptiX device setup too.
+    scene_defaults.apply_new_scene_defaults(scene, configure_world=args.scene, configure_gpu=args.scene)
     # Fur shells go into the .blend only, after FBX and USD are written: those formats keep no coverage alpha.
     shell_layers = build_fur_shells(entries) if entries else 0
     cycles = getattr(bpy.context.scene, 'cycles', None)
@@ -95,6 +106,31 @@ if args.blend:
         if obj.type == 'ARMATURE':
             obj.hide_set(True)
             obj.hide_render = True
-    bpy.ops.file.pack_all()
+    if args.scene:
+        # One camera at the reference angle, dollied so the visible meshes (at the current frame) fill the frame,
+        # then the Render Region around them, as the research pipeline frames its scenes.
+        points = scene_defaults.visible_mesh_points(scene)
+        if not len(points):
+            raise RuntimeError('No visible mesh to frame the review camera on')
+        lo, hi = points.min(axis=0), points.max(axis=0)
+        radius = max(float(((hi - lo) ** 2).sum() ** 0.5) / 2, .05)
+        camera_data = bpy.data.cameras.new('Review camera')
+        camera_data.type, camera_data.lens = 'PERSP', 50
+        camera_data.clip_start, camera_data.clip_end = max(.0001, radius / 10000), radius * 100
+        camera = bpy.data.objects.new('Review camera', camera_data)
+        scene.collection.objects.link(camera)
+        scene.camera = camera
+        scene_defaults.frame_camera_zoom(scene, points)
+        scene_defaults.fit_render_region(scene)
+        scene_defaults.fit_render_size(scene)
+        for screen in bpy.data.screens:   # open through the camera
+            for area in screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.spaces.active.lock_camera = True
+                    area.spaces.active.region_3d.view_perspective = 'CAMERA'
+        scene_defaults.pack_scene_images(scene)   # packs the HDRI too, checked against the shared EXR
+        print('SCENE', 'review lighting, camera and render region', flush=True)
+    else:
+        bpy.ops.file.pack_all()
     bpy.ops.wm.save_as_mainfile(filepath=args.blend, compress=True)
     print('EXPORTED', args.blend, flush=True)

@@ -34,8 +34,8 @@ Rift Apart's capabilities are `models`, `textures`, `export`, `animation`, `root
   - Browsing.
   - The 3D model view, with skeletal [animation](#animation) playback, optionally with the clip's [root motion](#root-motion), and the voice lines' [face performances](#face-performances). The Shaded mode draws each material's own translated program where it translates ([In the viewer](#in-the-viewer)), and the labelled preview elsewhere.
   - The Textures tab.
-  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances), and blend shapes as morph targets. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)).
-- **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart". Rift Apart has no Flash UI to show there ([User interface](#user-interface)).
+  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances), and blend shapes as morph targets. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)). Options -> Blender Scene (.blend) writes the `.blend` alone as a render-ready scene: the shared review lighting and HDRI, a framing camera and the Render Region ([viewer](viewer.md#portable-export-extract-selected)). The lighting is review lighting, not the game's.
+- **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene's group `.blend` and game tone curve (R&C 2016 captures), and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart". Rift Apart has no Flash UI to show there ([User interface](#user-interface)).
 - **Visual effects:** the model view draws the single-model nodes of the effects a model's actors start, such as the weapons vendor's holo logo ([Effects in the viewer](#effects-in-the-viewer)). Every other node type, and the exports, leave effects out.
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
@@ -832,7 +832,7 @@ The one decoded graph. 44 materials use it, among them the Nefarious trooper and
 - **Lighting:** the light list, shadows, probe and screen-space reflections and fog are the viewer rig. The specular lobe is the shared glass lobe, not the program's own visibility term (its Fresnel has F90 = 1).
 - **Frame:** the soft depth fade is 0 (no scene depth); the vertex alpha, the alpha override and the dissolve discard are 1, 0 and off; the normal frame comes from screen derivatives, not the vertex tangent.
 - **Exposure:** `m_AdaptedLuminance` is the engine's adapted (eye-adaptation) luminance. It is a per-frame value: the name occurs only in the programs' reflection, and no file or engine table holds it. The preview uses the review value 0.18 (`RCRA_ADAPTED_LUMINANCE`, the same as the translated programs', see [Exposure](#exposure)), so a material with a large `emission` (the trooper and swarmer domes: 15) still draws brighter than a lit surface.
-- **Blender:** there is no Blender rule; the Blender scene is not available for Rift Apart.
+- **Blender:** the preview has no Blender rule; Blender exports use the translated program ([Blender materials](#blender-materials)).
 
 **Translated program.** The automatic path (see [Material graph shaders](#material-graph-shaders)) reproduces these equations: on the trooper dome, with the real material values and textures, its alpha and emissive colour match them to float precision (`tests/test_rcra_shaders.py`). The translation also shows the terms the preview leaves out:
 - the material and vertex alpha (`TEXCOORD.w`) and the per-draw alpha override (`MatDrawCB.m_AlphaOverrides`)
@@ -1447,7 +1447,7 @@ A blended material whose alpha makes the plain instance draw skip it ([Material 
 
 ### Checks
 
-Export check: each export builds the `.blend` as a candidate, reopens it in a second Blender (`blender_convert.py --validate`), then moves it into place.
+Export check: each export builds the `.blend` as a candidate, reopens it in a second Blender (`blender_convert.py --validate`), then moves it into place. For a Blender Scene the check also compares the world, HDRI and colour management with the recorded review lighting.
 
 `python -m nwo.games.rcra.blender_check --game <install> --blender <blender.exe> --output-root <folder> <material> ...` bakes every surface output of the emitted node tree in Cycles. It compares the bake, texel by texel, with the recipe evaluated by the translator on the same textures:
 - **Window:** a UV window small enough that the bake's sub-pixel jitter stays below a 32nd of a texel, so a material can tile its UV up to 8 times. With the old quarter-texel window, a triplanar rock that tiles ×2 differed by 0.11 at sharp texels.
