@@ -7,6 +7,7 @@ written. One folder per model::
     <output>/<model>/<model>.glb | .gltf + .bin | .obj + .mtl | .fbx | .usdc
     <output>/<model>/textures/   material PNGs (and the original DDS textures when asked)
     <output>/<model>/export.json source identity, options, clips and limitations
+    <output>/<model>.blend         the Blender scene, when asked: beside the folder, not in it
 
 Coordinates stay native (Y-up, right-handed, game units), which is glTF's own convention; the
 glTF importers in Blender and other tools turn that into their up axis. UVs are the game's (top
@@ -1401,7 +1402,10 @@ class ModelExporter:
             glb = Path(tmp) / f'{stem}.glb'
             tag_model(doc, stem)
             write_glb(glb, doc, blob)
-            finals = {f: folder / f'{stem}{FORMATS[f][1]}' for f in formats}
+            # The .blend sits in the output root beside the model folder, named after it (a folder with a
+            # disambiguating model-ID suffix gives a distinct name, so two models with one stem do not collide).
+            finals = {f: (folder.parent / f'{folder.name}.blend' if f == 'blend' else folder / f'{stem}{FORMATS[f][1]}')
+                      for f in formats}
             # A .blend with translated materials is built as a candidate, reopened and validated in a second Blender,
             # then moved into place.
             candidate = materials_json is not None and 'blend' in finals
@@ -1444,7 +1448,8 @@ class ModelExporter:
                 if check.returncode:
                     raise RuntimeError('The .blend failed its reopen check:\n' + '\n'.join(lines[-15:]))
                 os.replace(targets['blend'], finals['blend'])
-            return [p.name for p in finals.values()]
+            # Names as export.json lists them, relative to the model folder (the .blend is '../<name>.blend').
+            return [os.path.relpath(p, folder).replace(os.sep, '/') for p in finals.values()]
 
     def cancel(self):
         process = self.process

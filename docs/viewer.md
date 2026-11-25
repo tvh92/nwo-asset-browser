@@ -619,7 +619,8 @@ One folder per model in the output root:
 | Output | How |
 |---|---|
 | `<model>.glb` (default), `<model>.gltf` + `.bin`, `<model>.obj` + `.mtl` | Written directly |
-| `<model>.fbx`, `.usdc`, `.blend` | Converted from the GLB by `nwo/export/blender_convert.py` in a background Blender |
+| `<model>.fbx`, `.usdc` | Converted from the GLB by `nwo/export/blender_convert.py` in a background Blender |
+| `<model>.blend` | The same conversion, written beside the model folder in the output root (`<output>/<model>.blend`) |
 | `textures/` | Material PNGs: `_basecolor`, `_metal_rough`, `_normal`, `_emissive` (OBJ also `_roughness`/`_metallic`); optionally `textures/game_dds/` with the original DDS. Only material maps of polygon-used slots are written |
 | `export.json` | Source ID/path/hash, options, files, clips (and skipped clips with reasons), per-material texture sources and notes |
 
