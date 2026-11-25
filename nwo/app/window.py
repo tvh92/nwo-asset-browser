@@ -60,8 +60,10 @@ HELP = {
     "blend_scene": ("Writes one validated Blender scene (.blend) per model: the game's materials (R&C 2016: the RC PS4 "
                     "game shader; Rift Apart: its translated material programs), the shared review lighting, the HDRI, "
                     "the camera and render region framing for quick rendering, and every animation as an action. "
-                    "Slow, and needs Blender.\n\nWhile it is on, the other export formats are not written. "
-                    "Skeleton and animations can still be left out."),
+                    "Slow, and needs Blender.\n\nRift Apart: while the 3D view's lighting is Game atmosphere, the scene "
+                    "is lit by that atmosphere instead (its key light and probe) and shows through the game's own "
+                    "display transform, exposed by the game's metering of the camera's frame.\n\nWhile it is on, the "
+                    "other export formats are not written. Skeleton and animations can still be left out."),
     "group": ("Blender Scene only. After the selected models are built, they are also placed side by side "
               "in one .blend under groups/, with one camera and one Render Region framing them all. Each model keeps "
               "its own .blend as well."),
@@ -804,6 +806,9 @@ class AssetBrowserApp:
             text = "Transform only: animation data from loose files"
         else:
             parts = ["Blender Scene (.blend)"] if blend else []
+            atmosphere = self._portable_scene() and getattr(self, "browser", None) and self.browser.atmosphere_path()
+            if atmosphere:
+                parts.append(f"lit by {Path(atmosphere).stem}")
             if not blend:
                 from nwo.export.models import FORMATS
                 formats = [FORMATS[key][1] for key in self._export_formats()] or ["no format chosen"]
@@ -833,6 +838,7 @@ class AssetBrowserApp:
         return ExportOptions(formats=("blend",) if scene else self._export_formats(),
                              textures=scene or self.export_textures_var.get(),
                              source_textures=not scene and self.export_dds_var.get(), scene=scene,
+                             atmosphere=self.browser.atmosphere_path() if scene else "",
                              animations="all" if animations else "none",
                              skeleton=self.export_skeleton_var.get(), attachments=self.export_attachments_var.get(),
                              lod=self.export_lod_var.get(), blender=self.blender_var.get().strip(),
@@ -884,6 +890,7 @@ class AssetBrowserApp:
             self.asset_type_var.set("Model")
             self.browser.show_asset_type("Model")
         self.browser.use_game_tonemap(game.display_tonemap)
+        self.browser.use_game_atmospheres(game.has("atmospheres"))
         if not game.has("decoded_shading") and self.shading_var.get() != "All":
             self.shading_var.set("All")
         self._options_changed()

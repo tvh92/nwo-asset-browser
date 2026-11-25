@@ -262,8 +262,8 @@ class LevelViewport(ModelViewport):
     RIG_FIXED_TO_WORLD = True
     # Level atmosphere: the atmosphere zone's reflection probe as ambient and its sun as the key
     # (nwo.levels.probe_lighting); opt-in, review preview.
-    LIGHTINGS = ModelViewport.LIGHTINGS + ("Level atmosphere",)
-    ENVIRONMENT_LIGHTINGS = ModelViewport.ENVIRONMENT_LIGHTINGS + ("Level atmosphere",)
+    LIGHTINGS = ("Viewer rig", "Shared HDRI", "Level atmosphere")   # not the model viewer's Rift Apart "Game atmosphere"
+    ENVIRONMENT_LIGHTINGS = ("Shared HDRI", "Level atmosphere")
     # The game's captured display chain (nwo.levels.display) with the atmosphere's grade, for the Level atmosphere
     # lighting only: another lighting falls back to the ACES fit.
     GAME_TONEMAP_NEEDS_ENVIRONMENT = True

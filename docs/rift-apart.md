@@ -34,7 +34,7 @@ Rift Apart's capabilities are `models`, `textures`, `export`, `animation`, `root
   - Browsing.
   - The 3D model view, with skeletal [animation](#animation) playback, optionally with the clip's [root motion](#root-motion), and the voice lines' [face performances](#face-performances). The Shaded mode draws each material's own translated program where it translates ([In the viewer](#in-the-viewer)), and the labelled preview elsewhere.
   - The Textures tab.
-  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances), and blend shapes as morph targets. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)). Options -> Blender Scene (.blend) writes the `.blend` alone as a render-ready scene: the shared review lighting and HDRI, a framing camera and the Render Region ([viewer](viewer.md#portable-export-extract-selected)). The lighting is review lighting, not the game's.
+  - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances), and blend shapes as morph targets. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)). Options -> Blender Scene (.blend) writes the `.blend` alone as a render-ready scene: the shared review lighting and HDRI, a framing camera and the Render Region ([viewer](viewer.md#portable-export-extract-selected)). The lighting is review lighting, or a level's atmosphere while the 3D view shows Game atmosphere ([Atmosphere lighting](#atmosphere-lighting)).
 - **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene's group `.blend` and game tone curve (R&C 2016 captures), and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart". Rift Apart has no Flash UI to show there ([User interface](#user-interface)).
 - **Visual effects:** the model view draws the single-model nodes of the effects a model's actors start, such as the weapons vendor's holo logo ([Effects in the viewer](#effects-in-the-viewer)). Every other node type, and the exports, leave effects out.
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
@@ -1170,9 +1170,9 @@ The review render exposes by 1 and has no automatic exposure, which is the game'
 
 The game's lookup is built by `CS_ToneMapCreateLookup` in `RiftApart.exe`: a 32³ table over linear Rec.709 at 2^(t × 16/31 − 10.5), t = 0 to 31 per axis. Each entry goes through ACES 1.0: Rec.709 to XYZ to AP0 without a D65 to D60 adaptation, the glow and red-modifier terms, AP1, RRT saturation 0.96, the C5 segmented spline, the 48-nit C9 output spline, dim surround 0.9811, output saturation 0.93, D60 to D65, Rec.709 and the sRGB encode. The tone map multiplies the scene by `m_AcesMiddleGray / L` ([Exposure](#exposure)) and reads that table trilinearly at log₂(x) / 16 + 0.65625. Its colour-correction variants then mix in the atmosphere's colour-correction LUT.
 
-`nwo/games/rcra/display.py` is the port. Translated by `nwo.shaders.sm5` and evaluated at random thread ids, the exe's program matches it to about 1e-5. The model viewer's **Game (Rift Apart)** tonemap (`uTonemap` 3, `riftApartDisplay` in `shading.LIGHTING`) samples the same table from the shared display texture, and on a Ratchet frame under the Shared HDRI it agrees with the CPU port to within 8-bit rounding. It is the default display for Rift Apart in the model browser, the clip viewer and the gallery thumbnails (`Game.display_tonemap`). The exposure is the viewer's (the lighting's, 1 for the rig), not the game's auto-exposure.
+`nwo/games/rcra/display.py` is the port. Translated by `nwo.shaders.sm5` and evaluated at random thread ids, the exe's program matches it to about 1e-5. The model viewer's **Game (Rift Apart)** tonemap (`uTonemap` 3, `riftApartDisplay` in `shading.LIGHTING`) samples the same table from the shared display texture, and on a Ratchet frame under the Shared HDRI it agrees with the CPU port to within 8-bit rounding. It is the default display for Rift Apart in the model browser, the clip viewer and the gallery thumbnails (`Game.display_tonemap`). The exposure is the viewer's (the lighting's, 1 for the rig), except under the Game atmosphere lighting, which meters the frame as the game does ([Atmosphere lighting](#atmosphere-lighting)).
 
-Not part of it: the atmosphere colour-correction LUT (a model has no atmosphere), auto-exposure, lens flares, vignette and film grain. Bloom is drawn ([Bloom](#bloom)).
+Not part of it: the atmosphere colour-correction LUT, lens flares, vignette and film grain. Bloom is drawn ([Bloom](#bloom)).
 
 #### Bloom
 
@@ -1190,6 +1190,31 @@ The bloom programs are SM5 pixel programs in `RiftApart.exe`. The exe's program 
 - **Gate:** 1/L is the viewer exposure / 0.18, since the display exposure is `m_AcesMiddleGray / L`.
 - **Sizes:** levels halve with a floor, and the programs' uv scale for odd sizes (2 × destination / source) is taken as 1.
 - **Not drawn:** lens dirt (`BloomDirtiness`, 0 in the default atmosphere), lens flares and the LatLong variants.
+
+#### Atmosphere lighting
+
+A level's lighting lives in its `.atmosphere` assets (95 in the install; Corson V is `atm_malinon_*`, Megalopolis, and `atm_neo_nefarious_*`, Nefarious City). The asset is 36 bytes of toc header and a DAT1 whose section `0x02F06D4E` is the built parameter block (loaded at `0x140fae710`, `kBuiltAtmosphereBaseVersion` 229). Its fields follow the order of the exe's reflected type records (`AtmosphereDef`, `EnvLightingDef`, `ToneMapSettingsDef`); references are 24 bytes (a u64 asset id, 12 zero bytes, the tag `0x95A3A227`). `nwo/games/rcra/atmosphere.py` reads:
+
+| Offset | Field | Megalopolis day |
+| --- | --- | --- |
+| 64 (reference) | SkyBoxCubeMap | `malinon_skybox_day_006` |
+| 88 (reference) | FillLightCubeMap, the default env probe | `malinon_intro/envprobes_day/0xe54a425db9195aba` |
+| 112 to 120 | KeyLightColor | (1, 1, 0.831) |
+| 124 | KeyLightIntensity | 6 |
+| 128, 132 | KeyLightAzimuth, KeyLightElevation (degrees) | 220, 45 |
+| 636, 640, 644 | AdaptationAnchor, AdaptationRange, AdaptationBias (EV) | 12, 10, 0 |
+| 768 (reference) | ColorCorrection SourcePath | `lut_megalopolis_warm9` |
+
+The model browser's **Game atmosphere** lighting, with an **Atmosphere** picker (default `atm_malinon_day`), lights a model with one of them:
+
+- **Key light:** KeyLightColor × KeyLightIntensity is the apply programs' `LIGHT`. Diffuse is albedo × `LIGHT` × N·L with no 1/π, so the viewer's sun (and a Blender sun) gets irradiance π × `LIGHT`. Its direction is (cos el sin az, sin el, cos el cos az) in game space, azimuth from +Z towards +X. That convention is fitted from where the probes are brightest (Megalopolis day: key 220°, probe 209°; Savali sunset: 308° and 327°); the code that converts the angles is not traced.
+- **Environment:** the default env probe, a BC6H cube in scene radiance (Megalopolis day: mean radiance (0.82, 1.25, 1.80)), decoded at mip 1 by `nwo.formats.bc6h` and sampled into an equirectangular map. It gives the diffuse and specular lighting maps, and the Rift Apart ambient light convolves it with the engine's probe program ([Ambient light](#ambient-light)) as it does the review HDRI.
+- **Placement:** the model has no place in the level, so the environment is turned about the vertical until the key light comes from the review HDRI sun's azimuth, keeping its elevation. That turn is a presentation choice.
+- **Exposure:** the game's auto-exposure. `CS_AverageLumAccum` takes per pixel log₂ of the Rec.709 luminance, weighted by (1 − |x|)(1 − |y|) over the screen; `CS_AverageLumFinalize` soft-clamps the mean to (AdaptationAnchor − 13) ± AdaptationRange with a smootherstep scaled so the slope is 1 at the anchor; the display exposes by 0.18 / adapted luminance. The viewer meters its float scene target, with the probe composited behind the model along the camera rays, at most four times a second, and redraws when the exposure moves (`ModelViewport._meter_atmosphere`). Until the first metering it uses the anchor.
+
+The **Blender Scene** export uses the atmosphere while it is the 3D view's lighting (`ExportOptions.atmosphere`, `blender_convert.py --atmosphere`, `nwo/export/rcra_atmosphere_blender.py`). The world becomes the probe at strength 1, the review sun becomes the key light (visible in glossy rays: the key light has a specular term), and a 512-pixel render from the export camera is metered as above. The scene shows through the game's display as compositor nodes: the metered exposure, then the 32³ lookup of [Display transform](#display-transform) as a packed image sampled trilinearly at its log₂ coordinate, with colour un-premultiplied for the lookup so transparent film keeps its edges. The view transform is Raw. On the Metropolis blimp the compositor output matches `display.py` on the raw render to 0.001/255. The exposure is fixed at export: moving the camera does not meter again (the group's Exposure input can be changed by hand). The reopen check validates the probe image, the key light and the display (`rcra_atmosphere_blender.check`).
+
+Not reproduced: the level's geometry, shadows and light grid, local lights, fog, the sky model, the atmosphere's own bloom settings (the viewer keeps the default atmosphere's; the `.blend` has no bloom), AdaptationBias, ExposureBias and LuminanceKeyValue (their GPU path is not traced; all neutral in Megalopolis day), the about 60 graphs that scale emission by the adapted luminance (they keep the review value 0.18, [Exposure](#exposure)), and the colour-correction LUT. 41 atmospheres name a LUT, and the exe has lookup builders that mix one to four of them (`CS_ToneMapCreateLookupCC1` to `CC4`), but the weight the game gives a LUT at steady state is not traced, so no LUT is applied.
 
 #### Missing textures
 

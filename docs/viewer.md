@@ -165,7 +165,7 @@ The Lighting source and Display tonemap selectors offer:
 
 | Selector | Choices | Default |
 |---|---|---|
-| Lighting | `Viewer rig`, `Shared HDRI` | `Shared HDRI` in the model browser; `Viewer rig` in the viewport itself, the level viewer and gallery thumbnails |
+| Lighting | `Viewer rig`, `Shared HDRI`, `Game atmosphere` (Rift Apart model views, with an Atmosphere picker) | `Shared HDRI` in the model browser; `Viewer rig` in the viewport itself, the level viewer and gallery thumbnails |
 | Tonemap | `ACES fit`, `Khronos PBR Neutral`, `Game (captured)`, `Game (Rift Apart)` (model views only) | the open game's own display in the model browser (`Game (captured)` for R&C 2016, `Game (Rift Apart)` for Rift Apart); `ACES fit` elsewhere |
 
 The model browser applies its remembered (or default) lighting and tonemap at start. Choosing Shared HDRI no longer changes the tonemap. Opening a game whose display differs from the one shown switches between the two Game tonemaps; a tonemap that belongs to no game stays.
@@ -635,7 +635,7 @@ clip**, Rift Apart only, a layer with a partner is written over its first partne
 
 **Blender conversion** uses factory settings, `disable_bone_shape=True` (otherwise FBX/USD export the importer's bone-display icosphere as a mesh) and a private user folder. The `.blend` gets `apply_new_scene_defaults(configure_world=False, configure_gpu=False)` (render defaults only: no HDRI world, no OptiX device setup) and packed images. These files carry glTF Principled materials, not the RC PS4 Deferred BRDF; use the research build for that.
 
-**Blender scene without the research pipeline:** for a game without the research pipeline (Rift Apart), Options -> Blender Scene (.blend) runs this export with the `.blend` as its only format and `ExportOptions.scene` (`blender_convert.py --scene`). The `.blend` then gets `apply_new_scene_defaults` with the shared review lighting (the HDRI world, packed and checked against the shared EXR) and the OptiX GPU setup, one camera at the reference angle dollied so the visible meshes fill the frame (`frame_camera_zoom`), and the Render Region around them (`fit_render_region`). Textures are always included and the game DDS files are not written. The reopen check (`--validate`) also checks the recorded lighting (`check_shared_lighting`). The group `.blend` and the game tone curve belong to the research build and stay greyed out.
+**Blender scene without the research pipeline:** for a game without the research pipeline (Rift Apart), Options -> Blender Scene (.blend) runs this export with the `.blend` as its only format and `ExportOptions.scene` (`blender_convert.py --scene`). The `.blend` then gets `apply_new_scene_defaults` with the shared review lighting (the HDRI world, packed and checked against the shared EXR) and the OptiX GPU setup, one camera at the reference angle dollied so the visible meshes fill the frame (`frame_camera_zoom`), and the Render Region around them (`fit_render_region`). Textures are always included and the game DDS files are not written. The reopen check (`--validate`) also checks the recorded lighting (`check_shared_lighting`). While the 3D view's lighting is Game atmosphere, the scene is lit by that Rift Apart atmosphere instead and shows through the game's display as compositor nodes, exposed by metering the camera's frame ([Atmosphere lighting](rift-apart.md#atmosphere-lighting)). The group `.blend` and the game tone curve belong to the research build and stay greyed out.
 
 **Materials** follow the viewer's per-graph `_g` reading (`material_texture_paths`: grey, skin or coloured, spec/gloss scales, self-lit K and mask):
 
@@ -717,7 +717,7 @@ Data-dependent tests read the `RC2016_RESEARCH` environment variable and skip wi
 
 ## Limitations
 
-- The 3D view shows the bind pose or a played clip, not attachments or runtime blending. Lighting is the viewer rig or the shared review HDRI, with no shadows, ambient occlusion or interreflection in the standalone model viewer; the level viewer adds the scene previews described above. Neither selector reproduces the game's lighting. Materials follow the rules above.
+- The 3D view shows the bind pose or a played clip, not attachments or runtime blending. Lighting is the viewer rig, the shared review HDRI or (Rift Apart) a level atmosphere's key light and probe, with no shadows, ambient occlusion or interreflection in the standalone model viewer; the level viewer adds the scene previews described above. Neither selector reproduces the game's lighting. Materials follow the rules above.
 - The rule coverage and Shading filter describe the viewer's rules, not game accuracy.
 - Several graph rules rest on bounded decodes; runtime draw-time inputs (time, instance interpolants, constant-buffer binding) are frozen or unproven.
 - Forward materials other than the character glass, saucer dome, screen, puddle, bulb, antenna glow shell, eye cornea, prisoner number, `basic_glass`, `character_glass_02` and `jn_glass` graphs, and the water preview, draw opaque.

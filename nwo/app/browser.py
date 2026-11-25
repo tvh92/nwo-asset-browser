@@ -411,15 +411,31 @@ class AssetBrowser:
         self.lighting_controls.grid(row=0,column=1,sticky='w')
         self.tonemap_var=remember_var(self.tk.StringVar(value='Game (captured)'),'model.tonemap',self.viewport.TONEMAPS)
         lighting_note_row=ttk.Frame(lighting_group);lighting_note_row.grid(row=2,column=0,columnspan=2,sticky='w')
-        lighting_box=lighting_controls(ttk,self.lighting_controls,self.viewport,self.lighting_var,self.tonemap_var,note_parent=lighting_note_row)
+        lighting_box=self.lighting_box=lighting_controls(ttk,self.lighting_controls,self.viewport,self.lighting_var,self.tonemap_var,note_parent=lighting_note_row)
+        # Game atmosphere (Rift Apart): which atmosphere lights the model; the Blender Scene export uses the same one.
+        from nwo.games.rcra.atmosphere import DEFAULT as DEFAULT_ATMOSPHERE
+        self.atmosphere_var=remember_var(self.tk.StringVar(value=Path(DEFAULT_ATMOSPHERE).stem),'model.atmosphere')
+        self.atmosphere_paths={Path(DEFAULT_ATMOSPHERE).stem:DEFAULT_ATMOSPHERE};self.atmosphere_listed=None
+        self.atmosphere_row=ttk.Frame(lighting_group);self.atmosphere_row.grid(row=3,column=0,columnspan=2,sticky='w',pady=(2,0))
+        ttk.Label(self.atmosphere_row,text='Atmosphere').pack(side='left')
+        self.atmosphere_box=ttk.Combobox(self.atmosphere_row,textvariable=self.atmosphere_var,values=sorted(self.atmosphere_paths),state='readonly',width=26)
+        self.atmosphere_box.pack(side='left',padx=4)
+        self.atmosphere_box.bind('<<ComboboxSelected>>',lambda _e:self._atmosphere_changed())
+        lighting_box.bind('<<ComboboxSelected>>',lambda _e:self._atmosphere_changed(),add='+')
+        tip('The Rift Apart atmosphere (a level\'s lighting: atm_malinon_day is Corson V\'s Megalopolis by day) that lights the model: its key light and environment probe, '
+            'with the game\'s auto-exposure metered from the view. The environment is turned so the key light comes from the review sun\'s side. '
+            'The Blender Scene export uses this atmosphere while it is the lighting. Not shown: the level around the model, its shadows, local lights and fog, '
+            'and its colour-correction LUT.',self.atmosphere_box)
+        self.atmospheres_available=True
         tonemap_label=ttk.Label(lighting_group,text='Tonemap')
         tonemap_label.grid(row=1,column=0,sticky='w',pady=(2,0))
         tonemap_box=ttk.Combobox(lighting_group,textvariable=self.tonemap_var,values=self.viewport.TONEMAPS,state='readonly',width=19)
         tonemap_box.grid(row=1,column=1,sticky='w',padx=4,pady=(2,0))
         tonemap_box.bind('<<ComboboxSelected>>',lambda _e:self.viewport.set_lighting(tonemap=self.tonemap_var.get()))
         tip('Master switch for lighting. Off shows the unlit surface colour; self-lit emission stays.',self.lighting_enabled_check)
-        tip('Viewer rig: fixed key, fill and sky light that turns with the camera (what the gallery thumbnails use).\nShared HDRI: the shared review HDRI, as the Blender review render uses (the default).',lighting_box)
+        tip('Viewer rig: fixed key, fill and sky light that turns with the camera (what the gallery thumbnails use).\nShared HDRI: the shared review HDRI, as the Blender review render uses (the default).\nGame atmosphere (Rift Apart): a level\'s own key light, probe and auto-exposure; pick the atmosphere below.',lighting_box)
         tip('Maps the lit HDR result to screen colours.\nACES fit: filmic, desaturates highlights.\nKhronos PBR Neutral: keeps base colours accurate until highlights.\nGame (captured, the R&C 2016 default, also for its gallery thumbnails): the game\'s exposure and tone curve from one Veldin frame, no level colour grade.\nGame (Rift Apart, its default and thumbnails): Rift Apart\'s ACES display and bloom decoded from the game, without its atmosphere colour grade or auto-exposure.\nThe lighting is still the viewer\'s, so overall brightness is not the game\'s.',tonemap_label,tonemap_box)
+        self._atmosphere_changed(apply=False)
         self.viewport.set_lighting(self.lighting_var.get(),self.tonemap_var.get())   # the defaults or the remembered choice
         # Materials: only the toggles that change something for this model (see _update_source_controls).
         self.native_translation_var=remember_var(self.tk.BooleanVar(value=True),'model.native_translation')
@@ -1242,6 +1258,57 @@ class AssetBrowser:
         except ValueError:return 0
 
     GAME_TONEMAPS=('Game (captured)','Game (Rift Apart)')   # the games' own display tonemaps (Game.display_tonemap)
+
+    def _atmosphere_archive(self):
+        """The open Rift Apart source of the app's game folder (the preview loader's when it has that folder open)."""
+        root=Path(self.app.source_var.get().strip()).expanduser().resolve()
+        loader=self.source_loader
+        if getattr(loader,'source_root',None)==root and getattr(loader,'archive',None) is not None:return loader.archive
+        own=self.__dict__.get('_atmosphere_loader')
+        if own is None:own=self._atmosphere_loader=SourcePreviewLoader()
+        return own._ensure_archive(root)
+
+    def _list_atmospheres(self):
+        """Fill the Atmosphere box with every atmosphere of the game folder, once per folder (worker thread)."""
+        source=self.app.source_var.get().strip()
+        if not source or self.atmosphere_listed==source:return
+        self.atmosphere_listed=source
+        def work():
+            try:
+                from nwo.games.rcra import atmosphere
+                paths={Path(p).stem:p for p in atmosphere.list_paths(self._atmosphere_archive())}
+            except Exception:
+                self.atmosphere_listed=None;return
+            def show():
+                if paths:self.atmosphere_paths=paths;self.atmosphere_box.configure(values=sorted(paths))
+            self.app.root.after(0,show)
+        threading.Thread(target=work,daemon=True).start()
+
+    def atmosphere_path(self):
+        """The atmosphere asset the model is lit by, or '' when the lighting is not Game atmosphere."""
+        if self.lighting_var.get()!=self.viewport.ATMOSPHERE_LIGHTING or not self.atmospheres_available:return ''
+        return self.atmosphere_paths.get(self.atmosphere_var.get(),'')
+
+    def _atmosphere_changed(self,apply=True):
+        """Show the Atmosphere box with the Game atmosphere lighting, and hand the chosen atmosphere to the viewer."""
+        if self.lighting_var.get()==self.viewport.ATMOSPHERE_LIGHTING and self.atmospheres_available:
+            self.atmosphere_row.grid();self._list_atmospheres()
+            from nwo.games.rcra.atmosphere import DEFAULT
+            path=self.atmosphere_paths.get(self.atmosphere_var.get()) or DEFAULT
+            if apply:self.viewport.set_atmosphere(path,self._atmosphere_archive)
+            else:self.viewport.atmosphere=dict(path=path,archive=self._atmosphere_archive)
+        else:self.atmosphere_row.grid_remove()
+        options=getattr(self.app,'_options_changed',None)
+        if apply and callable(options):options()
+
+    def use_game_atmospheres(self,available):
+        """Offer the Game atmosphere lighting only for a game with atmospheres (Rift Apart)."""
+        self.atmospheres_available=bool(available)
+        self.lighting_box.configure(values=[v for v in self.viewport.LIGHTINGS if available or v!=self.viewport.ATMOSPHERE_LIGHTING])
+        if not available and self.lighting_var.get()==self.viewport.ATMOSPHERE_LIGHTING:
+            self.lighting_var.set('Shared HDRI');self.viewport.set_lighting('Shared HDRI')
+        if available:self.atmosphere_listed=None
+        self._atmosphere_changed()
 
     def use_game_tonemap(self,tonemap):
         """Show the open game's own display tonemap when the one shown is another game's; a tonemap the user picked

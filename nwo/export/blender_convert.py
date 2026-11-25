@@ -14,6 +14,8 @@ review lighting, that lighting (scene_defaults.check_shared_lighting); it exits 
 lighting with its HDRI world (assets/lighting/shared_lighting.json, packed), the Cycles OptiX GPU render setup, and
 one camera at the reference angle dollied so the model fills the frame, with the Render Region cropped around it
 (scene_defaults.frame_camera_zoom, fit_render_region). Without it the .blend gets only the plain defaults below.
+With ``--atmosphere bake.npz`` as well, a Rift Apart atmosphere replaces the review lighting and the scene shows
+through the game's display transform, metered from the camera (nwo.export.rcra_atmosphere_blender).
 
 Factory settings, nothing saved to the user's preferences. The .blend gets the repository's
 plain scene/render defaults (nwo.pipeline.scene_defaults.apply_new_scene_defaults, without the HDRI world or OptiX GPU setup) and packs its images.
@@ -34,6 +36,7 @@ args.add_argument('--fbx')
 args.add_argument('--usd')
 args.add_argument('--blend')
 args.add_argument('--scene', action='store_true')
+args.add_argument('--atmosphere')   # with --scene: a Rift Apart atmosphere bake (.npz) replaces the review lighting
 args = args.parse_args(sys.argv[sys.argv.index('--') + 1:])
 
 if args.validate:
@@ -44,6 +47,9 @@ if args.validate:
     if 'shared_lighting' in bpy.context.scene:
         from nwo.pipeline.scene_defaults import check_shared_lighting
         problems += check_shared_lighting(bpy.context.scene)
+    if 'rcra_atmosphere' in bpy.context.scene:
+        from nwo.export.rcra_atmosphere_blender import check as check_atmosphere
+        problems += check_atmosphere(bpy.context.scene)
     for problem in problems:
         print('PROBLEM', problem, flush=True)
     if problems:
@@ -128,8 +134,18 @@ if args.blend:
                 if area.type == 'VIEW_3D':
                     area.spaces.active.lock_camera = True
                     area.spaces.active.region_3d.view_perspective = 'CAMERA'
-        scene_defaults.pack_scene_images(scene)   # packs the HDRI too, checked against the shared EXR
-        print('SCENE', 'review lighting, camera and render region', flush=True)
+        if args.atmosphere:
+            # A Rift Apart atmosphere instead of the review lighting, metered from this camera and shown through the
+            # game's display transform (nwo.export.rcra_atmosphere_blender).
+            from nwo.export import rcra_atmosphere_blender
+            lighting = rcra_atmosphere_blender.apply_lighting(scene, args.atmosphere)
+            bpy.ops.file.pack_all()
+            display = rcra_atmosphere_blender.apply_display(scene)
+            print('SCENE', 'atmosphere %s, metered %.2f EV, exposure %.4f, camera and render region'
+                  % (lighting['path'], display['measured_ev'], display['exposure']), flush=True)
+        else:
+            scene_defaults.pack_scene_images(scene)   # packs the HDRI too, checked against the shared EXR
+            print('SCENE', 'review lighting, camera and render region', flush=True)
     else:
         bpy.ops.file.pack_all()
     bpy.ops.wm.save_as_mainfile(filepath=args.blend, compress=True)

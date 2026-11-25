@@ -57,6 +57,31 @@ def light_frames(modelview, object_to_world=None, rig_fixed_to_world=False):
     return view_to_world, _mat3_mul(world_to_view, RIG_TO_WORLD)
 
 
+def atmosphere_maps(spec):
+    """The "Game atmosphere" lighting maps of a Rift Apart atmosphere (``spec``: ModelViewport.set_atmosphere's): the
+    environment_maps contract built from the atmosphere's probe and key light (nwo.games.rcra.atmosphere.environment,
+    turned so the key comes from the review sun's side), plus 'residual' (the probe the Rift Apart ambient light is
+    prefiltered from), 'meter_equirect' and 'atmosphere' for the metering. Exposure starts at the atmosphere's
+    adaptation anchor until the first frame is metered."""
+    import numpy as np
+    from nwo.games.rcra import atmosphere as A
+    from nwo.viewer import environment as E
+    if not spec.get('path') or not spec.get('archive'):
+        raise ValueError('no Rift Apart atmosphere chosen')
+    archive = spec['archive']()
+    review = E.environment_maps()
+    env = A.environment(archive, spec['path'], review['sun_direction'], width=1024, cache_dir=E.CACHE_DIR)
+    equi = env['equirect']
+    h, w = equi.shape[:2]
+    small = equi.reshape(h // 4, 4, w // 4, 4, 3).mean(axis=(1, 3)).astype(np.float32)
+    record = env['atmosphere']
+    return dict(sh=E.sh_irradiance(equi), bands=E.prefiltered_bands(equi), sun_direction=env['sun_direction'],
+                sun=env['sun_irradiance'], strength=1.0,
+                exposure=float(np.log2(A.exposure(record['anchor'] - A.EV_OFFSET))),
+                view_transform=review['view_transform'], hdri=A.label(spec['path']), sha256=env['sha256'],
+                residual=equi, meter_equirect=small, atmosphere=record)
+
+
 def column_major3(matrix):
     """Row-major 3x3 -> the 9 floats glUniformMatrix3fv reads without transposing."""
     return [matrix[i][j] for j in range(3) for i in range(3)]
@@ -389,8 +414,14 @@ class _PIXELFORMATDESCRIPTOR(ctypes.Structure):
 
 class ModelViewport(_TkFrame):
     """Interactive fixed-pipeline preview for decoded source triangles."""
-    LIGHTINGS = ("Viewer rig", "Shared HDRI")   # nwo.viewer.environment.LIGHTINGS
-    ENVIRONMENT_LIGHTINGS = ("Shared HDRI",)    # the lightings that draw from lighting maps (SH, bands, sun)
+    LIGHTINGS = ("Viewer rig", "Shared HDRI", "Game atmosphere")   # nwo.viewer.environment.LIGHTINGS + atmospheres
+    # The lightings that draw from lighting maps (SH, bands, sun). "Game atmosphere" is a Rift Apart atmosphere's key
+    # light and probe (nwo.games.rcra.atmosphere, set_atmosphere), exposed by the game's metering of the frame.
+    ENVIRONMENT_LIGHTINGS = ("Shared HDRI", "Game atmosphere")
+    ATMOSPHERE_LIGHTING = "Game atmosphere"
+    ATMOSPHERE_METER_EDGE = 96         # the frame is metered on a grid this wide
+    ATMOSPHERE_METER_SECONDS = 0.25    # at most this often while the view changes
+    atmosphere = None   # {'path', 'archive': callable returning the open Rift Apart source} (set_atmosphere)
     # "Game (captured)": the game's exposure and tone curve (nwo.levels.display) without a level colour grade; the level
     # viewer adds its atmosphere's grade and keeps it to the Level atmosphere lighting (GAME_TONEMAP_NEEDS_ENVIRONMENT).
     # "Game (Rift Apart)": Rift Apart's ACES lookup decoded from its exe (nwo.games.rcra.display), no atmosphere grade.
@@ -688,11 +719,87 @@ class ModelViewport(_TkFrame):
     def _environment_loader(self, lighting):
         """Callable (run on a worker thread) returning the lighting maps of an ENVIRONMENT_LIGHTINGS entry."""
         from nwo.viewer.environment import environment_maps
+        if lighting == self.ATMOSPHERE_LIGHTING:
+            spec = dict(self.atmosphere or {})
+            return lambda: atmosphere_maps(spec)
         return environment_maps
 
     def _environment_note(self, lighting, maps):
         """Status text shown with the lighting once its maps are ready, or None."""
+        if lighting == self.ATMOSPHERE_LIGHTING and maps:
+            return f"{maps['hdri']}: exposure follows the game's metering"
         return None
+
+    def set_atmosphere(self, path, archive):
+        """The Rift Apart atmosphere the "Game atmosphere" lighting shows (``archive``: a callable returning the open
+        source); its maps are read again when it is the lighting in use."""
+        spec = dict(path=path, archive=archive)
+        if self.atmosphere and self.atmosphere.get('path') == path:
+            self.atmosphere = spec
+            return
+        self.atmosphere = spec
+        if self._environment_lighting == self.ATMOSPHERE_LIGHTING and not self._environment_loading:
+            self._environment, self._environment_texture_stale = None, self._environment_texture is not None
+            self._environment_lighting = None
+            self._frame_lighting = None
+        if self.lighting == self.ATMOSPHERE_LIGHTING:
+            self.set_lighting()
+
+    def _meter_atmosphere(self, target):
+        """The game's auto-exposure under "Game atmosphere": meter the float scene target (the model over the atmosphere's
+        probe seen along the camera rays, as the game's frame would show it) with CS_AverageLumAccum, soft-clamp it to
+        the atmosphere's anchor and range, and expose the next frame by 0.18 / adapted luminance. Throttled; redraws
+        once when the exposure moved."""
+        import time
+        import numpy as np
+        from nwo.games.rcra import atmosphere as A
+        env = self._environment
+        if not env or 'meter_equirect' not in env or not target.get('colour'):
+            return
+        gl = self._gl
+        modelview, projection = (ctypes.c_float * 16)(), (ctypes.c_float * 16)()
+        gl.glGetFloatv.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        gl.glGetFloatv(self.GL_MODELVIEW_MATRIX, modelview)
+        gl.glGetFloatv(0x0BA7, projection)   # GL_PROJECTION_MATRIX
+        key = (tuple(modelview), tuple(projection), target['size'], id(self._mesh), env.get('sha256'))
+        now = time.monotonic()
+        last = self.__dict__.get('_atmosphere_meter') or {}
+        if last.get('key') == key or now - last.get('time', 0.0) < self.ATMOSPHERE_METER_SECONDS:
+            if last.get('key') != key:
+                self.after(int(self.ATMOSPHERE_METER_SECONDS * 1000), self._schedule_draw)   # meter once it settles
+            return
+        width, height = target['size']
+        pixels = np.zeros((height, width, 4), np.float32)
+        gl.glGetTexImage.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+        gl.glBindTexture(self.GL_TEXTURE_2D, target['colour'])
+        gl.glGetTexImage(self.GL_TEXTURE_2D, 0, 0x1908, self.GL_FLOAT, pixels.ctypes.data)   # GL_RGBA
+        gl.glBindTexture(self.GL_TEXTURE_2D, 0)
+        step = max(1, max(width, height) // self.ATMOSPHERE_METER_EDGE)
+        grid = pixels[step // 2::step, step // 2::step]
+        rows, cols = grid.shape[:2]
+        view_to_world, _rig = light_frames(list(modelview), self.OBJECT_TO_WORLD, self.RIG_FIXED_TO_WORLD)
+        p = list(projection)
+        xs = ((np.arange(cols) * step + step // 2 + 0.5) / width) * 2 - 1
+        ys = ((np.arange(rows) * step + step // 2 + 0.5) / height) * 2 - 1   # GL rows: bottom first, as the texture
+        xg, yg = np.meshgrid(xs, ys)
+        rays = np.stack([(xg + p[8]) / p[0], (yg + p[9]) / p[5], -np.ones_like(xg)], -1) @ np.array(view_to_world).T
+        rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
+        equi = env['meter_equirect']
+        h, w = equi.shape[:2]
+        u = 0.5 - np.arctan2(rays[..., 1], rays[..., 0]) / (2 * np.pi)
+        v = np.arctan2(rays[..., 2], np.hypot(rays[..., 0], rays[..., 1])) / np.pi + 0.5
+        background = equi[np.clip(((1 - v) * h).astype(int), 0, h - 1), np.clip((u % 1.0 * w).astype(int), 0, w - 1)]
+        alpha = np.clip(grid[..., 3:4], 0, 1)
+        scene = grid[..., :3] + (1 - alpha) * background
+        record = env['atmosphere']
+        measured = A.meter(scene)
+        adapted = A.adapted_log2(measured, record['anchor'], record['range'])
+        exposure = float(np.log2(A.exposure(adapted)))
+        self._atmosphere_meter = dict(key=key, time=now, measured_ev=measured + A.EV_OFFSET, adapted_ev=adapted + A.EV_OFFSET)
+        if abs(exposure - env['exposure']) > 0.01:
+            env['exposure'] = exposure
+            self._frame_lighting = None
+            self._schedule_draw()
 
     def set_lighting_enabled(self, enabled):
         """Gate lighting and scene effects without discarding their chosen settings."""
@@ -1965,6 +2072,11 @@ class ModelViewport(_TkFrame):
     def _hdr_resolve(self, target):
         """Tonemap the float scene target once into the framebuffer it replaced (shading.HDR_RESOLVE_FRAGMENT)."""
         gl, sh = self._gl, self._shading
+        if self.lighting == self.ATMOSPHERE_LIGHTING and self._environment_lighting == self.lighting:
+            try:
+                self._meter_atmosphere(target)
+            except Exception as exc:   # keep the anchor exposure; say why
+                self.shading_warning = 'Atmosphere metering: %s: %s' % (type(exc).__name__, exc)
         self._linear_output = False
         bloom = self._bloom_texture(target)   # runs the bloom chain into its own targets (None without one)
         self._hdr_fns['glBindFramebuffer'](self.GL_FRAMEBUFFER, target['previous'])
@@ -2291,7 +2403,8 @@ class ModelViewport(_TkFrame):
             try:
                 from nwo.games.rcra import engine_tables, probe
                 from nwo.viewer.environment import CACHE_DIR, review_residual
-                image, _key = review_residual()
+                residual = (self._environment or {}).get('residual')   # an atmosphere's probe, else the review HDRI's
+                image = residual if residual is not None else review_residual()[0]
                 lut = engine_tables.brdf_lookup(root)[0]
                 build['levels'], build['lut'] = probe.cached_probe_levels(root, image, CACHE_DIR), lut
             except Exception as error:   # the rig's ambient stays; the reason is kept for the status line

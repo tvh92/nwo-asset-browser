@@ -9,9 +9,8 @@ GGX-prefiltered specular bands, and the atmosphere supplies the key light.
 
 Evidence and limits:
 
-- Decoded: the probe's radiance (``nwo.formats.bc6h``; a block in a BC6H mode the decoder lacks
-  keeps Pillow's value clamped to 1, none in the Novalis probe), the atmosphere sun ray, and the RGB96
-  value.
+- Decoded: the probe's radiance (``nwo.formats.bc6h``, every BC6H mode; a block with a reserved mode
+  field keeps Pillow's value clamped to 1), the atmosphere sun ray, and the RGB96 value.
 - Checked: the probe's bright glare points at the atmosphere's sun (Novalis: 7 degrees apart, dot
   0.993), which fixes the cube's handedness and face orientation (identity, equal to the pipeline's
   validated state once Blender's bottom-up image rows are accounted for) for this probe.

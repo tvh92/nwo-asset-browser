@@ -1,4 +1,5 @@
-"""Unsigned BC6H decoding (nwo/formats/bc6h.py) on hand-packed blocks."""
+"""Unsigned BC6H decoding (nwo/formats/bc6h.py) on hand-packed blocks, and against the GPU on a Rift Apart probe."""
+import os
 import unittest
 
 import numpy as np
@@ -183,12 +184,20 @@ class TwoSubsetTests(unittest.TestCase):
 
 
 class LayoutTests(unittest.TestCase):
-    def test_unsupported_modes_are_zero_and_reported(self):
-        two_subset = pack([(0, 5, 0b00010)])         # a two-subset mode the decoder lacks
-        mode_other = pack([(0, 5, 0b00110)])
-        image, unsupported = decode_bc6h(two_subset + mode_other, 8, 4)
-        self.assertEqual(unsupported.tolist(), [[True, True]])
+    def test_reserved_modes_are_zero_and_reported(self):
+        blocks = b''.join(pack([(0, 5, field)]) for field in (0b10011, 0b10111, 0b11011, 0b11111))
+        image, unsupported = decode_bc6h(blocks, 16, 4)
+        self.assertEqual(unsupported.tolist(), [[True, True, True, True]])
         self.assertFalse(image.any())
+
+    def test_every_mode_layout_fills_the_header(self):
+        # Two-subset modes hold 82 header bits (mode field, four endpoints, partition), one-subset modes 65.
+        from nwo.formats.bc6h import _PARSED
+        self.assertEqual(sorted(mode for mode, *_ in _PARSED.values()), list(range(1, 15)))
+        for field, (mode, _width, _deltas, layout) in _PARSED.items():
+            self.assertEqual(len(layout) + (2 if mode <= 2 else 5), 82 if mode <= 10 else 65, f'mode {mode}')
+            self.assertEqual(len(set(layout)), len(layout), f'mode {mode} repeats a bit')
+
 
     def test_blocks_fill_the_image_row_by_row(self):
         def constant(value):
@@ -208,6 +217,43 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(image.shape, (2, 3, 3))
         with self.assertRaises(ValueError):
             decode_bc6h(block, 8, 4)
+
+
+@unittest.skipUnless(os.environ.get('RCRA_GAME'), 'RCRA_GAME is not set')
+class GpuMatchTests(unittest.TestCase):
+    """Every block of a Rift Apart probe decodes as the GPU's own BC6H decoder does (read back as float)."""
+
+    def test_probe_matches_the_gpu(self):
+        from nwo.games.rcra import atmosphere
+        from nwo.viewer.loader import SourcePreviewLoader
+        from nwo.viewer.viewport import ModelViewport
+        import ctypes
+        import tkinter as tk
+        source = SourcePreviewLoader()._ensure_archive(os.environ['RCRA_GAME'])
+        faces = atmosphere.probe_blocks(source, atmosphere.read(source, atmosphere.DEFAULT)['probe'], 2)
+        root = tk.Tk()
+        try:
+            view = ModelViewport(root)
+            view.pack()
+            root.update()
+            if view._context_error or not view._make_current():
+                self.skipTest(view._context_error or 'no OpenGL context')
+            gl, upload = view._gl, view._compressed_uploader()
+            gl.glGetTexImage.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p]
+            name = ctypes.c_uint(0)
+            gl.glGenTextures(1, ctypes.byref(name))
+            gl.glBindTexture(0x0DE1, name.value)
+            gl.glPixelStorei(0x0D05, 1)
+            for blocks, size in faces:
+                buffer = ctypes.create_string_buffer(bytes(blocks), len(blocks))
+                upload(0x0DE1, 0, 0x8E8F, size, size, 0, len(blocks), buffer)   # GL_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT
+                gpu = np.zeros((size, size, 3), np.float32)
+                gl.glGetTexImage(0x0DE1, 0, 0x1907, 0x1406, gpu.ctypes.data)
+                cpu, reserved = decode_bc6h(blocks, size, size)
+                self.assertFalse(reserved.any())
+                np.testing.assert_array_equal(cpu, gpu)
+        finally:
+            root.destroy()
 
 
 if __name__ == '__main__':

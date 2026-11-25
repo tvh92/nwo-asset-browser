@@ -14,7 +14,8 @@ from typing import Callable, Mapping
 
 # What a game may offer. The UI disables a tab or control whose capability the current game lacks.
 CAPABILITIES = frozenset({'models', 'textures', 'export', 'animation', 'root_motion', 'face_performances',
-                          'layer_partners', 'vertex_animation', 'levels', 'flash', 'pipeline', 'decoded_shading'})
+                          'layer_partners', 'vertex_animation', 'levels', 'flash', 'pipeline', 'decoded_shading',
+                          'atmospheres'})   # atmospheres: a level's own lighting for models (Rift Apart, games.rcra.atmosphere)
 CACHE_ROOT = Path(__file__).resolve().parents[2] / '.cache'
 APP_TITLE = 'NWO Asset Browser'
 # Hooks a game may supply; each one missing raises NotImplementedError when called.

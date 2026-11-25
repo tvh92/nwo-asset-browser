@@ -86,14 +86,14 @@ class DetectionTests(unittest.TestCase):
 class GameRecordTests(unittest.TestCase):
     def test_rc2016_declares_everything_but_root_motion_and_faces_and_keeps_its_caches_in_place(self):
         self.assertEqual(RC2016.capabilities, games.CAPABILITIES - {'root_motion', 'face_performances', 'layer_partners',
-                                                                       'vertex_animation'})
+                                                                       'vertex_animation', 'atmospheres'})
         # The exact folder the loader and level viewer used before the seam, so nothing is rescanned.
         self.assertEqual(RC2016.cache_dir(), Path(__file__).resolve().parents[1] / '.cache')
         self.assertEqual(RCRA.cache_dir(), CACHE_ROOT / 'rcra')
 
     def test_rift_apart_capabilities(self):
         self.assertEqual(RCRA.capabilities, {'models', 'textures', 'export', 'animation', 'root_motion', 'face_performances',
-                                             'layer_partners', 'vertex_animation'})
+                                             'layer_partners', 'vertex_animation', 'atmospheres'})
         self.assertTrue(RCRA.has_animation_library())
         self.assertFalse(RC2016.has_animation_library())   # 2016 finds its animsets through the scan's index
         for capability in ('levels', 'flash', 'pipeline', 'decoded_shading'):
@@ -420,12 +420,13 @@ class CapabilityGatingTests(unittest.TestCase):
             self.skipTest(f'Tk unavailable: {error}')
         from nwo.app.window import ASSET_TYPE_CAPABILITY, HELP, AssetBrowserApp
         self.HELP = HELP
-        shown, tonemaps = [], []
+        shown, tonemaps, atmospheres = [], [], []
         app = SimpleNamespace(tk=tk, ttk=ttk, root=self.root, game=None, game_gates=[], options_changed=0,
                               asset_type_var=tk.StringVar(master=self.root, value='Level'),
                               shading_var=tk.StringVar(master=self.root, value='Generic reading'),
                               backend_var=tk.StringVar(master=self.root, value='Transform only'),
-                              browser=SimpleNamespace(show_asset_type=shown.append, use_game_tonemap=tonemaps.append))
+                              browser=SimpleNamespace(show_asset_type=shown.append, use_game_tonemap=tonemaps.append,
+                                                      use_game_atmospheres=atmospheres.append))
         for name in ('_tip', '_gate', '_game_has', '_pipeline_backend', '_apply_game'):
             setattr(app, name, getattr(AssetBrowserApp, name).__get__(app))
         app._options_changed = lambda: setattr(app, 'options_changed', app.options_changed + 1)
@@ -436,7 +437,7 @@ class CapabilityGatingTests(unittest.TestCase):
         app._gate('pipeline', HELP['backend'], self.backend, 'readonly')
         self.animation = ttk.Checkbutton(self.root)
         app._gate('animation', HELP['animations'], self.animation, None)
-        self.app, self.shown, self.tonemaps = app, shown, tonemaps
+        self.app, self.shown, self.tonemaps, self.atmospheres = app, shown, tonemaps, atmospheres
 
     def tearDown(self):
         self.root.destroy()
@@ -464,6 +465,7 @@ class CapabilityGatingTests(unittest.TestCase):
         self.assertEqual((app.asset_type_var.get(), self.shown), ('Model', ['Model']))   # Level was showing
         self.assertEqual(app.shading_var.get(), 'All')
         self.assertEqual(self.tonemaps, ['Game (Rift Apart)'])   # the viewer shows the game's own display
+        self.assertEqual(self.atmospheres, [True])   # and offers its atmospheres as lighting
         self.assertTrue(app._pipeline_backend())   # its models come from its own index, not Transform only
         self.assertEqual(app.options_changed, 1)
 
