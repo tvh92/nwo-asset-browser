@@ -4,7 +4,9 @@
 (format evidence; this is an independent reader):
 
   0x380A5744 morph info   u32 0, u32 data + index bytes, u16 shapes, u16 mirror pairs, u32 shape table offset,
-                          u32 mirror table offset, u32; the shape table holds (u32 name hash, u32 offset) per shape.
+                          u32 mirror table offset, u32 2 (in all 19 models; the game's loader keeps its low byte
+                          beside the counts, likely a format version); the shape table holds (u32 name hash, u32
+                          offset) per shape.
                           A shape: u32 name hash, u32 name string offset, u32 data offset, u32 index offset; u8 2,
                           u8 3k, u8 k, u8 0 (k bits per field); f32 position scale, bias, normal scale, bias; u16
                           subsets, u16, u32 data bytes, u32 index bytes (packing u8 1: positions only); then per subset s8 mesh, (4-aligned) u32
@@ -23,7 +25,9 @@ A subset's mesh is the model's mesh record index. Left/right pairs mirror each o
 
   0x277563F5 morph info   u16 channels, u8 count bits c, u8 offset bits o, u8 first-channel bits a, u8 channel-step
                           bits d, u8 value bits v (10), u8 0, u32 frame-table bytes, u32 0; u32 shape name hash per
-                          channel; one u32 per channel that is not read (increasing); the frame table: per frame a
+                          channel; u32 per channel, the offset of the shape's name in the DAT1 string pool (after
+                          the section table; the game's clip loader adds the pool's address, and the names match
+                          the hashes in all 2,821 clips); the frame table: per frame a
                           c-bit active count and an o-bit word offset into the frame data, most significant bit first
   0x69F64588 frame data   per frame, from its word offset: the active channels, each a channel field (the first
                           a bits, absolute; the next d bits each, a step from the previous channel) and a v-bit value
@@ -168,7 +172,8 @@ def _number(bits, start, width):
 
 
 def clip_weights(dat1, table, frames):
-    """A clip's morph weights: dict(hashes, weights (frames, channels) in 0..1), or None for a clip without them."""
+    """A clip's morph weights: dict(hashes, names, weights (frames, channels) in 0..1), or None for a clip without
+    them. ``names`` are the channels' shape names from the clip's string pool."""
     if CLIP_MORPH_INFO not in table:
         return None
     require(CLIP_MORPH_FRAMES in table, 'clip morph info without its frame data')
@@ -178,6 +183,9 @@ def clip_weights(dat1, table, frames):
     require(16 + 8 * channels + table_bytes == isize, 'clip morph info size mismatch')
     require(table_bytes == _align(frames * (cbits + obits), 32) // 8, 'clip morph frame table does not match the frames')
     hashes = list(struct.unpack_from(f'<{channels}I', info, 16))
+    pool = 16 + 12 * len(table)
+    names = [_cstring(dat1, pool + at) if pool + at < len(dat1) else ''
+             for at in struct.unpack_from(f'<{channels}I', info, 16 + 4 * channels)]
     lookup = np.unpackbits(np.frombuffer(info, np.uint8, table_bytes, 16 + 8 * channels))
     fo, fsize = table[CLIP_MORPH_FRAMES]
     stream = np.unpackbits(np.frombuffer(dat1, np.uint8, fsize, fo))
@@ -195,4 +203,4 @@ def clip_weights(dat1, table, frames):
             require(channel < channels and (i == 0 or step > 0), 'clip morph channel out of order or range')
             weights[frame, channel] = _number(stream, pos + width, value_bits) / WEIGHT_SCALE
             pos += width + value_bits
-    return dict(hashes=hashes, weights=weights)
+    return dict(hashes=hashes, names=names, weights=weights)

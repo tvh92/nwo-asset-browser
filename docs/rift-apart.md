@@ -374,7 +374,8 @@ it:
 | +0 | u8 record format (0 or 1), u8 kind (0: no records, 2, 3), u16 record count |
 | +4 | f32 start rotation xyzw |
 | +32 | f32 1.0, then f32 start translation xyz |
-| +64 | u32 bytes from +124 (the records, zero-padded so the section is a multiple of 16), u32 frame count |
+| +60 | u32 record offset from +124 (0 in every clip) |
+| +64 | u32 bytes from +124 (the records, zero-padded so the section is a multiple of 16), u16 frame count, u8 count of 80-byte entries at that offset (0 in every clip) |
 | +76, +100 | f32 minimum and maximum xyz of the root translation over the clip |
 | +124 | the records |
 
@@ -389,13 +390,16 @@ the frame table). Record 0 has the identity rotation.
   times sqrt(1/2) / (2^19 - 1). They are the components other than the largest, in xyzw order, and bits 60-61 give
   the largest one's index. That component is sqrt(1 - the others' squares), so it is positive.
 
-**Foot phase.** Kind-3 (locomotion) clips set it in every record: the i8 / 127, −1 where the left foot lands and +1
-where the right foot lands, linear in between. In Ratchet's `neutral_strafe_walk_n` it is −1 at frame 0 with the left
+**Foot phase.** Kind-3 (locomotion) clips set it in every record: (2 × i8 + 1) / 255, so −128 is −1 where the left
+foot lands and 127 is +1 where the right foot lands, linear in between. The game's root-motion sampler
+(`RiftApart.exe` 0x140F29C00, 0x140F2A100) computes it this way, and reads the byte only when bit 0 of the kind byte
+is set (kind 3). In Ratchet's `neutral_strafe_walk_n` it is −1 at frame 0 with the left
 foot planted and +1 at frame 14 as the right foot lands, and his strafe run is the same over 20 frames. Of the 1,108
 format-0 kind-3 clips, 845 vary and 263 hold one value (−91 in `walk_forward_wrench`); 164 format-1 kind-3 cutscene
-clips carry the same triangle in the u32 (all below 256). Kind-2 clips leave it 0, except 7 cutscene clips whose u32
-holds larger values, which are not read. `motion` returns it as `phase` (None unless kind 3); playback does not use
-it. How the runtime uses it (for example to match the step of blended locomotion clips) is not traced.
+clips carry the same triangle in the u32 (all below 256). Kind-2 clips leave it 0. In 7 kind-2 clips (the spitter's
+distortion projectile and six fixer-scaffold props of one cutscene) the u32's high 16 bits hold a smooth per-frame
+curve (as a half float, 1.45 to 2.26 and 169 to 195); the sampler reads only the low byte, so the game does not use
+it. `motion` returns the phase as `phase` (None unless kind 3); playback does not use it. How the runtime uses it (for example to match the step of blended locomotion clips) is not traced.
 
 **Coverage.** All 23,317 installed clips read. 10,464 have records (3,700 in format 0, 6,764 in format 1). In each
 of them the stored minimum and maximum equal those of `start_t + start_q * t` within quantization: format 0's
@@ -478,8 +482,18 @@ weighted rows past the header's frame count; they are not played. 28 lines have 
 
 **Pose clip** (`pose_table`). An additive skeletal clip of 25 frames (39 for Kit and Clank) on the jaw, teeth and
 tongue joints (7 for Ratchet; up to 46 for Skidd). Its section `0x1D4BD9FA` is a table of 40 u16 pose frames, one
-per performance index; in all 21 tables every value is an even frame. Section `0x495BA079` holds 13 (u32 hash, u32 frame) pairs, the
-named mouth shapes; it is not read. Every one of the 12,269 lines whose speaker has a pose clip stays inside its
+per performance index; in all 21 tables every value is an even frame. The performance indices are the 40 phonemes
+of the game's `kPhoneme` enum (named in `RiftApart.exe`'s reflection data; `animation.PHONEMES`): `x` (silence), `IY`,
+`IH`, `EH`, `AE`, `AH`, `UW`, `UH`, `AA`, `AO`, `EY`, `AY`, `OY`, `AW`, `OW`, `l`, `r`, `y`, `w`, `ER`, `m`, `n`, `NG`,
+`CH`, `j`, `DH`, `b`, `d`, `g`, `p`, `t`, `k`, `z`, `ZH`, `v`, `f`, `TH`, `s`, `SH`, `h`.
+
+Section `0x495BA079` names the pose frames: (u32 name hash, u32 frame) pairs sorted by hash (`pose_names`). The clips
+hold only the hashes; all 30 names of the install's 22 pose clips were recovered by their game CRC-32. Every clip has
+the 13 visemes `vis_xxx`, `vis_aaa`, `vis_eee`, `vis_iii`, `vis_ooo`, `vis_uuu`, `vis_ow`, `vis_www`, `vis_lll`,
+`vis_rrr`, `vis_fv`, `vis_bmp` and `vis_nnn`; Kit and Clank add eye and mouth poses (`Eyes_Open`, `Left_Eye_Closed`,
+`Mouth_Open` …) and Skidd eye, brow, lid and mouth poses (`eyes_up`, `brows_down`, `lids_closed`, `Smile` …). The
+phoneme table agrees with the names: `x` plays `vis_xxx`, `v` and `f` play `vis_fv`, `m`, `b` and `p` play `vis_bmp`,
+`l` plays `vis_lll`, `r` and `ER` play `vis_rrr`, and 11 consonants (`n`, `NG`, `d`, `t`, `k`, `s` …) share `vis_nnn`. Every one of the 12,269 lines whose speaker has a pose clip stays inside its
 table. Index 0 maps Ratchet to frame 20, whose jaw is closed.
 
 **Blend** (`performance_frames`). Per frame, the weighted blend of the indexed pose frames: translation and scale are
@@ -519,8 +533,9 @@ most shapes normal xyz) times a scale plus a bias, in `0x5E709570`. The vertices
 `0xA600C108`, in windows of 2,560 mesh vertices. On Ratchet the deltas of `LF_x` and `RT_x` at mirrored vertices
 differ by a median 0.003 of the shape's largest delta, which is the rounding of their 8-bit fields.
 
-**Clip** (`clip_weights`). The clip morph info `0x277563F5` names its channels by shape name hash and holds a frame
-table: per frame, the count of active channels and a word offset into the frame data `0x69F64588`. There each active
+**Clip** (`clip_weights`). The clip morph info `0x277563F5` names its channels by shape name hash, then by the offset
+of each shape's name in the clip's string pool (the game's clip loader relocates these offsets; the names match the
+hashes in all 2,821 clips, and `clip_weights` returns them as `names`), and holds a frame table: per frame, the count of active channels and a word offset into the frame data `0x69F64588`. There each active
 channel is a bit field (the first absolute, then steps from the previous channel) and a 10-bit value. A channel a
 frame leaves out has weight 0. The weight is the value / 1023; reading 1023 as full weight is inferred, not traced in
 the runtime. Channels are matched to the model's shapes by hash; ones the model lacks are dropped.
@@ -542,25 +557,40 @@ and that `RATC_BOARDS_SLICE1_017` drives 53 of Ratchet's shapes.
 game adds them to what its animation graph plays. An animset's graph is its driver classes, which
 `rcra.animation.driver_graph` decodes (layout in the module docstring):
 
-- **Class:** an 80-byte record in `0x66CA6C6F` (name hash, data size, root node, node count, bindings), a 16-byte row in
-  `0xA40B51D2` (offset of its data in `0x73CEE17F`), and that data: nodes, then 12-byte variable bindings. Names are
-  game CRC-32 hashes of strings in the animset (`Celebrate`, `Node 4`, `Aim_Horizontal`). Empty classes have size 0.
-- **Node:** a 40-byte header (name hash, kind, id, phase at +8, rate at +16, a fixed signature at +24 to +36), then
-  its kind's fields. Children are u16 word offsets into the class data, inline or in u16 lists after the nodes.
+`RiftApart.exe` carries reflection data for the graph's source types (`AnimDriverDef`, `AnimDriverBiBlendNodeDef`,
+`AnimDriverSelectNodeDef` …): their field and enum names. They name the built kinds below, matched by fields and by
+the binding targets; the built layout itself is read from the data.
+
+- **Class** (`AnimDriverDef`): an 80-byte record in `0x66CA6C6F`, a 16-byte row in `0xA40B51D2` (offset of its data
+  in `0x73CEE17F`), and that data: nodes, then 12-byte variable bindings. Record words: name hash, slot count,
+  flags, data size, root node, node count, binding count and offset, and at +56 four transition durations in
+  seconds (`TransitionDurationDefault`, `FromNone`, `ToNone`, `Self`: 0.25 in 3,394 classes, 0.1 for deaths, 0 for
+  346). Flags bits 0-1 are the layer: 0 base (3,916), 1 partial (49, such as `Wings_Out`, `Spawn_Partial_1`), 3
+  partial additive (234, such as `React_Twitch`, `Emergency_Raft_Wobble_Additive`). Bit 2 marks looping classes: by
+  class name, 809 loops and idles have it and 220 do not, while 1,228 intros, outros, reacts and deaths lack it and 93
+  have it. Names are game CRC-32 hashes of strings in the animset (`Celebrate`, `Node 4`, `Aim_Horizontal`). Empty
+  classes have size 0.
+- **Node:** a 40-byte header (name hash, kind and flags, id, time at +8, rate at +16, a fixed signature at +24 to
+  +36), then its kind's fields. Children are u16 word offsets into the class data, inline or in u16 lists after the
+  nodes.
 
 | Kind | Nodes | Fields |
 | --- | --- | --- |
-| 1 clip | 8,896 | a reference the animset's clip lookup resolves (`clip_references`): a clip asset, or a clip group; flag `0x100` on 2,383, of which 1,698 name an additive clip and 4 an absolute one (the rest name groups or clips of other sets) |
-| 2 pair | 1,260 | child 0, child 1, a mode byte (2 in 1,183, 1 in 56, 3 in 21) and a weight (1 in 1,193; 0, 0.25, 0.4, 0.5, 0.7, 0.8 or 0.95 in the others) |
-| 5 blend space | 1,006 | a variable slot and per child a (low, high) span: 0 to 1, or angles such as −180 to −90, −180 to 0, −90 to 90 … for five children 90° apart, so each child's span reaches its neighbours' positions |
-| 7 select | 291 | a list of children (states, variations) |
-| 9 list | 158 | a list of children |
-| 10, 12 | 26 | one child |
+| 1 clip | 8,896 | a reference the animset's clip lookup resolves (`clip_references`): a clip asset, or a clip group. Flag 1 (`kClipNodeFlagsIsAdditive`) on 2,383, of which 1,698 name an additive clip and 4 an absolute one (the rest name groups or clips of other sets); a u32 0 or 2 at +40 is not read |
+| 2 bi-blend | 1,260 | child 0, child 1, a type byte (`kBiBlendNodeType`: 2 combine additive in 1,183, 1 additive in 56, 3 difference in 21) and a factor (1 in 1,193; 0, 0.25, 0.4, 0.5, 0.7, 0.8 or 0.95 in the others) |
+| 5 blend | 1,006 | a variable slot, per child a (low, high) span: 0 to 1, or angles such as −180 to −90, −180 to 0, −90 to 90 … for five children 90° apart, so each child's span reaches its neighbours' positions; the stored current value at +48 (0 in 994) |
+| 7 random | 291 | its children (variations) and a u16 weight per child out of 65535 (0.8/0.1/0.1, 0.7/0.3, 0.6/0.4 …), or `0xFFFF` for equal odds (232); no binding drives it |
+| 9 select | 158 | its children and the current index at +44 (`CurrentNodeIndex`), within the children in all 158; 88 are bound to a variable (`Direction`, `Ledge Jump Direction`, `Range`, `Initial_Phase_Ascending`), the others always play their stored child |
+| 10, 12 | 26 | one child; kind 10 also names a variable (`Direction` on Ratchet's ledge and climb moves). Their types are not named |
 
 - **Bindings:** u32 variable name hash, u16 slot, u16 word offset of the bound field or of a list of them, u32 flags
-  (low byte set for a list). Over the install, 1,654 bindings drive a blend space's input (1,004 fields), an additive
-  clip's phase (929: head and aim layers posed by `Head_Aim_Horizontal` and the like), a list's +44 (90) and a pair's
-  weight (15).
+  (low byte set for a list, `0x100` for a float field). The bound fields are the reflection's connection targets.
+  Over the install, 1,654 bindings drive a blend's current value (`kBlendCurrentValue`, 1,004 fields), a clip's time
+  (`kClipTime`, 929: the head and aim layers pick their pose by time from `Head_Aim_Horizontal` and the like), a
+  select's index (`kSelectCurrentIndex`, 90) and a bi-blend's factor (`kBiBlendFactor`, 15).
+- **Variables** `0xDF74DA06` (84 animsets): (u32 variable hash, u32 class hash, u32 word) rows, the variables each
+  class uses; bit 16 of the word is set for float variables (the select inputs are integers). The word's low 16 bits
+  are not read.
 - **Clip lookup** `0xB79CF1D7`: 24-byte rows (u32 hash, u32 kind, i32 group offset, u64 asset id, u32 0). Kinds 0 and
   `0x8000` name a clip by its path CRC-64. Kind 1 names a group: an inner DAT1 in `0x9FD19C20` whose entries list tag
   hashes and their clips (`React_Knockback_Group`: front, back, left and right, high and low). All 3,325 group
@@ -570,10 +600,11 @@ Every class of the install's 321 animsets with classes parses (4,199 classes, 11
 finds exactly the record's node count, the root is a node and every child link lands on one. 10,439 nodes are
 reached from their class root; the others are not linked to it, and 390 of them are named by nothing in their class.
 
-**Partners.** A pair whose child 1 holds additive clips adds them over child 0. `RcraAnimationLibrary.layer_partners`
-lists the absolute clips under child 0 (a group's clips included) of every pair that holds the layer in an offered
-animset, the pair nearest the layer first, then graph order; `layer_weight` gives that pair's weight. The thug
-shooter's aim idle class is a blend space on `Aim_Horizontal` over three pairs, (`shooter_aim_idle_fwd`,
+**Partners.** A bi-blend whose child 1 holds additive clips adds them over child 0.
+`RcraAnimationLibrary.layer_partners` lists the absolute clips under child 0 (a group's clips included) of every
+bi-blend that holds the layer in an offered animset, the one nearest the layer first, then graph order;
+`layer_weight` gives its factor. The thug shooter's aim idle class is a blend on `Aim_Horizontal` over three
+bi-blends, (`shooter_aim_idle_fwd`,
 `Shooter_Aim_Idle_Fwd_Pitch`) and its `_l090` and `_r090` siblings, so each pitch layer plays over its own idle.
 Grunthor's eye looks are added at 0.5.
 
@@ -583,23 +614,25 @@ Grunthor's eye looks are added at 0.5.
 | With an absolute base | 290 | 431 |
 | `enm_thug_brawler` (offered clips) | 55 of 160 | 72 |
 
-That a pair adds child 1 scaled by its weight is a reading of the data (mode 2 pairs hold the additive clips in
-child 1), as are the phase and rate fields; the evaluator is not traced in the runtime. A weight a variable drives,
-or one stored as 0 that no variable drives (game code then sets it), plays at 1.
+That a combine-additive bi-blend adds child 1 scaled by its factor is a reading of the type's name and the data
+(those bi-blends hold the additive clips in child 1); the evaluator is not traced in the runtime. A factor a variable
+drives, or one stored as 0 that no variable drives (game code then sets it), plays at 1.
 
-`tests/test_layers.py` checks the parser, bindings, groups, partners and weight on a synthetic animset, the weighted
+`tests/test_layers.py` checks the parser, class fields, bindings, random and select nodes, groups, partners and
+weight on a synthetic animset, the weighted
 `layer_over`, and with `RCRA_GAME` that each thug aim pitch layer plays over its own idle and moves it, and
 Grunthor's eye-look weight of 0.5.
 
 ### Not decoded
 
-- Game state in the animation graph: which state a select node plays, a blend space's input, a group's tags, the
-  variables that drive phases and weights, and the base of a layer whose class holds no absolute clip under the pair
-  (it plays over whatever other classes play). The pair mode byte, the clip node mode, the list node's bound +44 and
-  the class record's remaining words (four floats, possibly blend times) are not read.
-- The format-1 root motion u32 of 7 kind-2 cutscene clips.
-- The per-channel u32 after the clip morph channel hashes, and the last u32 of the model morph info header.
-- The face pose clips' group names (`0x495BA079`), and the gesture clips some performance sets also play.
+- Game state: the values game code gives the graph's variables at a moment (a blend's input, a select's index, a
+  clip's time, a factor), which random variation plays, and which entry of a clip group the game picks by its tags
+  (hit direction, height). These are runtime values, not in the files; `driver_graph` returns the stored values a
+  node plays without them, and playback still uses only the layer partners.
+- The base of a layer whose class holds no absolute clip under the bi-blend (it plays over whatever other classes
+  play), the class flag bits above bit 2, the clip node's +40 word, the types of kinds 10 and 12, and the low half
+  of the variable rows' word.
+- The gesture clips some performance sets also play.
 
 ## Textures
 

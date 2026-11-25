@@ -58,8 +58,9 @@ def model_morph_sections(name_offset, bits=5, positions_only=False):
     return {morph.MORPH_INFO: info, morph.MORPH_DATA: data, morph.MORPH_INDICES: index}
 
 
-def clip_morph_sections(frames, hashes, first_bits=2, step_bits=3):
-    """Clip morph info and frame data: frames of (channel, value) lists."""
+def clip_morph_sections(frames, hashes, first_bits=2, step_bits=3, name_offsets=None):
+    """Clip morph info and frame data: frames of (channel, value) lists. ``name_offsets``: each channel's name
+    offset in the string pool (default 0)."""
     count_bits, value_bits = 3, 10
     stream, rows = b'', []
     for entries in frames:
@@ -77,7 +78,9 @@ def clip_morph_sections(frames, hashes, first_bits=2, step_bits=3):
     bits += '0' * (-len(bits) % 32)
     table = int(bits, 2).to_bytes(len(bits) // 8, 'big')
     info = struct.pack('<H6BI', len(hashes), count_bits, offset_bits, first_bits, step_bits, value_bits, 0, len(table))
-    info += struct.pack('<I', 0) + struct.pack(f'<{len(hashes)}I', *hashes) + bytes(4 * len(hashes)) + table
+    offsets = name_offsets or [0] * len(hashes)
+    info += struct.pack('<I', 0) + struct.pack(f'<{len(hashes)}I', *hashes) + struct.pack(f'<{len(hashes)}I', *offsets)
+    info += table
     return {morph.CLIP_MORPH_INFO: info, morph.CLIP_MORPH_FRAMES: stream}
 
 
@@ -112,9 +115,11 @@ class ClipWeightTests(unittest.TestCase):
     FRAMES = [[(1, 1023), (4, 512)], [], [(0, 10), (2, 20), (5, 30)]]
 
     def test_first_channel_steps_and_values(self):
-        raw = dat1(clip_morph_sections(self.FRAMES, [11, 22, 33, 44, 55, 66]))
+        raw = dat1(clip_morph_sections(self.FRAMES, [11, 22, 33, 44, 55, 66], name_offsets=[0, 3, 3, 6, 0, 6]),
+                   b'aa\0bb\0cc\0')
         found = morph.clip_weights(raw, sections(raw), 3)
         self.assertEqual(found['hashes'], [11, 22, 33, 44, 55, 66])
+        self.assertEqual(found['names'], ['aa', 'bb', 'bb', 'cc', 'aa', 'cc'])   # string-pool offsets per channel
         expected = np.zeros((3, 6))
         for frame, entries in enumerate(self.FRAMES):
             for channel, value in entries:
@@ -231,6 +236,8 @@ class RealMorphTests(unittest.TestCase):
         raw, table = clip_dat1(data)
         found = morph.clip_weights(raw, table, header(data)['original_frame_count'])
         self.assertEqual(len(found['hashes']), 55)
+        from nwo.formats.container import game_crc32
+        self.assertEqual([game_crc32(name) for name in found['names']], found['hashes'])
         self.assertFalse(found['weights'][20].any())   # the silence pose
         self.assertTrue(found['weights'][0].any())
         library = animation_library(self.source, self.data(self.RATCHET), self.RATCHET).with_performances()

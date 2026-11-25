@@ -178,7 +178,7 @@ class RootMotionTests(unittest.TestCase):
         np.testing.assert_allclose(found['translation'], [[0, 0, 0], [1, 0, -0.5], [1.5, 0, 0]])
         np.testing.assert_allclose(found['rotation_xyzw'][1], yaw(90), atol=1e-4)
         self.assertEqual((found['layout'], found['kind']), (0, 3))
-        np.testing.assert_allclose(found['phase'], [-91 / 127] * 3)   # i8 foot phase 0xA5 of a kind-3 clip
+        np.testing.assert_allclose(found['phase'], [-181 / 255] * 3)  # i8 foot phase 0xA5 (-91) of a kind-3 clip
 
     def test_twenty_four_byte_records(self):
         rotations = [yaw(0), yaw(-170), np.array([0.5, -0.5, 0.5, 0.5])]
@@ -189,9 +189,9 @@ class RootMotionTests(unittest.TestCase):
             self.assertAlmostEqual(abs(float(np.dot(got, want))), 1.0, places=9)   # q and -q are one rotation
         np.testing.assert_allclose(found['translation'][1], [1.5, -2.0, 300.25])
         self.assertIsNone(found['phase'])                             # kind 2: no foot phase
-        records = b''.join(struct.pack('<Q3fI', smallest_three(yaw(0)), 0, 0, 0, b) for b in (0x81, 0, 0x7F))
+        records = b''.join(struct.pack('<Q3fI', smallest_three(yaw(0)), 0, 0, 0, b) for b in (0x80, 0, 0x5948007F))
         found = ra.motion(build_clip([(0, 0)] * 3, extra={ra.MOTION: motion_section(1, 3, records, 3, 3)}))
-        np.testing.assert_allclose(found['phase'], [-1, 0, 1])        # the u32's low byte, i8 / 127
+        np.testing.assert_allclose(found['phase'], [-1, 1 / 255, 1])  # the u32's low byte, (2 i8 + 1) / 255
 
     def test_no_records_and_no_section(self):
         found = ra.motion(build_clip([(0, 0)] * 3, extra={ra.MOTION: motion_section(1, 0, b'', 0, 3)}))
@@ -280,6 +280,13 @@ class FacePerformanceTests(unittest.TestCase):
         table = struct.pack('<4H', 20, 8, 0, 2)
         self.assertEqual(ra.pose_table(build_clip([(0, 0)] * 2, extra={ra.PHONEME_TABLE: table})), [20, 8, 0, 2])
         self.assertIsNone(ra.pose_table(build_clip([(0, 0)] * 2)))
+
+    def test_pose_names_and_phonemes(self):
+        pairs = sorted((game_crc32(name), frame) for name, frame in (('vis_xxx', 20), ('vis_fv', 12), ('Pose9', 4)))
+        names = ra.pose_names(build_clip([(0, 0)] * 2, extra={ra.POSE_NAMES_SECTION: struct.pack('<6I', *sum(pairs, ()))}))
+        self.assertEqual(names, {20: 'vis_xxx', 12: 'vis_fv', 4: f'0x{game_crc32("Pose9"):08X}'})
+        self.assertIsNone(ra.pose_names(build_clip([(0, 0)] * 2)))
+        self.assertEqual((len(ra.PHONEMES), ra.PHONEMES[0], ra.PHONEMES[34], ra.PHONEMES[35]), (40, 'x', 'v', 'f'))
 
     def test_blend_of_pose_frames(self):
         def row(angle, tx, scale=1.0):

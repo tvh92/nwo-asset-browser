@@ -32,7 +32,8 @@ in some clips, a closing one), each the root's rotation and translation relative
 
   +0   u8 record format (0: 16-byte records, 1: 24-byte records), u8 kind (0: no records, 2, 3), u16 records
   +4   f32 start rotation xyzw; +32 f32 1.0, then f32 start translation xyz
-  +64  u32 bytes from +124 (records, zero-padded so the section is a multiple of 16), u32 frames; +76 f32 minimum xyz and
+  +60  u32 record offset from +124 (0); +64 u32 bytes from +124 (records, zero-padded so the section is a multiple
+       of 16), u16 frames, u8 count of 80-byte entries at that offset (0 in every clip); +76 f32 minimum xyz and
        +100 f32 maximum xyz of the root translation over the clip (start + start rotation * record)
   +124 records. Format 0: i16 rotation xyzw (unit at 32767), i16 translation xyz, u8 exponent e (the
        translation is the integer times 2^-e), i8 foot phase. Format 1: u64 smallest-three rotation (three
@@ -40,9 +41,12 @@ in some clips, a closing one), each the root's rotation and translation relative
        bits 60-61 its index; that component is positive), f32 translation xyz, u32 whose low byte is the i8 foot
        phase (0 in all but 171 cutscene clips; 164 of them kind 3).
 
-Kind 3 (locomotion) clips set the foot phase: the i8 / 127, -1 where the left foot lands and +1 where the right
-foot lands, linear between (Ratchet's strafe walk and run). Other clips leave it 0, except 7 kind-2 cutscene
-clips whose format-1 u32 is not read.
+Kind 3 (locomotion) clips set the foot phase: (2 * i8 + 1) / 255, so -128 is -1 where the left foot lands and 127
+is +1 where the right foot lands, linear between (Ratchet's strafe walk and run). The game's root-motion sampler
+(RiftApart.exe 0x140F29C00 and 0x140F2A100) computes it this way and reads the byte only when the kind byte's bit 0
+is set (kind 3); it reads nothing else of the format-1 u32. 7 kind-2 clips (the spitter's distortion projectile and
+six fixer-scaffold props of one cutscene) hold a smooth per-frame curve in that u32's high 16 bits, which the game
+does not read.
 
 The 0x3976E44C path section (two 4x4 float matrices) is not read: RiftApart.exe never names it (its id occurs
 nowhere in the executable), so the game does not use it. Triggers, morph and face sections are read elsewhere or
@@ -50,26 +54,43 @@ not at all.
 
 ``driver_graph`` decodes the driver classes (animation graphs) of an ``.animset``. Each class is an 80-byte
 record in 0x66CA6C6F, a 16-byte row in 0xA40B51D2 (+0 u32 byte offset of its data in 0x73CEE17F) and that data:
-a run of nodes, then 12-byte variable bindings. Record (u32 words): +0 class name hash, +12 data bytes, +16 root
-node offset, +20 node count, +24 binding count, +28 binding offset; the rest is not read. Names are game CRC-32
-hashes (``container.game_crc32``) of strings the animset holds.
+a run of nodes, then 12-byte variable bindings. Record (u32 words): +0 class name hash, +4 slot count, +8 flags,
++12 data bytes, +16 root node offset, +20 node count, +24 binding count, +28 binding offset, +56 four f32
+transition durations in seconds (default, from none, to none, self). Names are game CRC-32 hashes
+(``container.game_crc32``) of strings the animset holds.
+
+The names of node types, fields and enums come from RiftApart.exe's reflection data (``AnimDriverDef``,
+``AnimDriverBiBlendNodeDef``, ``kSelectCurrentIndex`` ...); which built kind is which type follows from the fields
+and from the binding targets below. Class flags: bits 0-1 the layer (0 base, 1 partial, 3 partial additive: the
+classes so marked are named ``*_Partial``, ``React_Twitch``, ``*_Additive``), bit 2 set on looping classes (by
+name: 809 loop or idle classes have it, 220 do not; 1,228 intros, outros, reacts and deaths lack it, 93 have it).
+The remaining bits are not read.
 
   node header (40 bytes)  +0 u32 node name hash, +4 u16 type (low byte the kind, high byte flags), +6 u16 id,
-                          +8 f32 phase, +16 f32 rate, +24 and +28 f32 -1, +36 u32 0xFFFFFFFF
-  kind 1 clip            +40 u32 mode, +44 u32 reference (``clip_references``)
-  kind 2 pair            +40 u16 child 0, u16 child 1, +44 u8 mode, +52 f32 weight
-  kind 5 blend space     +40 u16 variable slot, u16 children, +44 u16 child list, u16 span list: per child a
-                          (low, high) f32 span on the bound variable
-  kind 7 select          +40 u16, u16 children, +44 u16 child list
-  kind 9 list            +40 u16 children, u16 child list
-  kind 10, 12 wrap       +40 u32 child
+                          +8 f32 time, +16 f32 rate, +24 and +28 f32 -1, +36 u32 0xFFFFFFFF
+  kind 1 clip            flags 1: additive (``kClipNodeFlagsIsAdditive``); +40 u32 0 or 2 (not read), +44 u32
+                          reference (``clip_references``)
+  kind 2 bi-blend        +40 u16 child 0, u16 child 1, +44 u8 type (1 additive, 2 combine additive, 3
+                          difference), +52 f32 factor
+  kind 5 blend           +40 u16 variable slot, u16 children, +44 u16 child list, u16 span list: per child a
+                          (low, high) f32 span on +48, the current value
+  kind 7 random          +40 u16, u16 children, +44 u16 child list, u16 weight list (0xFFFF: equal odds): per
+                          child a u16 weight out of 65535
+  kind 9 select          +40 u16 children, u16 child list, +44 u32 current index (the child played)
+  kind 10, 12 wrap       +40 u32 child (10 has a variable hash at +44; neither type is named)
 
 Child references and lists are u16 word offsets into the class data (byte offset / 4); a list holds u16 word
 offsets of the children. Nodes are found by their header signature (+24, +28 and +36), which yields the record's
 node count in every class of the install. A binding is u32 variable name hash, u16 slot, u16 word offset, u32
 flags: with flags low byte nonzero the word offset holds a zero-terminated u16 list of the bound fields' word
-offsets, else it is the bound field. Bound fields are a blend space's +48 (its input), a clip's phase +8, a list's
-+44 and a pair's weight +52. Which clip phase or weight a variable gives at a moment is game state.
+offsets, else it is the bound field; flag 0x100 marks a float field (the select index is an integer). The bound
+fields are the reflection's connection targets: a clip's time +8 (``kClipTime``: the head and aim layers pick
+their pose by time), a bi-blend's factor +52 (``kBiBlendFactor``), a blend's current value +48
+(``kBlendCurrentValue``) and a select's current index +44 (``kSelectCurrentIndex``). The value a variable has at a
+moment is game state; without it a node plays its stored value (``driver_graph`` returns them).
+
+The animset section 0xDF74DA06 lists (u32 variable hash, u32 class hash, u32 word) rows: which variables each class
+uses; the word's bit 16 is set for float variables. Its low 16 bits are not read.
 
 ``clip_references`` resolves a clip node's reference through the animset's clip lookup 0xB79CF1D7 (24-byte rows:
 u32 hash, u32 kind, i32 group offset, u64 asset id, u32 0). Kind 0 and 0x8000 name a clip asset by its path
@@ -78,10 +99,18 @@ CRC-64; kind 1 names a clip group: an inner DAT1 at the group offset in 0x9FD19C
 hashes, two 0xFFFFFFFF words, then the entry's clip hashes, which the lookup resolves). The game picks a group's
 entry by its tags (hit direction, height).
 
-A pair node whose child 1 holds additive clips adds them over child 0 (``RcraAnimationLibrary.layer_partners``):
-the thug shooter's aim idle class blends, by its ``Aim_Horizontal`` variable, three pairs such as
-(``shooter_aim_idle_fwd``, ``Shooter_Aim_Idle_Fwd_Pitch``). That the pair adds child 1 scaled by the weight is a
-reading of the data (its mode byte is 2 in 1,183 of the 1,260 pairs), not traced in the runtime.
+A bi-blend node whose child 1 holds additive clips adds them over child 0 (``RcraAnimationLibrary.layer_partners``):
+the thug shooter's aim idle class blends, by its ``Aim_Horizontal`` variable, three bi-blends such as
+(``shooter_aim_idle_fwd``, ``Shooter_Aim_Idle_Fwd_Pitch``). 1,183 of the 1,260 bi-blends have the type
+combine additive; that it adds child 1 scaled by the factor is a reading of that name and the data, not traced
+in the runtime.
+
+Face pose clips name their pose frames in section 0x495BA079 ((u32 name hash, u32 frame) pairs sorted by hash;
+``pose_names``): the 13 shared visemes ``vis_xxx`` (silence), ``vis_aaa``, ``vis_eee``, ``vis_iii``, ``vis_ooo``,
+``vis_uuu``, ``vis_ow``, ``vis_www``, ``vis_lll``, ``vis_rrr``, ``vis_fv``, ``vis_bmp``, ``vis_nnn``, and for a few
+speakers eye, brow and lid poses. The 40 performance indices of the phoneme table are the reflection's
+``kPhoneme`` enum (``PHONEMES``: x, IY, IH, EH ... SH, h), which the visemes match: index 0 ``x`` plays
+``vis_xxx``, ``v`` and ``f`` play ``vis_fv``, ``m``, ``b`` and ``p`` play ``vis_bmp``.
 """
 from __future__ import annotations
 
@@ -332,7 +361,7 @@ def motion_section(section):
         rotation /= norms[:, None]
         translation = values[:, 4:7] * np.exp2(-records[:, 14].astype(float))[:, None]
         phase_bytes = records[:, 15]
-    phase = phase_bytes.astype(np.int8) / 127.0 if kind == 3 else None
+    phase = (2.0 * phase_bytes.astype(np.int8) + 1.0) / 255.0 if kind == 3 else None
     require(np.isfinite(start_q).all() and np.isfinite(start_t).all() and np.isfinite(translation).all(),
             'non-finite root motion')
     return dict(start_rotation_xyzw=start_q, start_translation=start_t, rotation_xyzw=rotation,
@@ -354,12 +383,42 @@ def pose_table(data):
     return list(struct.unpack_from(f'<{size // 2}H', dat1, offset))
 
 
+# The performance indices: RiftApart.exe's kPhoneme enum, in order (index 0 is silence).
+PHONEMES = ('x IY IH EH AE AH UW UH AA AO EY AY OY AW OW l r y w ER m n NG CH j DH b d g p t k z ZH v f TH s SH '
+            'h').split()
+POSE_NAMES_SECTION = 0x495BA079
+# Every pose name of the install's 22 face pose clips (game CRC-32 verified; the clips hold only the hashes).
+POSE_NAMES = ('vis_xxx vis_aaa vis_eee vis_iii vis_ooo vis_uuu vis_ow vis_www vis_lll vis_rrr vis_fv vis_bmp vis_nnn '
+              'Mouth_Open Mouth_Closed Eyes_Open Eyes_Closed Left_Eye_Closed Right_Eye_Closed mouth_open '
+              'mouth_closed Smile Idle eyes_up eyes_down Eyes_left Eyes_right brows_up brows_down lids_closed').split()
+
+
+def pose_names(data):
+    """{pose frame: name} of a face pose clip (section 0x495BA079), or None for a clip without names. A name the
+    game's list does not hold is given as its hash ('0x...'); a frame with two names keeps the first by hash."""
+    from nwo.formats.container import game_crc32
+    dat1, table = clip_dat1(data)
+    if POSE_NAMES_SECTION not in table:
+        return None
+    offset, size = table[POSE_NAMES_SECTION]
+    require(size % 8 == 0, 'malformed pose name table')
+    known = {game_crc32(name): name for name in POSE_NAMES}
+    found = {}
+    for name_hash, frame in struct.iter_unpack('<II', dat1[offset:offset + size]):
+        found.setdefault(frame, known.get(name_hash, f'0x{name_hash:08X}'))
+    return found
+
+
 DRIVER_BUILT, DRIVER_LOOKUP, DRIVER_DATA = 0x66CA6C6F, 0xA40B51D2, 0x73CEE17F
 CLIP_LOOKUP, CLIP_GROUPS, GROUP_ENTRIES, GROUP_LISTS = 0xB79CF1D7, 0x9FD19C20, 0x5025990D, 0x51A11F85
 NODE_HEADER = 40
-NODE_CLIP, NODE_PAIR, NODE_BLEND_SPACE, NODE_SELECT, NODE_LIST = 1, 2, 5, 7, 9
+NODE_CLIP, NODE_PAIR, NODE_BLEND_SPACE, NODE_RANDOM, NODE_SELECT = 1, 2, 5, 7, 9
 NODE_WRAPS = (10, 12)
-PAIR_WEIGHT = 52   # a pair node's weight field, which a binding may drive
+PAIR_WEIGHT = 52   # a bi-blend node's factor field, which a binding may drive
+PAIR_TYPES = {1: 'additive', 2: 'combine additive', 3: 'difference'}   # kBiBlendNodeType
+LAYERS = {0: 'base', 1: 'partial', 3: 'partial additive'}   # class flags bits 0-1
+CLASS_LOOPING = 0x4
+BINDING_FLOAT = 0x100
 LOOKUP_GROUP = 1
 _NODE_SIGNATURE = struct.pack('<2f', -1.0, -1.0)
 
@@ -384,11 +443,15 @@ def _graph_node(blob, at):
         children, spans = struct.unpack_from('<HH', blob, at + 44)
         values = struct.unpack_from(f'<{2 * second}f', blob, 4 * spans)
         node.update(slot=first, children=_word_list(blob, children, second),
-                    spans=[values[2 * k:2 * k + 2] for k in range(second)])
+                    spans=[values[2 * k:2 * k + 2] for k in range(second)],
+                    value=struct.unpack_from('<f', blob, at + 48)[0])
+    elif kind == NODE_RANDOM:
+        children, weights = struct.unpack_from('<HH', blob, at + 44)
+        node.update(children=_word_list(blob, children, second),
+                    weights=(None if weights == 0xFFFF else
+                             [w / 65535.0 for w in struct.unpack_from(f'<{second}H', blob, 4 * weights)]))
     elif kind == NODE_SELECT:
-        node.update(children=_word_list(blob, struct.unpack_from('<H', blob, at + 44)[0], second))
-    elif kind == NODE_LIST:
-        node.update(children=_word_list(blob, second, first))
+        node.update(children=_word_list(blob, second, first), index=struct.unpack_from('<I', blob, at + 44)[0])
     elif kind in NODE_WRAPS:
         node.update(children=[4 * struct.unpack_from('<I', blob, at + 40)[0]])
     return node
@@ -410,9 +473,12 @@ def _bound_fields(blob, word, flags):
 def driver_graph(data):
     """The driver classes (animation graphs) of an animset asset (toc header + DAT1), in record order; [] for an
     animset without them. Each is dict(name: class name hash, root: root node offset or None, nodes: {byte offset:
-    node}, bindings: [dict(variable: name hash, slot, fields: [bound field byte offsets])]). A node is dict(at,
-    name, kind, flags, id, phase, rate, children: [node offsets], bound: {field offset in the node: variable name
-    hash}) plus its kind's fields (module docstring)."""
+    node}, bindings: [dict(variable: name hash, slot, fields: [bound field byte offsets], float)], flags, layer
+    ('base', 'partial', 'partial additive' or None), looping, transitions: (default, from none, to none, self)
+    seconds). A node is dict(at, name, kind, flags, id, phase (its stored time), rate, children: [node offsets],
+    bound: {field offset in the node: variable name hash}) plus its kind's fields: clip mode, ref; bi-blend mode
+    (type), weight (factor); blend slot, spans, value; random weights (None: equal odds); select index (module
+    docstring)."""
     dat1 = data[HEADER:]
     table = dat1_sections(dat1)
     if not all(tag in table for tag in (DRIVER_BUILT, DRIVER_LOOKUP, DRIVER_DATA)):
@@ -427,8 +493,11 @@ def driver_graph(data):
         record = struct.unpack_from('<8I', dat1, built_at + 80 * number)
         start = struct.unpack_from('<I', dat1, lookup_at + 16 * number)[0]
         size, root, node_count, bound_count, bound_at = record[3:8]
+        flags = record[2]
+        about = dict(name=record[0], flags=flags, layer=LAYERS.get(flags & 3), looping=bool(flags & CLASS_LOOPING),
+                     transitions=struct.unpack_from('<4f', dat1, built_at + 80 * number + 56))
         if not size:   # an empty class: no nodes, lookup offset 0xFFFFFFFF
-            classes.append(dict(name=record[0], root=None, nodes={}, bindings=[]))
+            classes.append(dict(about, root=None, nodes={}, bindings=[]))
             continue
         require(start + size <= data_size, 'driver class data outside its section')
         blob = dat1[data_at + start:data_at + start + size]
@@ -443,12 +512,13 @@ def driver_graph(data):
         bindings, starts = [], sorted(nodes)
         for k in range(bound_count):
             variable, slot, word, flags = struct.unpack_from('<IHHI', blob, bound_at + 12 * k)
-            bindings.append(dict(variable=variable, slot=slot, fields=_bound_fields(blob, word, flags)))
+            bindings.append(dict(variable=variable, slot=slot, fields=_bound_fields(blob, word, flags),
+                                 float=bool(flags & BINDING_FLOAT)))
             for field in bindings[-1]['fields']:
                 owner = starts[bisect.bisect_right(starts, field) - 1] if starts and field >= starts[0] else None
                 if owner is not None:
                     nodes[owner]['bound'][field - owner] = variable
-        classes.append(dict(name=record[0], root=root if nodes else None, nodes=nodes, bindings=bindings))
+        classes.append(dict(about, root=root if nodes else None, nodes=nodes, bindings=bindings))
     return classes
 
 

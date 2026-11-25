@@ -100,7 +100,8 @@ def graph_animset():
     data += struct.pack('<HH', 72, 48) + struct.pack('<4f', 0, 1, 0, 1)           # child list @404, spans @408
     data += struct.pack('<IHHI', 0xABCD, 9, 110, 0x101) + bytes(4)                # binding @424, its list @440
     data += struct.pack('<HH', 98, 0) + bytes(4)                                  # bound field: @344 + 48
-    built = struct.pack('<14I4f2I', 0xC1A55, 9, 512, len(data), 344, 5, 1, 424, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    built = struct.pack('<14I4f2I', 0xC1A55, 9, 0x207, len(data), 344, 5, 1, 424, 0, 0, 0, 0, 0, 0,
+                        0.25, 0.5, 0.125, 0.0, 0, 0)
     built += struct.pack('<14I4f2I', 0xE3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     lookup = struct.pack('<4I', 0, 0, 0, 0) + struct.pack('<4I', 0xFFFFFFFF, 0, 0, 0)
     group = dat1({ra.GROUP_ENTRIES: struct.pack('<8I', 1, 0, 0, 0, 0, 0x201, 1, 0),
@@ -115,7 +116,10 @@ class DriverGraphTests(unittest.TestCase):
     def test_nodes_links_and_bindings(self):
         asset, _ids = graph_animset()
         first, empty = ra.driver_graph(asset)
-        self.assertEqual(empty, dict(name=0xE3, root=None, nodes={}, bindings=[]))
+        self.assertEqual(empty, dict(name=0xE3, flags=0, layer='base', looping=False, transitions=(0.0, 0.0, 0.0, 0.0),
+                                     root=None, nodes={}, bindings=[]))
+        self.assertEqual((first['layer'], first['looping'], first['transitions']),
+                         ('partial additive', True, (0.25, 0.5, 0.125, 0.0)))   # flags 0x207
         self.assertEqual(first['root'], 344)
         nodes = first['nodes']
         self.assertEqual(sorted(nodes), [0, 96, 192, 288, 344])
@@ -125,10 +129,25 @@ class DriverGraphTests(unittest.TestCase):
         space = nodes[344]
         self.assertEqual((space['children'], space['spans']), ([288, 192], [(0.0, 1.0), (0.0, 1.0)]))
         self.assertEqual(space['bound'], {48: 0xABCD})
-        self.assertEqual(first['bindings'], [dict(variable=0xABCD, slot=9, fields=[392])])
+        self.assertEqual(first['bindings'], [dict(variable=0xABCD, slot=9, fields=[392], float=True)])
+        self.assertEqual(space['value'], 0.0)
         self.assertEqual(ra.graph_reach(first), [344, 288, 0, 96, 192])
         self.assertEqual(ra.graph_reach(first, 288), [288, 0, 96])
         self.assertEqual(ra.driver_graph(bytes(36) + dat1({ra.DRIVER_BUILT: bytes(80)})), [])
+
+    def test_random_and_select_nodes(self):
+        # Random: +40 u16 1, u16 children, +44 u16 child list, u16 weight list (u16 out of 65535; 0xFFFF: equal odds).
+        blob = node(0x40, 7, struct.pack('<HHHH', 1, 2, 18, 19) + bytes(24))
+        blob += struct.pack('<HH', 0, 18) + struct.pack('<HH', 0xCCCC, 0x3333)          # child list @72, weights @76
+        found = ra._graph_node(blob, 0)
+        self.assertEqual(found['children'], [0, 72])
+        self.assertEqual([round(w, 3) for w in found['weights']], [0.8, 0.2])
+        equal = node(0x40, 7, struct.pack('<HHHH', 1, 2, 18, 0xFFFF) + bytes(24)) + struct.pack('<HH', 0, 18)
+        self.assertIsNone(ra._graph_node(equal, 0)['weights'])
+        # Select: +40 u16 children, u16 child list, +44 u32 current index.
+        select = node(0x50, 9, struct.pack('<HHI', 2, 12, 1)) + struct.pack('<HH', 0, 18)
+        found = ra._graph_node(select, 0)
+        self.assertEqual((found['children'], found['index']), ([0, 72], 1))
 
     def test_clip_references_resolve_groups(self):
         asset, (a, l_, b) = graph_animset()
