@@ -7,7 +7,8 @@ written. One folder per model::
     <output>/<model>/<model>.glb | .gltf + .bin | .obj + .mtl | .fbx | .usdc
     <output>/<model>/textures/   material PNGs (and the original DDS textures when asked)
     <output>/<model>/export.json source identity, options, clips and limitations
-    <output>/<model>.blend         the Blender scene, when asked: beside the folder, not in it
+    <output>/<model>.blend         the Blender scene, when asked: beside the folder, not in it. When it is the only
+                                   format, the model folder is not kept (no export.json either)
 
 Coordinates stay native (Y-up, right-handed, game units), which is glTF's own convention; the
 glTF importers in Blender and other tools turn that into their up axis. UVs are the game's (top
@@ -1084,8 +1085,14 @@ class ModelExporter:
                     notes=notes, coordinates='native Y-up, right-handed, game units; glTF UVs top-left origin',
                     limitations='Portable approximation of the game material (metal/roughness conversion of the decoded specular/gloss); '
                                 'terms the format cannot carry are left out, as each material\'s notes say. Not game-equivalent.')
-        info_path.write_text(json.dumps(info, indent=1), encoding='utf-8')
         message = f"{len(info['files'])} files, {len(clips_out)} clip(s)" + (f", {len(skipped)} clip(s) skipped" if skipped else '')
+        if tuple(options.formats) == ('blend',):
+            # The .blend is the only deliverable and packs its own images, so the model folder (its export.json,
+            # material list and any textures) goes; the .blend stays in the output root.
+            shutil.rmtree(folder)
+            folder = folder.parent / f'{folder.name}.blend'
+        else:
+            info_path.write_text(json.dumps(info, indent=1), encoding='utf-8')
         return dict(status='exported', folder=str(folder), message=message, notes=notes,
                     clips=[{k: v for k, v in c.items() if k != 'tracks'} | dict(frames=len(c['tracks'])) for c in clips_out],
                     skipped_clips=skipped)
