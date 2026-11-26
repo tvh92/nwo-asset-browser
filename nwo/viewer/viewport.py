@@ -1004,7 +1004,63 @@ class ModelViewport(_TkFrame):
         return bool(payload.get('static_vector_eligible') and raw is not None
                     and len(raw) == len(payload.get('vertices', ())) and len(raw) > 0)
 
+    # Link a material's uncached program without waiting (Shading.native_program wait=False): until it is linked the
+    # material draws as if it had no translation (its colour and normal preview), fur shells and translated forward
+    # passes are left out, and _pump_links redraws as links finish. Linking every program of a model inside one frame
+    # froze the window, about 0.2 s per program. Offscreen captures (thumbnails) and the level viewer, which has its own
+    # material pump, keep linking at once.
+    ASYNC_LINKS = True
+    LINK_POLL_MS = 30
+
     def _selected_surface(self, entry, level):
+        surface = self._chosen_surface(entry, level)
+        if surface[0] and self.ASYNC_LINKS and not self._surface_ready(entry, level, surface):
+            return None, {}, False
+        return surface
+
+    def _surface_ready(self, entry, level, surface):
+        """Whether the program of a chosen surface is linked (or failed to link: the draw then reports it); an unlinked
+        one has its link started. Memoised with the surface programs until a link finishes. Only a Shading that keeps
+        pending links can defer one; any other program source links at once."""
+        sh = getattr(self, '_shading', None)
+        if sh is None or not isinstance(getattr(sh, 'pending', None), dict):
+            return True
+        memo = self.__dict__.get('_program_memo')
+        if memo is None or memo[0] is not sh:
+            memo = self._program_memo = (sh, {})
+        key = ('ready', id(entry), level, self.native_translation, getattr(self, 'experimental_materials', False))
+        found = memo[1].get(key)
+        if found is not None and found[0] is entry:
+            return True
+        args, options = self._native_program_args(entry, surface)
+        try:
+            ready = sh.native_program(*args, wait=False, **options) is not None
+        except Exception:
+            ready = True   # the draw asks again and reports the error
+        if ready:
+            memo[1][key] = (entry, True)
+        else:
+            self._schedule_link_poll()
+        return ready
+
+    def _schedule_link_poll(self):
+        if not self.__dict__.get('_link_poll'):
+            self._link_poll = self.after(self.LINK_POLL_MS, self._pump_links)
+
+    def _pump_links(self):
+        """Finish the program links that are ready and redraw with them; poll again while any is pending."""
+        self._link_poll = None
+        sh = self._shading
+        if sh is None or not sh.pending or not self._make_current():
+            return
+        if sh.poll_links(budget=0.02):
+            self.__dict__.pop('_program_memo', None)   # it holds the stand-in programs of the unlinked surfaces
+            self._schedule_draw()
+        if sh.pending:
+            self._schedule_link_poll()
+
+    def _chosen_surface(self, entry, level):
+        """(translation, textures, experimental) the material draws with, linked or not."""
         if level == 2:
             if entry.get('graph_rule_surface'):
                 return entry['graph_rule_surface'], entry['graph_rule_textures'], False
@@ -1049,23 +1105,27 @@ class ModelViewport(_TkFrame):
         memo[1][key] = (entry, result)
         return result
 
+    @staticmethod
+    def _native_program_args(entry, surface, instanced=False, scene=False):
+        """(arguments, keywords) of Shading.native_program for a material entry's chosen surface."""
+        translation, textures, experimental = surface
+        args = (translation, {api: texture[1] for api, texture in textures.items()}, instanced)
+        if translation.get('status') == 'partial_source_rule':
+            return args, dict(scene=scene, rule_preview=True)
+        if experimental:
+            return args, dict(scene=scene, experimental=True)
+        pane = entry.get('alpha_pane')
+        if pane:
+            return args, dict(scene=scene, alpha_api=pane['alpha_api'], alpha_discard=pane['discard'],
+                              alpha_opacity=pane.get('opacity', 1.0))
+        return args, (dict(scene=True) if scene else {})
+
     def _resolve_surface_program(self, entry, level, instanced=False):
         scene = instanced and bool(getattr(self, 'scene_effects_active', lambda: False)())
-        translation, textures, experimental = self._selected_surface(entry, level)
-        if translation:
-            srgb = {api: texture[1] for api, texture in textures.items()}
-            if translation.get('status') == 'partial_source_rule':
-                return self._shading.native_program(translation, srgb, instanced, scene=scene, rule_preview=True)
-            if experimental:
-                return self._shading.native_program(translation, srgb, instanced, scene=scene, experimental=True)
-            pane = entry.get('alpha_pane')
-            if pane:
-                return self._shading.native_program(translation, srgb, instanced, scene=scene,
-                                                    alpha_api=pane['alpha_api'], alpha_discard=pane['discard'],
-                                                    alpha_opacity=pane.get('opacity', 1.0))
-            if scene:
-                return self._shading.native_program(translation, srgb, instanced, scene=True)
-            return self._shading.native_program(translation, srgb, instanced)
+        surface = self._selected_surface(entry, level)
+        if surface[0]:
+            args, options = self._native_program_args(entry, surface, instanced, scene)
+            return self._shading.native_program(*args, **options)
         if instanced:
             return self._shading.instanced_program(scene=True) if scene else self._shading.instanced_program()
         return self._shading.program(self._bone_count or 1)[:2]
@@ -1887,14 +1947,19 @@ class ModelViewport(_TkFrame):
         for slot, first, count in batches:
             entry = (self._gl_textures or {}).get(slot) or {}
             receipt, textures = entry['fur_shell_translation'], entry['fur_shell_textures']
-            program, u = sh.fur_shell_program(receipt, {api: texture[1] for api, texture in textures.items()})
+            linked = sh.fur_shell_program(receipt, {api: texture[1] for api, texture in textures.items()},
+                                          wait=not self.ASYNC_LINKS)
+            if linked is None:   # still linking: the shells appear once it is done
+                self._schedule_link_poll()
+                continue
+            program, u = linked
             sh.glUseProgram(program); self._apply_lighting(u)
             sh.glUniform1i(u['uSkin'], int(skin))
             sh.glUniform1i(u['uBoneTex'], BONE_TEXTURE_UNIT)
             sh.glUniform1f(u['uBoneWidth'], float(4 * (self._bone_count or 1)))
             sh.glUniform1i(u['uMode'], 2)
             sh.glUniform3f(u['uColor'], 0.72, 0.74, 0.78)
-            self._apply_material(u, dict(native_translation=receipt, native_textures=textures), 2)
+            self._apply_material(u, dict(native_translation=receipt, native_textures=textures), 2, (receipt, textures, False))
             fur = receipt['fur']
             sh.glUniform1f(u['uFurInverse'], 1.0 / float(fur['layers']))
             sh.glUniform1f(u['uFurLength'], float(fur['length']))
@@ -2543,11 +2608,12 @@ class ModelViewport(_TkFrame):
                 self._gl.glDeleteTextures(1, ctypes.byref(ctypes.c_uint(name)))
         build['names'] = None
 
-    def _apply_material(self, u, entry, level):
-        """Bind one material's textures and set its uniforms on the current opaque program."""
+    def _apply_material(self, u, entry, level, surface=None):
+        """Bind one material's textures and set its uniforms on the current opaque program. ``surface`` is the
+        (translation, textures, experimental) the program was linked for, when the caller chose it itself."""
         from nwo.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT, LEAF_CMA_TEXTURE_UNIT, RETICLE_TEXTURE_UNIT
         gl, sh = self._gl, self._shading
-        translation, textures, _experimental = self._selected_surface(entry, level)
+        translation, textures, _experimental = surface or self._selected_surface(entry, level)
         if translation:
             from nwo.viewer.native_glsl import TEXTURE_UNITS
             # Same sorted API allocation as emit_surface; no DAG emission during a draw.
@@ -2913,6 +2979,8 @@ class ModelViewport(_TkFrame):
             entry = self._gl_textures[slot]
             forward = forward_rule(entry, native)
             if forward.get('kind') == TRANSLATED_FORWARD:
+                if not self._selected_surface(entry, 2)[0]:   # its program is still linking (ASYNC_LINKS)
+                    continue
                 self._draw_translated_forward(index_array, entry, forward, first, count, skin)
                 sh.glUseProgram(program)
                 continue
@@ -3104,6 +3172,12 @@ class ModelViewport(_TkFrame):
     def _on_destroy(self, event):
         if event.widget is not self:
             return
+        poll = self.__dict__.pop('_link_poll', None)
+        if poll:
+            try:
+                self.after_cancel(poll)
+            except Exception:
+                pass
         if self._gl and self._hrc:
             try:
                 self._gl.wglMakeCurrent(None, None)

@@ -2876,8 +2876,22 @@ class Shading:
                 raise ShaderError(f"OpenGL 2.0 function {name} is unavailable")
             setattr(self, name, ctypes.WINFUNCTYPE(result, *arguments)(address))
         gl.glGetString.restype = ctypes.c_char_p
-        self.supports_parallax = b'GL_ARB_shader_texture_lod' in (gl.glGetString(0x1F03) or b'').split()
+        extensions = (gl.glGetString(0x1F03) or b'').split()
+        self.supports_parallax = b'GL_ARB_shader_texture_lod' in extensions
         self.programs = {}
+        # Links started without waiting (native_program and fur_shell_program with wait=False): key -> its pending link;
+        # finished by poll_links. A failed one keeps its ShaderError, raised when the program is asked for again.
+        self.pending, self.failed = {}, {}
+        # KHR/ARB_parallel_shader_compile: the driver compiles and links on its own threads and reports completion,
+        # so a link costs the window nothing. Without it a pending link is linked by poll_links, one per call.
+        self.parallel = False
+        for extension, suffix in ((b'GL_KHR_parallel_shader_compile', b'KHR'), (b'GL_ARB_parallel_shader_compile', b'ARB')):
+            address = gl.wglGetProcAddress(b'glMaxShaderCompilerThreads' + suffix) if extension in extensions else None
+            if address:
+                ctypes.WINFUNCTYPE(None, ctypes.c_uint)(address)(0xFFFFFFFF)   # as many threads as the driver offers
+                gl.glGetError()
+                self.parallel = True
+                break
         self.binary = None
         try:
             functions = {}
@@ -2909,17 +2923,118 @@ class Shading:
             raise ShaderError(log.value.decode(errors="replace"))
         return shader
 
-    def _link(self, vertex_source, fragment_source, attributes, names):
+    def _link(self, vertex_source, fragment_source, attributes, names, key=None, wait=True):
+        """(program, uniform locations): from the binary cache, or compiled and linked from source. With ``wait`` False
+        a program the cache does not hold is started under ``key`` (``pending``) and None returned; poll_links finishes it."""
         cache = None
         if self.binary and self.program_cache:
             cache = PROGRAM_CACHE_DIR / f"{program_cache_key(vertex_source, fragment_source, attributes, self.binary['driver'])}.bin"
             program = self._load_binary(cache)
             if program:
                 return program, {name: self.glGetUniformLocation(program, name.encode()) for name in names}
+        if not wait:   # issued by poll_links: even a parallel compile costs the caller ~30 ms of driver work
+            self.pending[key] = dict(sources=(vertex_source, fragment_source, attributes), names=names, cache=cache,
+                                     program=0, shaders=())
+            return None
         program = self._link_source(vertex_source, fragment_source, attributes, cache is not None)
         if cache is not None:
             self._save_binary(cache, program)
         return program, {name: self.glGetUniformLocation(program, name.encode()) for name in names}
+
+    def _issue(self, link):
+        """Compile and link a pending program without asking for its status (that would wait for the driver)."""
+        vertex_source, fragment_source, attributes = link['sources']
+        shaders = []
+        for kind, source in ((0x8B31, vertex_source), (0x8B30, fragment_source)):
+            shader = self.glCreateShader(kind)
+            text = ctypes.c_char_p(source.encode())
+            self.glShaderSource(shader, 1, ctypes.byref(text), None)
+            self.glCompileShader(shader)
+            shaders.append(shader)
+        program = self.glCreateProgram()
+        for shader in shaders:
+            self.glAttachShader(program, shader)
+        for name, location in attributes.items():
+            self.glBindAttribLocation(program, location, name.encode())
+        if link['cache'] is not None:
+            self.binary["glProgramParameteri"](program, 0x8257, 1)   # GL_PROGRAM_BINARY_RETRIEVABLE_HINT
+        self.glLinkProgram(program)
+        link.update(program=program, shaders=tuple(shaders))
+
+    def _link_done(self, link):
+        """Whether a parallel link has finished (GL_COMPLETION_STATUS_KHR); asking never waits."""
+        done = ctypes.c_int(0)
+        self.glGetProgramiv(link['program'], 0x91B1, ctypes.byref(done))
+        return bool(done.value)
+
+    def _finish(self, key):
+        """Complete the pending link ``key`` (waiting for the driver if it is still working): ``programs[key]``, or
+        ``failed[key]`` with the compile or link log."""
+        link = self.pending.pop(key)
+        if not link['program']:
+            self._issue(link)
+        program, shaders = link['program'], link['shaders']
+        ok = ctypes.c_int(0)
+        self.glGetProgramiv(program, 0x8B82, ctypes.byref(ok))   # LINK_STATUS
+        error = None
+        if not ok.value:
+            log = ctypes.create_string_buffer(4096)
+            for shader in shaders:   # a compile error explains the failed link best
+                self.glGetShaderiv(shader, 0x8B81, ctypes.byref(ok))
+                if not ok.value:
+                    self.glGetShaderInfoLog(shader, 4096, None, log)
+                    break
+            else:
+                self.glGetProgramInfoLog(program, 4096, None, log)
+            error = ShaderError(log.value.decode(errors="replace"))
+        for shader in shaders:
+            self.glDeleteShader(shader)
+        if error is not None:
+            self.glDeleteProgram(program)
+            self.failed[key] = error
+            return
+        if link['cache'] is not None:
+            self._save_binary(link['cache'], program)
+        self.programs[key] = (program, {name: self.glGetUniformLocation(program, name.encode()) for name in link['names']})
+
+    def poll_links(self, budget=0.0):
+        """One step of the pending links, spending about ``budget`` seconds (at least one link's work): with parallel
+        compiling, finish the links the driver is done with, then hand it more; without, link pending ones here. Returns
+        how many finished (linked or failed). The context must be current."""
+        import time
+        finished, deadline = 0, time.perf_counter() + budget
+        if not self.parallel:
+            for key in list(self.pending):
+                if finished and time.perf_counter() >= deadline:
+                    break
+                self._finish(key)
+                finished += 1
+            return finished
+        for key in [k for k, link in self.pending.items() if link['program'] and self._link_done(link)]:
+            self._finish(key)
+            finished += 1
+        issued = False
+        for link in self.pending.values():
+            if not link['program']:
+                if issued and time.perf_counter() >= deadline:
+                    break
+                self._issue(link)
+                issued = True
+        return finished
+
+    def _waiting(self, key, wait):
+        """For a program not linked yet: True when the caller should get None (pending, ``wait`` False). A failed link
+        raises its error again; a pending one is finished now when ``wait``. Without ``wait`` a pending link stays pending
+        even when the driver is done: only poll_links finishes it, so a frame never sees a program become ready part-way."""
+        if key in self.failed:
+            raise self.failed[key]
+        if key in self.pending:
+            if not wait:
+                return True
+            self._finish(key)
+            if key in self.failed:
+                raise self.failed[key]
+        return False
 
     def _load_binary(self, path):
         """A program from a stored binary, or 0 when it is absent or the driver rejects it."""
@@ -2996,10 +3111,15 @@ class Shading:
         return INSTANCED_VERTEX if instanced else VERTEX
 
     def native_program(self, translation, srgb, instanced=False, scene=False, experimental=False, rule_preview=False, alpha_api=None,
-                       alpha_discard=0.0, alpha_opacity=1.0):
+                       alpha_discard=0.0, alpha_opacity=1.0, wait=True):
+        """(program, uniform locations) of a translated material; with ``wait`` False, None while its link is pending."""
         from nwo.viewer.native_glsl import fragment_source
         vertex = self._native_vertex(translation, instanced)
         key = self.native_program_key(translation, srgb, instanced, scene, experimental, rule_preview, alpha_api, alpha_discard, alpha_opacity)
+        if key in self.programs:
+            return self.programs[key]
+        if self._waiting(key, wait):
+            return None
         if key not in self.programs:
             extra = {}
             if translation.get('kind') == 'rcra':   # a Rift Apart receipt (nwo.viewer.rcra_glsl)
@@ -3014,15 +3134,23 @@ class Shading:
                 names = (*OPAQUE_UNIFORMS, *(s['uniform'] for s in surface['samplers']))
             attributes = INSTANCE_ATTRIBUTES if instanced else dict(ATTRIBUTES, aRockAlpha=ROCK_ALPHA_ATTRIBUTE, aGroundBlend=GROUND_BLEND_ATTRIBUTE, aStaticPackedVector=STATIC_VECTOR_ATTRIBUTE, aTangent=TANGENT_ATTRIBUTE, aUV1=UV1_ATTRIBUTE, **extra)
             source=surface['source'].replace('#version 120', '#version 120\n#define RC_SCENE_EFFECTS 1',1) if scene else surface['source']
-            self.programs[key] = self._link(vertex, source, attributes, names)
+            linked = self._link(vertex, source, attributes, names, key, wait)
+            if linked is None:
+                return None
+            self.programs[key] = linked
         return self.programs[key]
 
-    def fur_shell_program(self, receipt, srgb):
-        """A Rift Apart fur material's shell program (rcra_glsl.shell_vertex_source and its SHELL_BLEND receipt)."""
+    def fur_shell_program(self, receipt, srgb, wait=True):
+        """A Rift Apart fur material's shell program (rcra_glsl.shell_vertex_source and its SHELL_BLEND receipt); with
+        ``wait`` False, None while its link is pending."""
         from nwo.viewer import rcra_glsl
         vertex = rcra_glsl.shell_vertex_source()
         key = ('fur_shell', rcra_glsl.EMITTER_VERSION, receipt['translation_sha256'], tuple(sorted(srgb.items())), FRAGMENT,
                vertex)
+        if key in self.programs:
+            return self.programs[key]
+        if self._waiting(key, wait):
+            return None
         if key not in self.programs:
             surface = rcra_glsl.fragment_source(receipt)
             names = (*OPAQUE_UNIFORMS, *surface['samplers'], rcra_glsl.PASS_UNIFORM, *rcra_glsl.SCENE_UNIFORMS,
@@ -3030,7 +3158,10 @@ class Shading:
             attributes = dict(ATTRIBUTES, aRockAlpha=ROCK_ALPHA_ATTRIBUTE, aGroundBlend=GROUND_BLEND_ATTRIBUTE,
                               aStaticPackedVector=STATIC_VECTOR_ATTRIBUTE, aTangent=TANGENT_ATTRIBUTE, aUV1=UV1_ATTRIBUTE,
                               aRcraColour=RCRA_COLOUR_ATTRIBUTE, aRcraBillboard=RCRA_BILLBOARD_ATTRIBUTE)
-            self.programs[key] = self._link(vertex, surface['source'], attributes, names)
+            linked = self._link(vertex, surface['source'], attributes, names, key, wait)
+            if linked is None:
+                return None
+            self.programs[key] = linked
         return self.programs[key]
 
     def glass_program(self):

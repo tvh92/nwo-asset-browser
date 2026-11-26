@@ -81,8 +81,8 @@ class PortableSurfaceTests(unittest.TestCase):
 
     def test_program_cache_separates_uv_interpretation_and_vertex_program(self):
         ir=DAG();zero=ir.const(0);t=translation(ir,[zero]*3,[zero]*3,zero,zero)
-        fake=object.__new__(shading.Shading);fake.programs={};calls=[]
-        fake._link=lambda vertex,fragment,attributes,names: calls.append((vertex,fragment)) or (len(calls),{})
+        fake=object.__new__(shading.Shading);fake.programs,fake.pending,fake.failed={},{},{};calls=[]
+        fake._link=lambda vertex,fragment,attributes,names,*_key_wait: calls.append((vertex,fragment)) or (len(calls),{})
         a=fake.native_program(t,{},False)
         self.assertEqual(fake.native_program(t,{},False),a)
         self.assertNotEqual(fake.native_program(t,{},True),a)

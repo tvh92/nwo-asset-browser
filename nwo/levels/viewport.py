@@ -283,6 +283,7 @@ class LevelViewport(ModelViewport):
     OPTIONAL_EXT = {"glBufferSubData": (None, [ctypes.c_uint, ctypes.c_ssize_t, ctypes.c_ssize_t, ctypes.c_void_p])}
     MATERIAL_BUDGET_SECONDS = 0.008   # texture uploads and shader compiles per Tk tick while loading
     DEFER_MIPMAPS = True              # mip chains are built after the load (build_deferred_mipmaps)
+    ASYNC_LINKS = False               # unlinked surfaces go through the material pump (_selected_surface)
     MIPMAP_BUDGET_SECONDS = 0.008     # mip generation per Tk tick once loaded
     MIPMAP_IDLE_SECONDS = 0.5         # and only once the camera has rested this long
     STATS_INTERVAL = 0.25             # status-line refresh while drawing (4 Hz)

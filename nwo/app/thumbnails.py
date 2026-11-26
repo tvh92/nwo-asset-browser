@@ -388,6 +388,7 @@ def thumbnail_viewport_class():
     class ThumbnailViewport(ModelViewport):
         GL_FRAMEBUFFER, GL_RENDERBUFFER, GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT = 0x8D40, 0x8D41, 0x8CE0, 0x8D00
         GL_RGBA8, GL_DEPTH_COMPONENT24, GL_FRAMEBUFFER_COMPLETE = 0x8058, 0x81A6, 0x8CD5
+        ASYNC_LINKS = False   # a capture needs every program linked
 
         def __init__(self, parent, edge, use_fbo=True, **kwargs):
             super().__init__(parent, width=edge, height=edge, **kwargs)
