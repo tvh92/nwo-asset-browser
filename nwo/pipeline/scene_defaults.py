@@ -556,6 +556,65 @@ def fit_render_size(scene: Any) -> Dict[str, Any]:
     return {"status": "full_size", "resolution_percentage": RENDER_PERCENTAGE}
 
 
+def hull_2d(xy: Any) -> Any:
+    """Indices of the vertices of the convex hull of the N x 2 points ``xy`` (collinear edge points left out).
+
+    Pure numpy.  Points strictly inside the polygon of the extremes in 16 directions cannot be hull vertices and are
+    dropped first (Akl-Toussaint), so the monotone chain only walks the few points near the outline."""
+    import numpy as np  # type: ignore
+
+    xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
+    if len(xy) <= 3:
+        return np.arange(len(xy))
+    angles = np.linspace(0.0, 2.0 * math.pi, 16, endpoint=False)
+    extremes = np.argmax(xy @ np.stack([np.cos(angles), np.sin(angles)]), axis=0)
+    corners = list(dict.fromkeys(int(i) for i in extremes))   # counter-clockwise around the outline
+    candidates = np.arange(len(xy))
+    if len(corners) >= 3:
+        scale = max(float(np.ptp(xy, axis=0).max()), 1e-300)
+        inside = np.ones(len(xy), dtype=bool)
+        for a, b in zip(corners, corners[1:] + corners[:1]):
+            edge = xy[b] - xy[a]
+            rel = xy - xy[a]
+            inside &= edge[0] * rel[:, 1] - edge[1] * rel[:, 0] > 1e-9 * scale * scale
+        candidates = np.flatnonzero(~inside)
+    order = candidates[np.lexsort((xy[candidates, 1], xy[candidates, 0]))]
+    points = xy[order].tolist()
+
+    def chain(indices: Any) -> list:
+        kept: list = []
+        for i in indices:
+            px, py = points[i]
+            while len(kept) >= 2:
+                (ax, ay), (bx, by) = points[kept[-2]], points[kept[-1]]
+                if (bx - ax) * (py - ay) - (by - ay) * (px - ax) > 0:
+                    break
+                kept.pop()
+            kept.append(i)
+        return kept
+
+    lower, upper = chain(range(len(points))), chain(range(len(points) - 1, -1, -1))
+    return np.unique(order[lower[:-1] + upper[:-1]] if len(points) > 1 else order)
+
+
+def framing_points(points: Any, rotation: Any) -> Any:
+    """The subset of the N x 3 world ``points`` that decides every camera fit at this camera ``rotation``.
+
+    A point's frame coordinate is cam_x / cam_z (cam_y / cam_z vertically) in camera space, plus a shift: a linear-
+    fractional function of the point, whose extremes over a point set are reached at vertices of the convex hull of its
+    (cam_x, cam_z) or (cam_y, cam_z) pairs. Moving the camera without turning it shifts those pairs by a constant, so
+    the hull vertices stay the deciding points for every camera location: fits on them equal fits on all points.
+    A skinned character with fur shells has hundreds of thousands of vertices and a few hundred such points."""
+    import numpy as np  # type: ignore
+
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if len(points) <= 64:
+        return points
+    cam = points @ np.asarray(rotation, dtype=np.float64)
+    keep = np.union1d(hull_2d(cam[:, [0, 2]]), hull_2d(cam[:, [1, 2]]))
+    return points[keep]
+
+
 def camera_distance_for_fill(points: Any, centre: Any, rotation: Any, projection: Any, axis: int, fill: float) -> float:
     """Distance from ``centre`` along the camera's back axis (its +Z) at which ``points`` span ``fill``
     of the frame on ``axis`` (0 = horizontal, 1 = vertical).
@@ -592,6 +651,8 @@ def camera_distance_for_fill(points: Any, centre: Any, rotation: Any, projection
         raise RuntimeError("Could not frame the model on axis %d at fill %.3f" % (axis, fill))
     for _ in range(200):
         middle = (low + high) / 2
+        if not low < middle < high:  # the bracket is down to adjacent floats: more steps change nothing
+            break
         if span(middle) > fill:
             low = middle
         else:
@@ -651,6 +712,7 @@ def frame_camera_zoom(scene: Any, points: Any = None) -> Dict[str, Any]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     projection = np.array(camera.calc_matrix_camera(depsgraph, x=render.resolution_x, y=render.resolution_y))
     centre = (points.min(axis=0) + points.max(axis=0)) / 2
+    points = framing_points(points, rotation)   # the same fit, on the few points that decide it
     right, up, back = rotation[:, 0], rotation[:, 1], rotation[:, 2]
     pixels = np.array([render.resolution_x, render.resolution_y], dtype=np.float64)
 

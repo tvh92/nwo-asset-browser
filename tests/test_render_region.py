@@ -56,6 +56,35 @@ class PaddedRegionTests(unittest.TestCase):
         vertical = camera_distance_for_fill(points, (0, 0, 0), np.eye(3), projection, 1, 0.25)
         self.assertAlmostEqual(vertical, 4.0, places=6)
 
+    def test_hull_keeps_only_outline_corners(self):
+        from nwo.pipeline.scene_defaults import hull_2d
+
+        square = [[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5], [0.5, 0], [0.2, 0.7]]
+        self.assertEqual(sorted(hull_2d(square).tolist()), [0, 1, 2, 3])
+        self.assertEqual(sorted(hull_2d([[0, 0], [1, 1], [2, 2], [3, 3], [1.5, 1.5]]).tolist()), [0, 3])
+
+    def test_framing_points_give_the_same_fit_as_every_point(self):
+        import math
+        import numpy as np
+        from nwo.pipeline.scene_defaults import camera_distance_for_fill, framing_points
+
+        rng = np.random.default_rng(7)
+        points = np.r_[rng.normal(size=(20000, 3)) * [0.3, 0.9, 0.25],
+                       rng.uniform(-1, 1, (10000, 3)) * [0.5, 0.2, 0.4] + [0, 1, 0]]
+        a, b = math.radians(70), math.radians(-35)
+        rotation = (np.array([[math.cos(b), -math.sin(b), 0], [math.sin(b), math.cos(b), 0], [0, 0, 1]])
+                    @ np.array([[1, 0, 0], [0, math.cos(a), -math.sin(a)], [0, math.sin(a), math.cos(a)]]))
+        # Perspective with a lens shift, as calc_matrix_camera gives for a shifted camera.
+        projection = np.array([[2.7, 0, 0.05, 0], [0, 4.05, -0.02, 0], [0, 0, -1.0002, -0.02], [0, 0, -1, 0]])
+        subset = framing_points(points, rotation)
+        self.assertLess(len(subset), 200)
+        centre = (points.min(axis=0) + points.max(axis=0)) / 2
+        for axis, fill in ((0, 0.8), (1, 0.9)):
+            for shift in ((0, 0, 0), (0.1, -0.2, 0.05)):
+                at = centre + np.array(shift)
+                self.assertEqual(camera_distance_for_fill(subset, at, rotation, projection, axis, fill),
+                                 camera_distance_for_fill(points, at, rotation, projection, axis, fill))
+
     def test_meshless_diagnostic_rig_keeps_camera_and_resets_crop_to_full_frame(self):
         from types import SimpleNamespace
         from unittest.mock import patch
