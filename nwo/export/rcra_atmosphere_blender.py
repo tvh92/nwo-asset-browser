@@ -4,7 +4,8 @@ Blender only (blender_convert.py --scene --atmosphere bake.npz).
 ``apply_lighting`` turns the scene's review lighting into the atmosphere's: the world's environment image becomes the
 atmosphere's probe (equirectangular, Blender directions, world strength 1, no sun cap) and the review HDRI sun lamp
 becomes the key light (irradiance pi x KeyLightColor x KeyLightIntensity, visible in glossy rays: the game's key light
-has a specular term). ``apply_display`` meters a small render from the scene camera the way the game meters its frame
+has a specular term) that casts no shadows (a presentation choice: the game's gallery viewer shows models without
+self-shadowing; the probe still occludes). ``apply_display`` meters a small render from the scene camera the way the game meters its frame
 (atmosphere.meter, adapted_log2), and shows the result through Rift Apart's display transform as compositor nodes: the
 exposure 0.18 / adapted luminance, then the game's own 32^3 ACES lookup (nwo.games.rcra.display) with the
 atmosphere's colour-correction LUT mixed in at weight 1 (one fully active atmosphere), sampled trilinearly at its log2
@@ -84,12 +85,14 @@ def apply_lighting(scene, bake_path):
     data.energy = float(irradiance.max())
     data.color = tuple(float(c) for c in irradiance / irradiance.max())
     data.angle = 0.00925   # the review sun's 0.53 degrees: the game's sun diameter is not read
+    data.use_shadow = False   # presentation: the game's gallery viewer shows models without self-shadowing
     key.rotation_mode = 'QUATERNION'
     key.rotation_quaternion = Vector(tuple(float(c) for c in bake['sun_direction'])).to_track_quat('Z', 'Y')
     key['lighting_role'] = KEY_ROLE
     if 'shared_lighting' in scene:
         del scene['shared_lighting']   # no longer the review lighting; check() validates this file instead
-    record.update(probe_image=PROBE_IMAGE, key_light=KEY_NAME, sun_energy=data.energy, sun_colour=list(data.color))
+    record.update(probe_image=PROBE_IMAGE, key_light=KEY_NAME, sun_energy=data.energy, sun_colour=list(data.color),
+                  key_cast_shadow=False)
     scene['rcra_atmosphere'] = json.dumps(record, sort_keys=True)
     return record
 
@@ -274,7 +277,8 @@ def check(scene):
     except (StopIteration, AttributeError):
         problems.append('atmosphere.world')
     keys = [o for o in scene.objects if o.type == 'LIGHT' and o.get('lighting_role') == KEY_ROLE]
-    if len(keys) != 1 or keys[0].data.type != 'SUN' or abs(keys[0].data.energy - record['sun_energy']) > 1e-4:
+    if (len(keys) != 1 or keys[0].data.type != 'SUN' or abs(keys[0].data.energy - record['sun_energy']) > 1e-4 or
+            bool(keys[0].data.use_shadow) != bool(record.get('key_cast_shadow', True))):
         problems.append('atmosphere.key_light')
     fills = [o for o in scene.objects if o.type == 'LIGHT' and o.get('lighting_role') == FILL_ROLE]
     if 'rcra_fill' in scene:
