@@ -165,7 +165,7 @@ The Lighting source and Display tonemap selectors offer:
 
 | Selector | Choices | Default |
 |---|---|---|
-| Lighting | `Viewer rig`, `Shared HDRI`, `Game atmosphere` (Rift Apart model views, with an Atmosphere picker) | `Shared HDRI` in the model browser; `Viewer rig` in the viewport itself, the level viewer and gallery thumbnails |
+| Lighting | `Viewer rig`, `Shared HDRI`, `Game atmosphere` (Rift Apart model views, Corson V day `atm_malinon_day` only) | `Shared HDRI` in the model browser; `Viewer rig` in the viewport itself, the level viewer and gallery thumbnails |
 | Tonemap | `ACES fit`, `Khronos PBR Neutral`, `Game (captured)`, `Game (Rift Apart)` (model views only) | the open game's own display in the model browser (`Game (captured)` for R&C 2016, `Game (Rift Apart)` for Rift Apart); `ACES fit` elsewhere |
 
 The model browser applies its remembered (or default) lighting and tonemap at start. Choosing Shared HDRI no longer changes the tonemap. Opening a game whose display differs from the one shown switches between the two Game tonemaps; a tonemap that belongs to no game stays.

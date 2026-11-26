@@ -1216,7 +1216,7 @@ A level's lighting lives in its `.atmosphere` assets (95 in the install; Corson 
 | 636, 640, 644 | AdaptationAnchor, AdaptationRange, AdaptationBias (EV) | 12, 10, 0 |
 | 768 (reference) | ColorCorrection SourcePath | `lut_megalopolis_warm9` |
 
-The model browser's **Game atmosphere** lighting, with an **Atmosphere** picker (default `atm_malinon_day`), lights a model with one of them:
+The model browser's **Game atmosphere** lighting, lights a model with Corson V's Megalopolis by day (`atm_malinon_day`, `atmosphere.DEFAULT`); the other atmospheres are not offered:
 
 - **Key light:** KeyLightColor × KeyLightIntensity is the apply programs' `LIGHT`. Diffuse is albedo × `LIGHT` × N·L with no 1/π, so the viewer's sun (and a Blender sun) gets irradiance π × `LIGHT`. Its direction is (cos el sin az, sin el, cos el cos az) in game space, azimuth from +Z towards +X. That convention is fitted from where the probes are brightest (Megalopolis day: key 220°, probe 209°; Savali sunset: 308° and 327°); the code that converts the angles is not traced.
 - **Environment:** the default env probe, a BC6H cube in scene radiance (Megalopolis day: mean radiance (0.82, 1.25, 1.80)), decoded at mip 1 by `nwo.formats.bc6h` and sampled into an equirectangular map. It gives the diffuse and specular lighting maps, and the Rift Apart ambient light convolves it with the engine's probe program ([Ambient light](#ambient-light)) as it does the review HDRI.
