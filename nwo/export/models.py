@@ -1423,7 +1423,7 @@ class ModelExporter:
         record = dict(path=path, block_sha256=atm['sha256'], probe=atm['probe'], anchor=atm['anchor'],
                       range=atm['range'], key_light=A.key_light(atm).tolist(), key_azimuth=atm['key_azimuth'],
                       key_elevation=atm['key_elevation'], turn_degrees=env['turn_degrees'], equirect_sha256=env['sha256'],
-                      colour_correction=atm['colour_correction'])
+                      colour_correction=atm['colour_correction'], light_grid=env['light_grid'])
         lut = A.read_lut(archive, atm['colour_correction']) if atm['colour_correction'] else None
         return dict(env, record=record, limitations=A.LIMITATIONS, colour_correction=lut)
 

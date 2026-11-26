@@ -30,8 +30,13 @@ is a presentation choice.
   ColorCorrectionSystem (0x1411cb1a0) would layer more LUTs from system_ColorCorrection.config, which the PC install
   does not ship, so it changes nothing; a debug toggle (EnableColorCorrection) can clear the list.
 
-Not reproduced: shadows from the level, the light grid, local lights, fog, the sky model, bloom settings per
-atmosphere, AdaptationBias, ExposureBias and LuminanceKeyValue (LIMITATIONS).
+- **Light grid:** where the probe's level has a light grid (nwo.games.rcra.light_grid), its bounce light at a typical
+  street cell replaces the probe's diffuse light: the environment becomes k x the probe plus smooth light lobes,
+  fitted so that its diffuse light matches the grid's (``light_grid.world``); k keeps part of the probe's detail for
+  reflections.
+
+Not reproduced: shadows from the level, local lights, fog, the sky model, bloom settings per atmosphere, AdaptationBias,
+ExposureBias and LuminanceKeyValue (LIMITATIONS).
 """
 from __future__ import annotations
 
@@ -53,11 +58,12 @@ EV_OFFSET = 13.0        # displayed EV = log2(luminance) + 13 (RiftApart.exe 0x1
 ADAPT_SLOPE = 3.749     # CS_AverageLumFinalize: slope 1 at the anchor
 LUMINANCE = np.array([0.2126, 0.7152, 0.0722])
 PROBE_LEVEL = 1         # decode the probe's mip 1 (512 x 512 per face for the 1024 probes)
-VERSION = 1             # bump when the baked environment changes; it names the cache files
+VERSION = 2             # bump when the baked environment changes; it names the cache files
 LIMITATIONS = ('Atmosphere lighting: the level\'s key light and default env probe, with the game\'s auto-exposure. '
                'The environment is turned so the key light comes from the review sun\'s side (the model has no place '
                'in the level). Its colour-correction LUT is applied at weight 1, as for one fully active atmosphere. '
-               'Not reproduced: the level\'s shadows, light grid, local lights, fog, AdaptationBias and ExposureBias.')
+               'The level\'s light grid replaces the probe\'s diffuse light where the level has one. '
+               'Not reproduced: the level\'s shadows, local lights, fog, AdaptationBias and ExposureBias.')
 
 
 def _container(data):
@@ -218,7 +224,8 @@ def environment(source, path, sun_direction, width=2048, cache_dir=None):
 
     {'atmosphere': read(), 'equirect': (width / 2, width, 3) float32 probe radiance in Blender's equirectangular layout
     (nwo.viewer.environment.equirect_directions, rows top first), 'sun_direction': Blender unit vector towards the key,
-    'sun_irradiance': pi x LIGHT (RGB), 'turn_degrees', 'sha256': of the equirect}."""
+    'sun_irradiance': pi x LIGHT (RGB), 'turn_degrees', 'light_grid': light_grid.world's record, or None when the
+    probe's level has no light grid, 'sha256': of the equirect}. With a light grid the equirect is the probe relit by it."""
     from nwo.viewer.environment import equirect_directions
     atm = read(source, path)
     if not atm['probe']:
@@ -232,7 +239,12 @@ def environment(source, path, sun_direction, width=2048, cache_dir=None):
     faces = probe_faces(source, atm['probe'], cache_dir=cache_dir)
     dirs = equirect_directions(width, width // 2).astype(np.float64)
     equi = cube_sample(faces, turn_about_up(blender_to_game(dirs), turn)).astype(np.float32)
-    return dict(atmosphere=atm, equirect=equi, sun_direction=(sun_b / np.linalg.norm(sun_b)).astype(np.float32),
+    from nwo.games.rcra import light_grid
+    cell = light_grid.street_cell(source, atm['probe'], cache_dir=cache_dir)
+    grid = None
+    if cell is not None:
+        equi, grid = light_grid.world(cell, equi, turn)
+    return dict(atmosphere=atm, equirect=equi, light_grid=grid, sun_direction=(sun_b / np.linalg.norm(sun_b)).astype(np.float32),
                 sun_irradiance=(math.pi * key_light(atm)).astype(np.float32), turn_degrees=math.degrees(turn),
                 sha256=hashlib.sha256(equi.tobytes()).hexdigest())
 

@@ -172,7 +172,19 @@ class InstallTests(unittest.TestCase):
         self.assertAlmostEqual(float(key[2]), math.sin(math.radians(45.0)), places=5)   # the elevation is kept
         np.testing.assert_allclose(env['sun_irradiance'], math.pi * np.array([6.0, 6.0, 4.98462]), rtol=1e-5)
         mean = env['equirect'].reshape(-1, 3).mean(0)
-        self.assertTrue(0.5 < mean[0] < 1.2 and mean[2] > mean[0], mean)   # the blue Megalopolis day sky
+        self.assertTrue(mean[2] > mean[0], mean)   # still the blue Megalopolis day sky, relit by the light grid
+        grid = env['light_grid']
+        self.assertEqual(grid['position'], [861.5, -117.5, 1891.5])
+        self.assertTrue(0.1 < grid['reflection_scale'] < 0.3 and grid['fit_rms'] < 0.08, grid)
+        # The world's diffuse light straight up and down is the street cell's (within the fit's error).
+        from nwo.viewer.environment import equirect_directions
+        d = equirect_directions(256, 128).reshape(-1, 3).astype(np.float64)
+        lat = (0.5 - (np.arange(128) + 0.5) / 128) * np.pi
+        omega = np.repeat(np.cos(lat) * (np.pi / 128) * (2 * np.pi / 256), 256)
+        radiance = env['equirect'].reshape(-1, 3).astype(np.float64)
+        for z, axis in ((1.0, 2), (-1.0, 3)):
+            diffuse = (np.maximum(d[:, 2] * z, 0) * omega) @ radiance / np.pi
+            np.testing.assert_allclose(diffuse, grid['axis_rgb'][axis], rtol=0.2)
 
 
 if __name__ == '__main__':
