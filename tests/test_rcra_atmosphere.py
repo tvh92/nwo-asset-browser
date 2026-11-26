@@ -154,6 +154,14 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(atm['probe'], 'levels/i29/instance/malinon_intro/malinon_intro/envprobes_day/0xe54a425db9195aba.texture')
         self.assertEqual(atm['colour_correction'], 'textures/lut/lut_megalopolis_warm9.texture')
         self.assertIn(A.DEFAULT, A.list_paths(self.source))
+        lut = A.read_lut(self.source, atm['colour_correction'])
+        self.assertEqual(lut.shape, (33, 33, 33, 3))
+        self.assertTrue(0.0 <= lut.min() and lut.max() <= 1.0)
+        # Close to an identity on its diagonal (a grade, not a remap): grey in, near-grey out, warmed.
+        grey = lut[np.arange(33), np.arange(33), np.arange(33)]
+        self.assertLess(np.abs(grey.mean(1) - np.arange(33) / 32).max(), 0.15)
+        self.assertGreater(grey[16, 0], grey[16, 1])   # warm9 lifts mid grey with a slight magenta lean (green lowest)
+        self.assertGreater(lut[24, 8, 8, 0], 0.8)   # and saturates: red 0.75 goes to about 0.84
 
     def test_environment_turns_the_key_to_the_review_sun(self):
         sun = np.array([0.11468, -0.93279, 0.34168])

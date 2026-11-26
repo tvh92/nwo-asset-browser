@@ -3,8 +3,11 @@
 - ``CS_ToneMapCreateLookup`` (exe offset 55161948) builds a 32^3 lookup over linear Rec.709 at
   2^(t * 16/31 - 10.5), t = 0..31 per axis, through ACES 1.0: Rec.709 -> XYZ -> AP0 (no D65 -> D60 adaptation), glow,
   red modifier, AP1, RRT saturation 0.96, segmented spline C5, ODT spline C9 at 48 nits, dim surround 0.9811, ODT
-  saturation 0.93, D60 -> D65 (``m_A.x`` 1), XYZ -> Rec.709 and the sRGB encode. Its CC variants then mix in an
-  atmosphere's colour-correction LUT on the encoded value; the model viewer has no atmosphere, so none is applied here.
+  saturation 0.93, D60 -> D65 only when ``m_A.x`` is set, XYZ -> Rec.709 and the sRGB encode. For SDR output the CPU
+  side (0x1411db740) writes ``m_A.x`` = 0 into the program's MiscCBuffer (m_A.z is set only by a debug view), so it skips the D60 -> D65
+  step (greys stay neutral, white is the ACES D60 white). Its CC variants then mix up to four colour-correction LUTs
+  on the encoded value, weighted by ``m_B``: the active atmospheres' LUTs, each weighted by how far its atmosphere is
+  blended in (``colour_corrected``); one fully active atmosphere gives its LUT weight 1.
 - ``CS_ToneMap`` (55136892) multiplies the scene by m_AcesMiddleGray / adapted luminance and samples that lookup at
   (log2(x) / 16 + 0.65625) * 31/32 + 1/64, trilinear.
 
@@ -69,9 +72,9 @@ def c9(x):
     return 10.0 ** y
 
 
-def aces(rgb, cat=True):
+def aces(rgb, cat=False):
     """Encoded sRGB display value of linear Rec.709 ``rgb`` (..., 3), as the lookup program computes one entry.
-    ``cat``: the D60 -> D65 adaptation (the program's m_A.x)."""
+    ``cat``: the D60 -> D65 adaptation (the program's m_A.x), off in the game's SDR display."""
     rgb = np.asarray(rgb, np.float64)
     xyz = rgb @ REC709_TO_XYZ.T
     R = 1.04981 * xyz[..., 0] - 9.7485e-05 * xyz[..., 2]   # XYZ -> AP0
@@ -134,14 +137,39 @@ def build_lookup():
     return table
 
 
-def lookup_texture():
+def sample_lut(lut, encoded):
+    """A colour-correction LUT (n, n, n, 3) [r, g, b] sampled as the CC programs do: trilinear (clamped) at the
+    normalised coordinate encoded * 31/32 + 1/64, whatever the LUT's size (the install has 32^3 and 33^3 LUTs)."""
+    n = lut.shape[0]
+    u = np.asarray(encoded, np.float64) * (31.0 / 32.0) + 1.0 / 64.0
+    return sample(lut, np.clip((u * n - 0.5) / (n - 1), 0, 1))
+
+
+def colour_corrected(luts, table=None):
+    """The lookup with colour-correction LUTs mixed in, as CS_ToneMapCreateLookupCC1 to CC4: ``luts`` is
+    [(lut, weight)], at most four, each lut (n, n, n, 3) [r, g, b] in [0, 1]. The program adds every LUT sample times its
+    weight (m_B) and keeps the uncorrected value times sat(1 - sum of the weights)."""
+    table = build_lookup() if table is None else table
+    if not luts:
+        return table
+    if len(luts) > 4:
+        raise ValueError('the game mixes at most four colour-correction LUTs')
+    out = table * min(max(1.0 - sum(w for _, w in luts), 0.0), 1.0)
+    for lut, weight in luts:
+        out = out + sample_lut(lut, table) * weight
+    out.setflags(write=False)
+    return out
+
+
+def lookup_texture(table=None):
     """The float32 (33, 1024, 3) texture the viewer samples with ``gameGrade`` (the layout of
     ``nwo.levels.display.display_table``): rows are green, blue slab b at columns 32 b to 32 b + 31 with red along x; row 32
-    (the 2016 tone curve's row) is unused."""
+    (the 2016 tone curve's row) is unused. ``table``: a lookup other than ``build_lookup`` (``colour_corrected``)."""
     n = LOOKUP_SIZE
-    table = np.zeros((n + 1, n * n, 3), np.float32)
-    table[:n] = build_lookup().transpose(1, 2, 0, 3).reshape(n, n * n, 3)   # [r, g, b] -> [g, b, r]
-    return table
+    table = build_lookup() if table is None else table
+    texture = np.zeros((n + 1, n * n, 3), np.float32)
+    texture[:n] = table.transpose(1, 2, 0, 3).reshape(n, n * n, 3)   # [r, g, b] -> [g, b, r]
+    return texture
 
 
 def sample(table, coord):
@@ -161,8 +189,8 @@ def sample(table, coord):
     return out
 
 
-def display(scene, exposure=1.0):
+def display(scene, exposure=1.0, table=None):
     """Encoded sRGB display of scene-linear ``scene`` (..., 3) at ``exposure`` (m_AcesMiddleGray / adapted luminance),
-    the CPU reference of the viewer's riftApartDisplay."""
+    the CPU reference of the viewer's riftApartDisplay; ``table`` another lookup (``colour_corrected``)."""
     x = np.maximum(np.asarray(scene, np.float64) * exposure, 1e-30)
-    return sample(build_lookup(), np.log2(x) * LOG2_SCALE + LOG2_OFFSET)
+    return sample(build_lookup() if table is None else table, np.log2(x) * LOG2_SCALE + LOG2_OFFSET)

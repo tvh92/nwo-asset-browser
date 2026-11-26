@@ -20,9 +20,18 @@ What the lighting is made of:
 
 The model has no place in the level, so the environment is turned about the vertical until the key light comes from the
 review lighting's sun azimuth (``environment``): the same side of the model is lit as under the review HDRI. That turn
-is a presentation choice. Not reproduced: shadows from the level, the light grid, local lights, fog, the sky model,
-bloom settings per atmosphere, AdaptationBias, ExposureBias, LuminanceKeyValue, and the colour-correction LUT (block
-offset 768): whether and how strongly the game applies it at steady state is not traced (LIMITATIONS).
+is a presentation choice.
+
+- **Colour correction:** the ColorCorrection SourcePath (block offset 768) is a 32^3 or 33^3 R8G8B8A8_UNORM LUT
+  (``read_lut``). Every frame the game blends the active atmospheres (0x1411d3500); its texture-field callback
+  (0x1411d62b0) adds each atmosphere's LUT to a list weighted by how far that atmosphere is blended in, the list is
+  copied to the post-process state (0x1411d3b3a) and the tone map binds up to four of them with their weights as m_B
+  (0x1411db740). One fully active atmosphere therefore applies its LUT at weight 1 (display.colour_corrected).
+  ColorCorrectionSystem (0x1411cb1a0) would layer more LUTs from system_ColorCorrection.config, which the PC install
+  does not ship, so it changes nothing; a debug toggle (EnableColorCorrection) can clear the list.
+
+Not reproduced: shadows from the level, the light grid, local lights, fog, the sky model, bloom settings per
+atmosphere, AdaptationBias, ExposureBias and LuminanceKeyValue (LIMITATIONS).
 """
 from __future__ import annotations
 
@@ -47,8 +56,8 @@ PROBE_LEVEL = 1         # decode the probe's mip 1 (512 x 512 per face for the 1
 VERSION = 1             # bump when the baked environment changes; it names the cache files
 LIMITATIONS = ('Atmosphere lighting: the level\'s key light and default env probe, with the game\'s auto-exposure. '
                'The environment is turned so the key light comes from the review sun\'s side (the model has no place '
-               'in the level). Not reproduced: the level\'s shadows, light grid, local lights, fog, AdaptationBias and '
-               'ExposureBias, and the colour-correction LUT, whose steady-state strength in the game is not traced.')
+               'in the level). Its colour-correction LUT is applied at weight 1, as for one fully active atmosphere. '
+               'Not reproduced: the level\'s shadows, light grid, local lights, fog, AdaptationBias and ExposureBias.')
 
 
 def _container(data):
@@ -166,6 +175,20 @@ def probe_faces(source, path, level=PROBE_LEVEL, cache_dir=None):
     return faces
 
 
+def read_lut(source, path):
+    """A colour-correction LUT texture (R8G8B8A8_UNORM, n x n x n, 32 or 33 in the install) as float (n, n, n, 3)
+    indexed [r, g, b] in [0, 1]: x is red, y green, the depth slices blue (how the CC programs sample it)."""
+    from nwo.games.rcra import texture
+    data = source.asset_data(texture._entry(source, path))
+    info = texture.parse_header(data)
+    n = info['sd_width']
+    if info['format'] != 28 or info['sd_height'] != n or info['array_size'] != n:
+        raise ValueError(f'{path} is not an n^3 R8G8B8A8_UNORM LUT ({info["format"]}, '
+                         f'{info["sd_width"]} x {info["sd_height"]} x {info["array_size"]})')
+    raw = np.frombuffer(data, np.uint8, n ** 3 * 4, info['payload_offset'])
+    return raw.reshape(n, n, n, 4)[..., :3].transpose(2, 1, 0, 3).astype(np.float64) / 255.0   # [b, g, r] -> [r, g, b]
+
+
 def cube_sample(faces, d):
     """Bilinear lookup (within a face, clamped at its edges) of game-space directions ``d`` (..., 3) in a D3D cube."""
     n = faces.shape[1]
@@ -239,4 +262,4 @@ def exposure(adapted):
 
 
 __all__ = ['DEFAULT', 'LIMITATIONS', 'adapted_log2', 'cube_sample', 'environment', 'exposure', 'key_direction',
-           'key_light', 'label', 'list_paths', 'meter', 'probe_blocks', 'probe_faces', 'read']
+           'key_light', 'label', 'list_paths', 'meter', 'probe_blocks', 'probe_faces', 'read', 'read_lut']

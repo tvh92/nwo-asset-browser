@@ -1423,8 +1423,9 @@ class ModelExporter:
         record = dict(path=path, block_sha256=atm['sha256'], probe=atm['probe'], anchor=atm['anchor'],
                       range=atm['range'], key_light=A.key_light(atm).tolist(), key_azimuth=atm['key_azimuth'],
                       key_elevation=atm['key_elevation'], turn_degrees=env['turn_degrees'], equirect_sha256=env['sha256'],
-                      colour_correction_not_applied=atm['colour_correction'])
-        return dict(env, record=record, limitations=A.LIMITATIONS)
+                      colour_correction=atm['colour_correction'])
+        lut = A.read_lut(archive, atm['colour_correction']) if atm['colour_correction'] else None
+        return dict(env, record=record, limitations=A.LIMITATIONS, colour_correction=lut)
 
     def _blender_convert(self, folder, stem, doc, blob, formats, blender, materials_json=None, scene=False,
                          atmosphere=None):
@@ -1453,7 +1454,9 @@ class ModelExporter:
                 if atmosphere is not None:
                     bake = Path(tmp) / 'atmosphere.npz'
                     np.savez(bake, equirect=atmosphere['equirect'], sun_direction=atmosphere['sun_direction'],
-                             sun_irradiance=atmosphere['sun_irradiance'], record=json.dumps(atmosphere['record']))
+                             sun_irradiance=atmosphere['sun_irradiance'], record=json.dumps(atmosphere['record']),
+                             colour_correction=np.zeros(0) if atmosphere['colour_correction'] is None
+                             else atmosphere['colour_correction'].astype(np.float32))
                     command += ['--atmosphere', str(bake)]
             env = os.environ.copy()
             env['BLENDER_USER_RESOURCES'] = str(Path(tmp) / 'user')

@@ -12,12 +12,18 @@ from nwo.viewer.viewport import ModelViewport
 
 class AcesTests(unittest.TestCase):
     def test_entries(self):
-        # Values of the port, which matches the exe's CS_ToneMapCreateLookup (translated by nwo.shaders.sm5) to ~1e-5.
-        for rgb, expected in (((0.18, 0.18, 0.18), (0.344652, 0.357206, 0.377115)),
-                              ((1.0, 1.0, 1.0), (0.804388, 0.812828, 0.825721)),
-                              ((8.0, 0.5, 0.1), (1.0, 0.812559, 0.540973)),
-                              ((0.02, 0.05, 0.4), (0.0, 0.124004, 0.58779))):
+        # Values of the port, which matches the exe's CS_ToneMapCreateLookup (translated by nwo.shaders.sm5) to ~1e-5
+        # with the game's SDR constants (m_A = 0: no D60 -> D65 adaptation).
+        for rgb, expected in (((0.18, 0.18, 0.18), (0.352849, 0.356313, 0.361674)),
+                              ((1.0, 1.0, 1.0), (0.821328, 0.810882, 0.793976)),
+                              ((8.0, 0.5, 0.1), (1.0, 0.809933, 0.515107)),
+                              ((0.02, 0.05, 0.4), (0.0, 0.125987, 0.566904))):
             np.testing.assert_allclose(display.aces(np.array(rgb)), expected, atol=2e-6)
+
+    def test_the_game_display_skips_the_d60_to_d65_step(self):
+        grey = np.array([0.18, 0.18, 0.18])
+        self.assertLess(np.ptp(display.aces(grey)), np.ptp(display.aces(grey, cat=True)))   # neutral, not cool
+        np.testing.assert_allclose(display.build_lookup()[5, 9, 2], display.aces(display.lookup_grid()[[5, 9, 2]]), atol=1e-12)
 
     def test_grey_is_monotonic_and_bounded(self):
         grey = display.aces(np.repeat(display.lookup_grid()[:, None], 3, 1))
@@ -62,6 +68,23 @@ class AcesTests(unittest.TestCase):
         for c in rng.uniform(0, 1, (40, 3)):
             np.testing.assert_allclose(game_grade(c), display.sample(display.build_lookup(), c), atol=1e-6)
 
+    def test_colour_correction_mixes_luts_by_weight(self):
+        n = 32
+        axis = (np.arange(n) + 0.0) / (n - 1)
+        identity = np.stack(np.meshgrid(axis, axis, axis, indexing='ij'), -1)
+        # An identity LUT sampled at enc * 31/32 + 1/64 moves values slightly towards the middle, as the game's does.
+        table = display.build_lookup()
+        np.testing.assert_allclose(display.colour_corrected([(identity, 1.0)]), display.sample_lut(identity, table))
+        inverted = 1.0 - identity
+        mixed = display.colour_corrected([(inverted, 0.25), (identity, 0.25)])
+        np.testing.assert_allclose(mixed, 0.5 * table + 0.25 * display.sample_lut(inverted, table)
+                                   + 0.25 * display.sample_lut(identity, table))
+        self.assertIs(display.colour_corrected([]), table)
+        with self.assertRaises(ValueError):
+            display.colour_corrected([(identity, 0.1)] * 5)
+        np.testing.assert_allclose(display.sample_lut(identity, np.array([0.0, 0.5, 1.0])),
+                                   [1 / 64 * 32 / 31 - 0.5 / 31, 0.5, 1 - (1 / 64 * 32 / 31 - 0.5 / 31)], atol=1e-12)
+
     def test_display_exposure(self):
         np.testing.assert_allclose(display.display(np.full(3, 0.09), 2.0), display.display(np.full(3, 0.18)))
 
@@ -81,6 +104,17 @@ class ViewerTests(unittest.TestCase):
         key = view._display_table_key()
         view.tonemap = 'Game (captured)'
         self.assertNotEqual(view._display_table_key(), key)
+
+    def test_game_atmosphere_adds_its_colour_correction(self):
+        view = ModelViewport.__new__(ModelViewport)
+        view.tonemap, view.lighting = 'Game (Rift Apart)', 'Game atmosphere'
+        lut = np.full((32, 32, 32, 3), 0.5)
+        view._environment_lighting = 'Game atmosphere'
+        view._environment = dict(colour_correction=lut, atmosphere=dict(colour_correction='textures/lut/x.texture'))
+        self.assertEqual(view._display_table_key(), ('rcra aces', 'textures/lut/x.texture'))
+        np.testing.assert_allclose(view._display_table_build()[:32], 0.5, atol=1e-6)   # weight 1: the LUT alone
+        view.lighting = 'Shared HDRI'
+        self.assertEqual(view._display_table_key(), 'rcra aces')
 
     def test_each_game_names_a_model_viewer_tonemap(self):
         for game in GAMES:

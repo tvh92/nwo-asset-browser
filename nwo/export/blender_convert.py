@@ -140,7 +140,7 @@ if args.blend:
             from nwo.export import rcra_atmosphere_blender
             lighting = rcra_atmosphere_blender.apply_lighting(scene, args.atmosphere)
             bpy.ops.file.pack_all()
-            display = rcra_atmosphere_blender.apply_display(scene)
+            display = rcra_atmosphere_blender.apply_display(scene, args.atmosphere)
             print('SCENE', 'atmosphere %s, metered %.2f EV, exposure %.4f, camera and render region'
                   % (lighting['path'], display['measured_ev'], display['exposure']), flush=True)
         else:

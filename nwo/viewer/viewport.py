@@ -75,7 +75,9 @@ def atmosphere_maps(spec):
     h, w = equi.shape[:2]
     small = equi.reshape(h // 4, 4, w // 4, 4, 3).mean(axis=(1, 3)).astype(np.float32)
     record = env['atmosphere']
+    lut = A.read_lut(archive, record['colour_correction']) if record.get('colour_correction') else None
     return dict(sh=E.sh_irradiance(equi), bands=E.prefiltered_bands(equi), sun_direction=env['sun_direction'],
+                colour_correction=lut,
                 sun=env['sun_irradiance'], strength=1.0,
                 exposure=float(np.log2(A.exposure(record['anchor'] - A.EV_OFFSET))),
                 view_transform=review['view_transform'], hdri=A.label(spec['path']), sha256=env['sha256'],
@@ -880,16 +882,30 @@ class ModelViewport(_TkFrame):
     GAME_TONEMAP = 2   # tonemap index of the captured game display (uTonemap 2)
     RCRA_TONEMAP = 3   # tonemap index of Rift Apart's display (uTonemap 3)
 
+    def _atmosphere_lut(self):
+        """(key, LUT) of the Game atmosphere lighting's colour-correction LUT while it is shown, else None."""
+        env = self.__dict__.get('_environment')
+        if (getattr(self, 'lighting', None) != self.ATMOSPHERE_LIGHTING or self.__dict__.get('_environment_lighting')
+                != self.ATMOSPHERE_LIGHTING or not env or env.get('colour_correction') is None):
+            return None
+        return env['atmosphere'].get('colour_correction'), env['colour_correction']
+
     def _display_table_key(self):
         """Hashable identity of the display table in use (uGradeTex), or None."""
-        return 'rcra aces' if getattr(self, 'tonemap', None) == self.TONEMAPS[self.RCRA_TONEMAP] else 'identity grade'
+        if getattr(self, 'tonemap', None) != self.TONEMAPS[self.RCRA_TONEMAP]:
+            return 'identity grade'
+        lut = self._atmosphere_lut()
+        return ('rcra aces', lut[0]) if lut else 'rcra aces'
 
     def _display_table_build(self):
-        """The float32 (rows, columns, 3) display table for ``_display_table_key``: Rift Apart's ACES lookup, or the
-        captured 2016 chain's (nwo.levels.display.display_table) without a grade, since a model has no level."""
-        if self._display_table_key() == 'rcra aces':
-            from nwo.games.rcra.display import lookup_texture
-            return lookup_texture()
+        """The float32 (rows, columns, 3) display table for ``_display_table_key``: Rift Apart's ACES lookup (with the
+        Game atmosphere's colour-correction LUT at weight 1, as one fully active atmosphere has it), or the captured
+        2016 chain's (nwo.levels.display.display_table) without a grade, since a model has no level."""
+        key = self._display_table_key()
+        if key == 'rcra aces' or (isinstance(key, tuple) and key[0] == 'rcra aces'):
+            from nwo.games.rcra.display import colour_corrected, lookup_texture
+            lut = self._atmosphere_lut()
+            return lookup_texture(colour_corrected([(lut[1], 1.0)]) if lut else None)
         from nwo.levels.display import display_table, identity_grade
         return display_table(identity_grade())
 

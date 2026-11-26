@@ -6,11 +6,11 @@ atmosphere's probe (equirectangular, Blender directions, world strength 1, no su
 becomes the key light (irradiance pi x KeyLightColor x KeyLightIntensity, visible in glossy rays: the game's key light
 has a specular term). ``apply_display`` meters a small render from the scene camera the way the game meters its frame
 (atmosphere.meter, adapted_log2), and shows the result through Rift Apart's display transform as compositor nodes: the
-exposure 0.18 / adapted luminance, then the game's own 32^3 ACES lookup (nwo.games.rcra.display.build_lookup) sampled
-trilinearly at its log2 coordinate, as CS_ToneMap does; the view transform is Raw, so Blender adds nothing after it.
+exposure 0.18 / adapted luminance, then the game's own 32^3 ACES lookup (nwo.games.rcra.display) with the
+atmosphere's colour-correction LUT mixed in at weight 1 (one fully active atmosphere), sampled trilinearly at its log2
+coordinate, as CS_ToneMap does; the view transform is Raw, so Blender adds nothing after it.
 The metered exposure stays fixed: moving the camera does not re-meter (the group's Exposure input can be changed).
-Not reproduced in the .blend: bloom, vignette, film grain and the colour-correction LUT. ``check`` validates a reopened
-file.
+Not reproduced in the .blend: bloom, vignette and film grain. ``check`` validates a reopened file.
 """
 import json
 import os
@@ -127,20 +127,20 @@ def _render_pixels(scene):
             pass
 
 
-def lookup_image():
-    """The game's 32^3 display lookup as a packed float image: blue slice b in columns 32 b .. 32 b + 31, red along x,
-    green along y (game_view_compositor's tiled layout)."""
-    table = D.build_lookup()                      # [r, g, b]
+def lookup_image(lut=None):
+    """The game's 32^3 display lookup (with colour-correction ``lut`` at weight 1) as a packed float image: blue slice
+    b in columns 32 b .. 32 b + 31, red along x, green along y (game_view_compositor's tiled layout)."""
+    table = D.colour_corrected([(lut, 1.0)]) if lut is not None else D.build_lookup()   # [r, g, b]
     n = table.shape[0]
     cube = table.transpose(2, 1, 0, 3)            # [b, g, r]
     tiled = cube.transpose(1, 0, 2, 3).reshape(n, n * n, 3)   # [g, b * n + r]
     return _float_image(LOOKUP_IMAGE, n * n, n, tiled.astype(np.float32)), n
 
 
-def build_group():
-    """Compositor group: Image (scene-linear, premultiplied) x Exposure -> the game's lookup at
-    (log2 x / 16 + 0.65625), trilinear; colour un-premultiplied for the lookup and premultiplied again."""
-    image, n = lookup_image()
+def build_group(lut=None):
+    """Compositor group: Image (scene-linear, premultiplied) x Exposure -> the game's lookup (with colour-correction
+    ``lut``) at (log2 x / 16 + 0.65625), trilinear; colour un-premultiplied for the lookup and premultiplied again."""
+    image, n = lookup_image(lut)
     group = bpy.data.node_groups.get(GROUP_NAME)
     if group is not None:
         bpy.data.node_groups.remove(group)
@@ -187,15 +187,19 @@ def build_group():
     return group
 
 
-def apply_display(scene):
-    """Meter the scene camera's frame, then install the display group with its exposure; returns the record stored in
-    scene['rcra_display']."""
+def apply_display(scene, bake_path=None):
+    """Meter the scene camera's frame, then install the display group with its exposure and the bake's
+    colour-correction LUT; returns the record stored in scene['rcra_display']."""
     record = json.loads(scene['rcra_atmosphere'])
+    lut = None
+    if bake_path is not None:
+        with np.load(bake_path) as bake:
+            lut = bake['colour_correction'] if bake['colour_correction'].size else None
     pixels = _render_pixels(scene)
     measured = A.meter(pixels[..., :3])
     adapted = A.adapted_log2(measured, record['anchor'], record['range'])
     exposure = A.exposure(adapted)
-    group = build_group()
+    group = build_group(lut)
     tree = bpy.data.node_groups.get(TREE_NAME) or bpy.data.node_groups.new(TREE_NAME, 'CompositorNodeTree')
     tree.nodes.clear()
     tree.interface.clear()
@@ -216,7 +220,8 @@ def apply_display(scene):
             if area.type == 'VIEW_3D':
                 area.spaces.active.shading.use_compositor = 'ALWAYS'
     display = dict(measured_ev=measured + A.EV_OFFSET, adapted_ev=adapted + A.EV_OFFSET, exposure=exposure,
-                   meter_size=list(pixels.shape[:2]), view='Rift Apart display (compositor)', view_transform='Raw')
+                   meter_size=list(pixels.shape[:2]), view='Rift Apart display (compositor)', view_transform='Raw',
+                   colour_correction=record.get('colour_correction'), colour_correction_weight=1.0 if lut is not None else 0.0)
     scene['rcra_display'] = json.dumps(display, sort_keys=True)
     return display
 
