@@ -10,5 +10,5 @@
   "exposure": -1.0,
   "gamma": 1.0,
   "use_compositing": false,
-  "hdri_sun": {"cap": 4.0, "visible_glossy": false}
+  "hdri_sun": {"cap": 4.0, "visible_glossy": false, "cast_shadow": false}
 }

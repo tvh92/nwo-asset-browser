@@ -69,7 +69,8 @@ def load_shared_lighting(path: Optional[Any] = None) -> Dict[str, Any]:
 # lamp: its irradiance, colour and direction are integrated from the HDRI pixels (equirectangular solid angles, the
 # world strength, the PS4 HDRI Rotation mapping), its angle twice the mean angular spread of those pixels (at least
 # the real sun's 0.53 degrees). With visible_glossy false the lamp lights diffuse and casts shadows but leaves no
-# mirror-like sun spots; the capped sky still reflects. The 1k Golden Gate HDRI keeps 99.9 % of its pixels below 2.2;
+# mirror-like sun spots; the capped sky still reflects. With cast_shadow false (default true) the lamp casts no
+# shadows, as the game's gallery viewer shows models without self-shadowing; the capped sky still occludes. The 1k Golden Gate HDRI keeps 99.9 % of its pixels below 2.2;
 # its sun peaks near 9e4 and holds 55 % of the energy.
 SUN_CAP_NODE = "PS4 HDRI sun cap"
 REVIEW_SUN_NAME = "PS4 review HDRI sun"
@@ -165,6 +166,7 @@ def _set_review_sun(scene: Any, image: Any, sun: Optional[Dict[str, Any]], stren
     # Blender Sun rays travel along local -Z, away from the sun.
     obj.rotation_euler = (-Vector(params["direction"])).to_track_quat("-Z", "Y").to_euler()
     obj.visible_glossy = bool(sun.get("visible_glossy", False))
+    data.use_shadow = bool(sun.get("cast_shadow", True))
     obj["lighting_role"] = REVIEW_SUN_ROLE
     obj["hdri_sun"] = json.dumps(dict(params, cap=float(sun["cap"])), sort_keys=True)
     obj.hide_select = True
@@ -234,7 +236,8 @@ def _check_review_sun(scene: Any, background: Any, expected: Dict[str, Any]) -> 
             any(abs(v - cap) > 1e-6 for v in linked.inputs[1].default_value)):
         return ["lighting.hdri_sun"]
     if (len(lamps) != 1 or lamps[0].data.type != "SUN" or lamps[0].hide_render or
-            bool(lamps[0].visible_glossy) != bool(sun.get("visible_glossy", False))):
+            bool(lamps[0].visible_glossy) != bool(sun.get("visible_glossy", False)) or
+            bool(getattr(lamps[0].data, "use_shadow", True)) != bool(sun.get("cast_shadow", True))):
         return ["lighting.hdri_sun"]
     try:
         recorded = json.loads(lamps[0]["hdri_sun"])

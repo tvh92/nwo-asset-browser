@@ -16,10 +16,10 @@ class FakeSun(dict):
     type = 'LIGHT'
     hide_render = False
 
-    def __init__(self, cap, visible_glossy, energy=8.6):
+    def __init__(self, cap, visible_glossy, energy=8.6, cast_shadow=True):
         super().__init__(lighting_role=scene_defaults.REVIEW_SUN_ROLE, hdri_sun=json.dumps(dict(cap=cap, energy=energy)))
         self.visible_glossy = visible_glossy
-        self.data = SimpleNamespace(type='SUN', energy=energy)
+        self.data = SimpleNamespace(type='SUN', energy=energy, use_shadow=cast_shadow)
 
 
 class SharedLightingConfigAuditTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class SharedLightingConfigAuditTests(unittest.TestCase):
             cap = float(sun['cap'])
             colour_source = SimpleNamespace(name=scene_defaults.SUN_CAP_NODE, operation='MINIMUM',
                 inputs=[SimpleNamespace(links=[SimpleNamespace(from_node=env)]), SimpleNamespace(default_value=(cap, cap, cap))])
-            objects.append(FakeSun(cap, bool(sun.get('visible_glossy', False))))
+            objects.append(FakeSun(cap, bool(sun.get('visible_glossy', False)), cast_shadow=bool(sun.get('cast_shadow', True))))
         bg = SimpleNamespace(type='BACKGROUND', inputs={'Strength': strength,
             'Color': SimpleNamespace(links=[SimpleNamespace(from_node=colour_source)])})
         output = SimpleNamespace(type='OUTPUT_WORLD', is_active_output=True,
@@ -92,11 +92,14 @@ class SharedLightingConfigAuditTests(unittest.TestCase):
             self.assertIn('lighting.world_strength', scene_defaults.check_shared_lighting(scene, selected))
 
     def test_hdri_sun_split_is_audited(self):
-        self.assertEqual(self.selected['hdri_sun'], {'cap': 4.0, 'visible_glossy': False})
+        self.assertEqual(self.selected['hdri_sun'], {'cap': 4.0, 'visible_glossy': False, 'cast_shadow': False})
         fake_bpy = SimpleNamespace(path=SimpleNamespace(abspath=lambda path: path))
         with patch.dict(sys.modules, {'bpy': fake_bpy}):
             scene, _ = self.fake_scene(self.selected)
             self.assertEqual(scene_defaults.check_shared_lighting(scene, self.selected), [])
+            scene.objects[0].data.use_shadow = True                    # the key's self-shadows back
+            self.assertIn('lighting.hdri_sun', scene_defaults.check_shared_lighting(scene, self.selected))
+            scene, _ = self.fake_scene(self.selected)
             scene.objects[0].visible_glossy = True                     # sun spots back
             self.assertIn('lighting.hdri_sun', scene_defaults.check_shared_lighting(scene, self.selected))
             scene, _ = self.fake_scene(self.selected)
