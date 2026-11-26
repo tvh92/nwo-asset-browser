@@ -649,7 +649,7 @@ and moves it, that the thug's strafe aim starts over the forward strafe run, and
 
 `nwo/games/rcra/texture.py` reads `.texture` assets. It returns the same dicts as the 2016 viewer's texture functions:
 
-- `load_texture`, `load_texture_full` and `read_top_mip` return the loaded top mip.
+- `load_texture`, `load_texture_full` and `read_top_mip` return the loaded top mip. For a one-slice texture `load_texture` (the viewer's read) also returns `mip_chain`, the stored mips below it, largest first: the rest of the HD stream, then the SD chain when it starts where the HD mips end. The viewer uploads them instead of generating mips ([texture filtering](viewer.md#3d-view)).
 - `texture_header` returns the header facts.
 - `export_textures` also writes the asset and its HD stream.
 - `archive_textures` lists every texture in the install.

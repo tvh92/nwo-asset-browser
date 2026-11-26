@@ -86,5 +86,55 @@ class DeferredMipmapTests(unittest.TestCase):
         view.build_deferred_mipmaps(budget=float('inf'))
         self.assertEqual(len(view.built), 3)
 
+
+class GameMipChainTests(unittest.TestCase):
+    """A texture with its own mip_chain uploads it instead of asking the driver to build one."""
+
+    def view(self, errors=()):
+        view = object.__new__(ModelViewport)
+        view._gl = FakeGL()
+        pending = list(errors)
+        view._gl.glGetError = lambda: pending.pop(0) if pending else 0
+        view.uploads, view.built = [], []
+        view._compressed_upload = lambda *args: view.uploads.append(args[1:5])
+        view._compressed_uploader = lambda: view._compressed_upload
+        view._mipmap_support = dict(generate=object(), anisotropy=8.0, compressed=True)
+        view._build_mipmaps = lambda compressed: view.built.append(compressed)
+        return view
+
+    @staticmethod
+    def texture(chain=True):
+        texture = dict(path='t', width=16, height=8, format=71, gl_format=0x83F1, pixels=bytes(32))   # BC1: 8 bytes a block
+        if chain:
+            texture['mip_chain'] = [bytes(16), bytes(8), bytes(8), bytes(8)]   # 8x4, 4x2, 2x1, 1x1
+        return texture
+
+    def test_chain_is_uploaded_level_by_level(self):
+        view = self.view()
+        view._upload_texture(self.texture())
+        self.assertEqual([u[0] for u in view.uploads], [0, 1, 2, 3, 4])
+        self.assertEqual(view.uploads[1][2:], (8, 4))
+        self.assertEqual(view.built, [])
+        params = [c[1] for c in view._gl.calls if c[0] == 'glTexParameteri']
+        self.assertIn((view.GL_TEXTURE_2D, view.GL_TEXTURE_MAX_LEVEL, 4), params)
+        self.assertIn((view.GL_TEXTURE_2D, view.GL_TEXTURE_MIN_FILTER, view.GL_LINEAR_MIPMAP_LINEAR), params)
+
+    def test_no_chain_or_a_bad_one_generates(self):
+        view = self.view()
+        view._upload_texture(self.texture(chain=False))
+        self.assertEqual(view.built, [True])
+        bad = self.texture()
+        bad['mip_chain'][1] = bytes(4)
+        view._upload_texture(bad)
+        self.assertEqual(view.built, [True, True])
+
+    def test_a_refused_level_falls_back_to_generation(self):
+        view = self.view(errors=(0, 0, 0x501))   # level 0 and its check pass; the chain's check reports the refusal
+        view._upload_texture(self.texture())
+        self.assertEqual(view.built, [True])
+        params = [c[1] for c in view._gl.calls if c[0] == 'glTexParameteri']
+        self.assertIn((view.GL_TEXTURE_2D, view.GL_TEXTURE_MAX_LEVEL, 1000), params)
+
+
 if __name__ == '__main__':
     unittest.main()

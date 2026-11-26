@@ -230,6 +230,10 @@ class RealTextureTests(unittest.TestCase):
         self.assertTrue(slots[rmat.SLOT_BASE_COLOUR].endswith('hero_ratchet_boots_c.texture'))
         texture = rt.load_texture(self.source, slots[rmat.SLOT_BASE_COLOUR], hd=True)
         self.assertEqual((texture['width'], texture['height'], texture['format'], texture['srgb']), (2048, 2048, 99, True))
+        from nwo.viewer.viewport import ModelViewport
+        levels = ModelViewport._mip_chain_levels(texture)   # the game's own chain, every level the size BC7 needs
+        self.assertEqual(levels[0][:2], (1024, 1024))
+        self.assertEqual([w for w, _h, _p in levels], [1024 >> i for i in range(8)])   # HD then SD mips, down to 8 x 8
         normal = rt.load_texture(self.source, slots[rmat.SLOT_NORMAL], hd=True)
         self.assertFalse(normal['srgb'])
 
@@ -262,6 +266,39 @@ class PreviewMipTests(unittest.TestCase):
         self.assertEqual((texture['width'], texture['height'], texture['full_size']), (4, 4, (16, 16)))
         self.assertEqual(texture['slices'], [payload[i * stride + sizes[0] + sizes[1]:(i + 1) * stride] for i in range(2)])
         self.assertEqual(rt.read_top_mip(source, 't.texture', full=False)['width'], 16)   # uncapped: the top mip
+
+
+class MipChainTests(unittest.TestCase):
+    def test_hd_stream_then_the_sd_chain(self):
+        data, hd_len = texture_asset(hd_mips=2, hd=(32, 32))   # HD 32 and 16, SD 8 and 4
+        info = rt.parse_header(data)
+        stream = bytes((i * 7) % 256 for i in range(hd_len))
+        source = FakeSource({'t.texture': data}, {'t.texture': stream})
+        texture = rt.load_texture(source, 't.texture', hd=True)
+        sd = data[info['payload_offset']:]
+        self.assertEqual(texture['width'], 32)
+        self.assertEqual(texture['mip_chain'], [stream[512:640], sd[:32], sd[32:40]])
+        self.assertNotIn('mip_chain', rt.read_top_mip(source, 't.texture', full=True))   # export reads stay top-mip only
+
+    def test_sd_only_and_arrays(self):
+        data, _ = texture_asset(sd=(16, 16), sd_mips=3, hd_mips=0)
+        sd = data[rt.parse_header(data)['payload_offset']:]
+        self.assertEqual(rt.load_texture(FakeSource({'t.texture': data}), 't.texture')['mip_chain'], [sd[128:160], sd[160:168]])
+        data, _ = texture_asset(sd=(16, 16), sd_mips=3, hd_mips=0, array=2)
+        self.assertNotIn('mip_chain', rt.load_texture(FakeSource({'a.texture': data}), 'a.texture'))
+
+    def test_a_stream_the_sd_chain_does_not_continue_stops_at_its_own_mips(self):
+        data, hd_len = texture_asset(hd_mips=1, hd=(32, 32))   # HD 32 only; SD starts at 8, not 16
+        source = FakeSource({'t.texture': data}, {'t.texture': bytes(hd_len)})
+        self.assertNotIn('mip_chain', rt.load_texture(source, 't.texture', hd=True))
+
+    def test_viewport_accepts_only_matching_level_sizes(self):
+        from nwo.viewer.viewport import ModelViewport
+        data, hd_len = texture_asset(hd_mips=2, hd=(32, 32))
+        texture = rt.load_texture(FakeSource({'t.texture': data}, {'t.texture': bytes(hd_len)}), 't.texture', hd=True)
+        levels = ModelViewport._mip_chain_levels(texture)
+        self.assertEqual([(w, h, len(p)) for w, h, p in levels], [(16, 16, 128), (8, 8, 32), (4, 4, 8)])
+        self.assertIsNone(ModelViewport._mip_chain_levels(dict(texture, width=64, height=64)))
 
 
 if __name__ == '__main__':

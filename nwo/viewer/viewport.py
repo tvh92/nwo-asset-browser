@@ -1279,7 +1279,9 @@ class ModelViewport(_TkFrame):
         formats, as GL specifies). A driver that refuses to generate mips for block-compressed
         formats leaves those on the top mip with GL_LINEAR (it is not asked again). ``mipmaps`` None
         follows ``_mipmap_next`` (set per role by _gl_entry). With DEFER_MIPMAPS the texture is
-        queued in ``_mipmap_queue`` and samples its top mip until its chain is built."""
+        queued in ``_mipmap_queue`` and samples its top mip until its chain is built. A block-compressed
+        texture that carries its own ``mip_chain`` (Rift Apart) uploads those mips instead: the driver
+        builds a compressed chain on the CPU (~0.1 s per 2048 BC7 texture, the whole UI waits)."""
         gl = self._gl
         if mipmaps is None:
             mipmaps = self._mipmap_next
@@ -1297,7 +1299,9 @@ class ModelViewport(_TkFrame):
             gl.glDeleteTextures(1, ctypes.byref(name))
             name.value = 0
         elif mipmaps and self.MIPMAPS:
-            if self.DEFER_MIPMAPS:
+            if compressed and self._upload_mip_chain(texture, decode_srgb):
+                pass
+            elif self.DEFER_MIPMAPS:
                 from collections import deque
                 self.__dict__.setdefault("_mipmap_queue", deque()).append((name.value, compressed))
             else:
@@ -1315,6 +1319,52 @@ class ModelViewport(_TkFrame):
             self._compressed_upload = prototype(address) if address else False
         return self._compressed_upload
 
+    GL_TEXTURE_MAX_LEVEL = 0x813D
+
+    @staticmethod
+    def _compressed_internal(texture, decode_srgb):
+        srgb_formats = {72: 0x8C4D, 75: 0x8C4E, 78: 0x8C4F, 99: 0x8E8D}
+        return srgb_formats.get(texture.get('format'), texture['gl_format']) if decode_srgb else texture['gl_format']
+
+    @staticmethod
+    def _mip_chain_levels(texture):
+        """[(width, height, bytes)] of the texture's ``mip_chain`` (the mips below the uploaded one), or None when it is
+        absent or a level's size does not match its block-compressed format."""
+        from nwo.formats.texture import BLOCK_BYTES, top_mip_size
+        chain, fmt = texture.get("mip_chain"), texture.get("format")
+        if not chain or fmt not in BLOCK_BYTES:
+            return None
+        width, height, levels = texture["width"], texture["height"], []
+        for pixels in chain:
+            width, height = max(1, width // 2), max(1, height // 2)
+            if len(pixels) != top_mip_size(width, height, fmt):
+                return None
+            levels.append((width, height, pixels))
+        return levels
+
+    def _upload_mip_chain(self, texture, decode_srgb=False):
+        """Levels 1.. of the bound GL_TEXTURE_2D from the texture's own ``mip_chain``, with trilinear and anisotropic
+        filtering; False (the texture left on its top mip, GL_LINEAR) when it has none or the driver refuses a level."""
+        levels = self._mip_chain_levels(texture)
+        if not levels:
+            return False
+        gl, features = self._gl, self._texture_features()
+        internal = self._compressed_internal(texture, decode_srgb)
+        for level, (width, height, pixels) in enumerate(levels, 1):
+            self._compressed_upload(self.GL_TEXTURE_2D, level, internal, width, height, 0, len(pixels), pixels)
+        gl.glTexParameteri(self.GL_TEXTURE_2D, self.GL_TEXTURE_MAX_LEVEL, len(levels))   # complete without a 1x1 mip
+        if gl.glGetError():
+            gl.glTexParameteri(self.GL_TEXTURE_2D, self.GL_TEXTURE_MAX_LEVEL, 1000)   # GL's default: a generated chain
+            gl.glGetError()
+            return False
+        gl.glTexParameteri(self.GL_TEXTURE_2D, self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR_MIPMAP_LINEAR)
+        if features["anisotropy"]:
+            gl.glTexParameterf.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_float]
+            gl.glTexParameterf(self.GL_TEXTURE_2D, self.GL_TEXTURE_MAX_ANISOTROPY, features["anisotropy"])
+        if gl.glGetError():
+            gl.glTexParameteri(self.GL_TEXTURE_2D, self.GL_TEXTURE_MIN_FILTER, self.GL_LINEAR)
+        return True
+
     def _upload_image(self, target, texture, decode_srgb=False):
         """Level 0 of the bound texture's ``target`` (GL_TEXTURE_2D or a cube face) from a texture dict; True when it was a
         block-compressed upload."""
@@ -1322,8 +1372,7 @@ class ModelViewport(_TkFrame):
         pixels = texture["pixels"]
         compressed = False
         if texture.get("gl_format") and self._compressed_upload:
-            srgb_formats = {72: 0x8C4D, 75: 0x8C4E, 78: 0x8C4F, 99: 0x8E8D}
-            internal = srgb_formats.get(texture.get('format'), texture['gl_format']) if decode_srgb else texture['gl_format']
+            internal = self._compressed_internal(texture, decode_srgb)
             self._compressed_upload(target, 0, internal, texture["width"], texture["height"], 0, len(pixels), pixels)
             compressed = True
         elif texture.get("gl_float"):   # float RGBA (Rift Apart data formats): GL_RGBA32F from GL_RGBA / GL_FLOAT

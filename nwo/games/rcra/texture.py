@@ -91,6 +91,16 @@ def _slices(payload, fmt, width, height, mips, count, label, level=0):
     return [payload[i * stride + start:i * stride + start + sizes[level]] for i in range(count)]
 
 
+def _mips_below(payload, fmt, width, height, mips, level):
+    """The mips after ``level`` of a one-slice linear chain of ``mips`` mips, largest first."""
+    sizes = chain_sizes(fmt, width, height, mips)
+    start, below = sum(sizes[:level + 1]), []
+    for size in sizes[level + 1:]:
+        below.append(payload[start:start + size])
+        start += size
+    return below
+
+
 # A texture unit no slot binds: it reads 0 in every channel, as an unbound D3D resource does. One RGBA32F texel.
 UNBOUND = 'unbound/zero.texture'
 UNBOUND_FORMAT = 2
@@ -140,11 +150,14 @@ def _entry(source, texture_path):
     return keys[0]
 
 
-def read_top_mip(source, texture_path, full):
+def read_top_mip(source, texture_path, full, chain=False):
     """The viewer's loaded-texture dict (viewer.textures._read_top_mip shape) of a Rift Apart texture.
 
     ``full`` takes the HD stream whenever there is one; otherwise the SD top mip is used once it is
-    at least MIN_PREVIEW_SIZE (smaller ones also take the stream). Under a MAX_PREVIEW_SIZE a smaller mip is read."""
+    at least MIN_PREVIEW_SIZE (smaller ones also take the stream). Under a MAX_PREVIEW_SIZE a smaller mip is read.
+    ``chain`` adds ``mip_chain``, the game's own mips below the one read, largest first, for a one-slice texture: the
+    rest of the HD stream, then the SD chain where it continues it. The viewer uploads them instead of having the driver
+    build the chain, which takes ~0.1 s per block-compressed 2048 texture (decode, filter and re-encode)."""
     if texture_path in CONSTANT_TEXTURES:
         return _constant(texture_path)
     key = _entry(source, texture_path)
@@ -152,7 +165,7 @@ def read_top_mip(source, texture_path, full):
     info = parse_header(data)
     fmt, count = info['format'], info['array_size'] * info['faces']   # cube faces read as slices
     small = max(info['sd_width'], info['sd_height'])
-    stream = None
+    stream, below = None, []
     if info['stream_size'] and info['hd_width'] and (full or small < MIN_PREVIEW_SIZE or not info['sd_size']):
         stream = source.texture_stream(key)
     if stream is not None:
@@ -161,23 +174,33 @@ def read_top_mip(source, texture_path, full):
         width, height = info['hd_width'], info['hd_height']
         level = preview_mip(width, height, info['hd_mips'])
         slices = _slices(stream, fmt, width, height, info['hd_mips'], count, 'HD stream', level)
+        if chain and count == 1:
+            below = _mips_below(stream, fmt, width, height, info['hd_mips'], level)
+            next_w, next_h = max(1, width >> info['hd_mips']), max(1, height >> info['hd_mips'])
+            if info['sd_size'] and (info['sd_width'], info['sd_height']) == (next_w, next_h):
+                below += _mips_below(data[info['payload_offset']:], fmt, next_w, next_h, info['sd_mips'], -1)
     elif info['sd_size'] and info['sd_width'] and info['sd_height']:
         width, height = info['sd_width'], info['sd_height']
         level = preview_mip(width, height, info['sd_mips'])
         slices = _slices(data[info['payload_offset']:], fmt, width, height, info['sd_mips'], count, 'SD chain', level)
+        if chain and count == 1:
+            below = _mips_below(data[info['payload_offset']:], fmt, width, height, info['sd_mips'], level)
     else:
         raise ValueError(f'Texture {texture_path} has no usable payload')
     from nwo.viewer.textures import SRGB_FORMATS
     full_size = (info['hd_width'], info['hd_height']) if info['hd_width'] else (info['sd_width'], info['sd_height'])
     width, height = max(1, width >> level), max(1, height >> level)
-    return dict(path=texture_path, width=width, height=height, format=fmt, pixels=slices[0], slices=slices,
-                array_size=count, faces=info['faces'], full_size=full_size, srgb=fmt in SRGB_FORMATS)
+    texture = dict(path=texture_path, width=width, height=height, format=fmt, pixels=slices[0], slices=slices,
+                   array_size=count, faces=info['faces'], full_size=full_size, srgb=fmt in SRGB_FORMATS)
+    if chain and count == 1 and below:
+        texture['mip_chain'] = below
+    return texture
 
 
 def load_texture(source, texture_path, hd=False):
-    """viewer.textures.load_texture for Rift Apart: the top mip with its GL upload formats."""
+    """viewer.textures.load_texture for Rift Apart: the top mip with its GL upload formats and the mips below it."""
     from nwo.viewer import textures
-    texture = read_top_mip(source, texture_path, full=hd and textures.MIN_PREVIEW_SIZE > 0)
+    texture = read_top_mip(source, texture_path, full=hd and textures.MIN_PREVIEW_SIZE > 0, chain=True)
     fmt = texture['format']
     if fmt not in textures.GL_COMPRESSED and fmt not in textures.GL_UNCOMPRESSED:
         raise ValueError(f'Texture format {fmt} is not previewable')
