@@ -150,5 +150,7 @@ if args.blend:
             print('SCENE', 'review lighting, camera and render region', flush=True)
     else:
         bpy.ops.file.pack_all()
-    bpy.ops.wm.save_as_mainfile(filepath=args.blend, compress=True)
+    # relative_remap off: the default save turns the HDRI's absolute path relative to the temp build folder, which
+    # no longer resolves once the file is moved to its export folder.
+    bpy.ops.wm.save_as_mainfile(filepath=args.blend, compress=True, relative_remap=False)
     print('EXPORTED', args.blend, flush=True)
