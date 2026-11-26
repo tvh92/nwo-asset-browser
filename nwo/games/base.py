@@ -21,7 +21,8 @@ APP_TITLE = 'NWO Asset Browser'
 # Hooks a game may supply; each one missing raises NotImplementedError when called.
 HOOKS = frozenset({'list_models', 'decode_model', 'material_textures', 'model_texture_list', 'texture_header',
                    'material_rules', 'effect_preview', 'texture_paths', 'load_texture', 'export_textures',
-                   'material_maps', 'shadow_only', 'animation_library', 'blender_materials'})
+                   'material_maps', 'shadow_only', 'animation_library', 'blender_materials',
+                   'blender_translation_units'})
 
 
 class GameUnavailable(RuntimeError):
@@ -169,6 +170,13 @@ class Game:
         or None when the game has none."""
         hook = self.hooks.get('blender_materials')
         return hook(source, materials, folder) if hook is not None else None
+
+    def blender_translation_units(self, source, materials, folder):
+        """The translations ``blender_materials`` would make for ``materials`` that are not cached yet, as phases of
+        worker units (nwo.app.thumbnails._worker_run) the export runs in parallel, one phase after the other, before it
+        calls ``blender_materials``; [] when the game has none."""
+        hook = self.hooks.get('blender_translation_units')
+        return hook(source, materials, folder) if hook is not None else []
 
     # Animation -------------------------------------------------------------------------------
     def has_animation_library(self) -> bool:

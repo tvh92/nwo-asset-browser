@@ -649,6 +649,7 @@ class ExportBatchRunner:
             except Exception as error:   # one failed model must not stop the batch
                 summary["failed"] += 1
                 self.event("model_done", model=record.archive_path, status="failed", message=str(error))
+        self.exporter.close()   # its translation workers, if a model started them
         self.event("batch_done", summary=summary)
         return summary
 

@@ -535,6 +535,28 @@ def _worker_run(kind, argument):
         if kind == 'material':
             from nwo.games.rcra.viewer_materials import translate
             translate(loader._ensure_archive(source), argument)
+        elif kind in ('blender', 'blender-shell'):   # a Rift Apart Blender export entry (blender_export.translation_units)
+            from nwo.games.rcra import blender_export
+            archive = loader._ensure_archive(source)
+            # One folder and texture cache for the worker's units of one export (the last item of the unit, as
+            # blender_export.blender_materials has one per export), so a texture several materials or shell layers sample
+            # is decoded and written once; the images also land in the image cache, which the export reads.
+            state = _WORKER.get('blender')
+            if state is None or state['export'] != argument[-1]:
+                import atexit
+                import shutil
+                import tempfile
+                if state is not None:
+                    shutil.rmtree(state['folder'].parent, ignore_errors=True)
+                folder = Path(tempfile.mkdtemp(prefix='nwo-entry-')) / 'units'
+                atexit.register(shutil.rmtree, folder.parent, True)
+                state = _WORKER['blender'] = dict(folder=folder, textures={}, export=argument[-1])
+            if kind == 'blender':   # (material path, export folder)
+                blender_export.cached_material_entry(archive, argument[0], state['folder'], state['textures'])
+            else:   # (material path, shell layer, export folder)
+                from nwo.games.rcra.material import _material_key
+                data = archive.asset_data(_material_key(archive, argument[0]))
+                blender_export.cached_shell_layer(archive, argument[0], data, argument[1], state['folder'], state['textures'])
         elif kind == 'lighting':   # (direct or ambient, class): an engine lighting recipe every lit material shares
             from nwo.games.rcra import lighting
             archive = loader._ensure_archive(source)

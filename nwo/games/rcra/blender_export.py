@@ -542,7 +542,7 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
         entry['skin_profile'] = skin
     if program is not None:
         try:
-            entry.update(fur_shells(source, data, folder, texture_cache))
+            entry.update(fur_shells(source, data, folder, texture_cache, material_path))
         except (rsurface.Unsupported, ValueError, KeyError, OSError) as error:
             entry['shell_error'] = '%s: %s' % (type(error).__name__, error)
             entry['limitations'] = limitations + ['Fur shells are not drawn: %s' % entry['shell_error']]
@@ -566,22 +566,27 @@ def shell_height(source, control_path, folder, cache=None):
     return row
 
 
-def fur_shells(source, data, folder, texture_cache=None):
-    """dict(shells [layer entries], shell_height row, shell_length) of a fur material (nwo.games.rcra.fur)."""
+def shell_layer(source, data, k, folder, texture_cache=None):
+    """The entry of shell layer ``k`` of a fur material: dict(layer, layers, t, displace, recipe, images, limitations)."""
+    from nwo.games.rcra import fur
+    program = fur.shell_program(source, data, k)
+    result = rsurface.surface(None, data, program=program, texture_sizes=lambda path: texture_size(source, path))
+    replace_missing(source, None, result)
+    recipe = rsurface.blender_recipe(rsurface.export_recipe(result))
+    if len(recipe['nodes']) > MAX_RECIPE_NODES:
+        raise rsurface.Unsupported('Fur layer %d has %d operations' % (k, len(recipe['nodes'])))
+    layer = program['shell']
+    return dict(layer=k, layers=layer['layers'], t=layer['t'], displace=layer['displace'], recipe=recipe,
+                images=_images(source, [(recipe, result)], folder, texture_cache), limitations=result['limitations'])
+
+
+def fur_shells(source, data, folder, texture_cache=None, material_path=None):
+    """dict(shells [layer entries], shell_height row, shell_length) of a fur material (nwo.games.rcra.fur). With
+    ``material_path`` each layer is kept in the entry cache (cached_shell_layer)."""
     from nwo.games.rcra import fur
     record = fur.fur_record(data)
-    layers = []
-    for k in range(1, fur.layer_count(record)):
-        program = fur.shell_program(source, data, k)
-        result = rsurface.surface(None, data, program=program, texture_sizes=lambda path: texture_size(source, path))
-        replace_missing(source, None, result)
-        recipe = rsurface.blender_recipe(rsurface.export_recipe(result))
-        if len(recipe['nodes']) > MAX_RECIPE_NODES:
-            raise rsurface.Unsupported('Fur layer %d has %d operations' % (k, len(recipe['nodes'])))
-        layer = program['shell']
-        layers.append(dict(layer=k, layers=layer['layers'], t=layer['t'], displace=layer['displace'], recipe=recipe,
-                           images=_images(source, [(recipe, result)], folder, texture_cache),
-                           limitations=result['limitations']))
+    layers = [cached_shell_layer(source, material_path, data, k, folder, texture_cache) if material_path
+              else shell_layer(source, data, k, folder, texture_cache) for k in range(1, fur.layer_count(record))]
     control = fur_control_path(source, data)
     return dict(shells=layers, shell_height=shell_height(source, control, folder, texture_cache) if layers else None)
 
@@ -594,7 +599,8 @@ def fur_control_path(source, data):
     return result['textures'][fur.CONTROL_BINDING]
 
 
-# The entry cache: material_entry results in the source's translation disk cache (nwo.viewer.native_glsl
+# The entry cache: material_entry results (and each fur shell layer's, which fur_shells reads, so the layers of one fur
+# material can translate in parallel) in the source's translation disk cache (nwo.viewer.native_glsl
 # TranslationDiskCache), their image files in a content-addressed BlobDiskCache beside it. The key holds the material and
 # graph bytes (or the fur program), the archive's identity (the images come from its textures), the translation code
 # (viewer_materials.CODE_SHA256) and the image-writing code below.
@@ -616,13 +622,10 @@ def _image_code_sha256():
 IMAGE_CODE_SHA256 = _image_code_sha256()
 
 
-def entry_cache_key(source, material_path):
-    """cached_material_entry's key, or None when the entry is not cached (no disk cache or sources, or no graph)."""
+def _entry_inputs(source, material_path):
+    """(material bytes, graph bytes or the fur program's key, fur) of a material, or None when it has no graph to key."""
     from nwo.games.rcra import viewer_materials as vm
     from nwo.games.rcra.material import _material_key
-    disk = getattr(source, 'translation_disk_cache', None)
-    if disk is None or not vm.CODE_SHA256 or not IMAGE_CODE_SHA256:
-        return None
     try:
         key = _material_key(source, material_path)
         if key is None:
@@ -631,14 +634,49 @@ def entry_cache_key(source, material_path):
         graph = vm._graph(source, key)
         if graph is None:
             from nwo.games.rcra.fur import fur_program
-            part = fur_program(source, data)['key']
-        else:
-            part = bytes(graph)
+            return data, fur_program(source, data)['key'], True
+        return data, bytes(graph), False
     except (vm.NotTranslated, ValueError, KeyError, OSError):
+        return None
+
+
+def entry_cache_key(source, material_path, part='', inputs=None):
+    """cached_material_entry's key (or a fur shell layer's, ``part`` 'shell <k>'), or None when the entry is not cached
+    (no disk cache or sources, or no graph). ``inputs``: the material's _entry_inputs, when the caller has them."""
+    from nwo.games.rcra import viewer_materials as vm
+    disk = getattr(source, 'translation_disk_cache', None)
+    if disk is None or not vm.CODE_SHA256 or not IMAGE_CODE_SHA256:
+        return None
+    inputs = inputs or _entry_inputs(source, material_path)
+    if inputs is None:
         return None
     variant = 'rcra-blender:%d:%s:%s:%r' % (ENTRY_CACHE_VERSION, vm.CODE_SHA256, IMAGE_CODE_SHA256,
                                             sorted(getattr(source, 'metadata', {}).items()))
-    return disk.key(bytes(data), [part], variant, own_code=True)
+    return disk.key(bytes(inputs[0]), [inputs[1]], variant + (':' + part if part else ''), own_code=True)
+
+
+def translation_units(source, material_paths, folder):
+    """The materials whose entries are not cached, as worker units in two phases: ('blender', (path, folder)) for each
+    one without fur and ('blender-shell', (path, k, folder)) for each uncached shell layer of a fur material first, then
+    ('blender', (path, folder)) for the fur materials, which read their layers from the cache. ``folder`` (the export's)
+    scopes a worker's image folder and texture cache to this export, as blender_materials' are."""
+    folder = str(folder)
+    from nwo.games.rcra import fur
+    disk = getattr(source, 'translation_disk_cache', None)
+    first, shells, second = [], [], []
+    for path in dict.fromkeys(material_paths):
+        inputs = _entry_inputs(source, path)
+        key = entry_cache_key(source, path, inputs=inputs)
+        if not key or disk.has(key):
+            continue
+        if not inputs[2]:
+            first.append(('blender', (path, folder)))
+            continue
+        for k in range(1, fur.layer_count(fur.fur_record(inputs[0]))):
+            if not disk.has(entry_cache_key(source, path, 'shell %d' % k, inputs)):
+                shells.append(('blender-shell', (path, k, folder)))
+        second.append(('blender', (path, folder)))
+    return [phase for phase in (first + shells, second) if phase]
 
 
 def _image_cache(source):
@@ -674,12 +712,12 @@ def _image_paths(value, prefix, found):
     return found
 
 
-def cached_material_entry(source, material_path, folder, texture_cache=None, graph_cache=None):
-    """material_entry, kept across sessions: a stored entry writes its images into ``folder`` from the image cache;
-    without a key, or when a stored image is missing, the material is translated."""
+def _cached(source, key, folder, compute):
+    """``compute()`` (an entry whose image paths lie in ``folder``), kept across sessions under ``key``: a stored entry
+    writes its images into ``folder`` from the image cache; without a key, or when a stored image is missing, it is
+    computed."""
     import hashlib
     disk = getattr(source, 'translation_disk_cache', None)
-    key = entry_cache_key(source, material_path)
     folder = Path(folder)
     prefix = str(folder) + os.sep
     stored = disk.get(key) if key else None
@@ -697,7 +735,7 @@ def cached_material_entry(source, material_path, folder, texture_cache=None, gra
                 (folder / name).parent.mkdir(parents=True, exist_ok=True)
                 (folder / name).write_bytes(blob)
             return _relocate(stored['entry'], _UNITS, prefix)
-    entry = material_entry(source, material_path, folder, texture_cache, graph_cache)
+    entry = compute()
     if key:
         files = {}
         for name in sorted(_image_paths(entry, prefix, set())):
@@ -709,6 +747,18 @@ def cached_material_entry(source, material_path, folder, texture_cache=None, gra
             _image_cache(source).put(files[name], blob)
         disk.put(key, dict(entry=_relocate(entry, prefix, _UNITS), files=files))
     return entry
+
+
+def cached_material_entry(source, material_path, folder, texture_cache=None, graph_cache=None):
+    """material_entry, kept across sessions (_cached)."""
+    return _cached(source, entry_cache_key(source, material_path), folder,
+                   lambda: material_entry(source, material_path, folder, texture_cache, graph_cache))
+
+
+def cached_shell_layer(source, material_path, data, k, folder, texture_cache=None):
+    """shell_layer, kept across sessions (_cached)."""
+    return _cached(source, entry_cache_key(source, material_path, 'shell %d' % k), folder,
+                   lambda: shell_layer(source, data, k, folder, texture_cache))
 
 
 def blender_materials(source, materials, folder):

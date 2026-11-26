@@ -250,6 +250,30 @@ class RcraReceiptKeyTests(unittest.TestCase):
         self.assertEqual(ran - set(vm.CODE_FILES) - set(vm.READERS) - set(bexp.IMAGE_CODE_FILES), set())
 
 
+    @unittest.skipUnless(os.environ.get('RCRA_GAME'), 'RCRA_GAME is not set')
+    def test_fur_layers_translate_before_their_material(self):
+        """translation_units: shell layers and materials without fur first, the fur material after its layers."""
+        from nwo.games.rcra import blender_export as bexp
+        from nwo.games.rcra.source import RcraSource
+        fur = 'material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material'
+        plain = 'material/visualeffect/global/gbl_camera_pane/gbl_camera_pane_hologram.material'
+        with tempfile.TemporaryDirectory() as folder:
+            source = RcraSource(os.environ['RCRA_GAME'], Path(folder) / 'out')
+            try:
+                source.translation_disk_cache = TranslationDiskCache(Path(folder) / 'cache')
+                first, second = bexp.translation_units(source, [fur, plain, fur], 'export')
+                self.assertIn(('blender', (plain, 'export')), first)
+                layers = [unit[1][1] for unit in first if unit[0] == 'blender-shell']
+                self.assertGreater(len(layers), 1)
+                self.assertEqual(layers, list(range(1, len(layers) + 1)))
+                self.assertEqual(second, [('blender', (fur, 'export'))])
+                # A cached entry needs no unit.
+                source.translation_disk_cache.put(bexp.entry_cache_key(source, plain), dict(entry={}, files={}))
+                self.assertNotIn(('blender', (plain, 'export')), bexp.translation_units(source, [plain, fur], 'export')[0])
+            finally:
+                source.close()
+
+
 class BlenderEntryCacheTests(unittest.TestCase):
     """blender_export.cached_material_entry: an entry and its images come back from disk into another folder."""
 

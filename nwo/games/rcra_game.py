@@ -140,6 +140,11 @@ def blender_materials(source, materials, folder):
     return build(source, materials, folder)
 
 
+def blender_translation_units(source, materials, folder):
+    from nwo.games.rcra.blender_export import translation_units
+    return translation_units(source, [m['path'] for m in materials.values() if m.get('path')], folder)
+
+
 # Browse, models, textures, glTF export, and skeletal animation with root motion and face performances (viewer
 # playback and export).
 GAME = Game(id='rcra', title='Rift Apart', detect=detect, open_source=open_source,
@@ -149,5 +154,5 @@ GAME = Game(id='rcra', title='Rift Apart', detect=detect, open_source=open_sourc
                        material_rules=material_rules, effect_preview=effect_preview, texture_header=texture_header,
                        texture_paths=texture_paths, load_texture=load_texture, export_textures=export_textures,
                        material_maps=material_maps, list_models=list_models, animation_library=animation_library,
-                       blender_materials=blender_materials),
+                       blender_materials=blender_materials, blender_translation_units=blender_translation_units),
             display_tonemap='Game (Rift Apart)')

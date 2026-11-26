@@ -822,6 +822,32 @@ class ModelExporter:
         self.map_cache = _MapCache()   # converted material maps, shared by every export of this run
         self.log, self.cancelled = log, cancelled
         self.process = None
+        self.pool = None   # viewer.loader.TranslationPool for cold Blender materials, started on first use
+
+    def close(self):
+        """Stop the translation workers (the exporter can still export; a later cold model starts them again)."""
+        pool, self.pool = self.pool, None
+        if pool is not None:
+            pool.close()
+
+    def _blender_materials(self, game, archive, materials, folder):
+        """game.blender_materials, with the translations not cached yet made first in parallel worker processes
+        (TranslationPool, game.blender_translation_units) that store them in the disk cache, so the game's hook reads
+        them back; a single translation, a frozen build or a failed worker translates here."""
+        self.log('  translating game materials for Blender')
+        phases = game.blender_translation_units(archive, materials, folder)
+        units = sum(len(phase) for phase in phases)
+        if units > 1:
+            if self.pool is None:
+                from nwo.viewer.loader import TranslationPool, translation_workers
+                workers = translation_workers()
+                self.pool = TranslationPool(self.source_root, workers) if workers else None
+            if self.pool is not None:
+                self.log(f'  {units} translations on {min(units, self.pool.workers)} worker processes')
+                for phase in phases:
+                    self.pool.run(phase)
+                    self._check()
+        return game.blender_materials(archive, materials, folder)
 
     def _check(self):
         if self.cancelled():
@@ -994,8 +1020,8 @@ class ModelExporter:
             # The .blend alone: the game's translated material replaces the glTF one, so its glTF maps are only made for
             # the materials that do not translate.
             folder.mkdir(parents=True, exist_ok=True)
-            self.log('  translating game materials for Blender')
-            translated = game.blender_materials(archive, {obj_names[slot]: by_index.get(slot, {}) for slot in used}, folder)
+            translated = self._blender_materials(game, archive, {obj_names[slot]: by_index.get(slot, {}) for slot in used},
+                                                 folder)
         maps = {}
         for slot in used:
             self._check()
@@ -1079,9 +1105,8 @@ class ModelExporter:
         if needs_blender:
             self._check()
             if translated is None and options.textures:
-                self.log('  translating game materials for Blender')
-                translated = game.blender_materials(archive, {m['obj_name']: by_index.get(slot, {}) for slot, m in maps.items()},
-                                                    folder)
+                translated = self._blender_materials(game, archive,
+                                                     {m['obj_name']: by_index.get(slot, {}) for slot, m in maps.items()}, folder)
             if translated is not None:
                 materials_json, untranslated = translated
                 kept = ', '.join(f'{name} ({why})' for name, why in sorted(untranslated.items()))
