@@ -20,6 +20,11 @@ PATHS = [
     "environment/savali/stairs/sav_stairs_v1.model",
     "environment/savali/stairs/sav_stairs_v1_snow.model",
     "environment/x/prop/lantern_anim.model",   # no base lantern.model: stays listed
+    "characters/enemy/enm_pirate_robot/enm_pirate_robot.model",
+    "characters/enemy/enm_pirate_robot/enm_pirate_robot_art.model",
+    "characters/enemy/enm_neo_nefarious_heavy/enm_neo_nefarious_heavy.model",
+    "characters/enemy/enm_neo_nefarious_heavy/enm_neo_nefarious_heavy_economy.model",
+    "characters/enemy/enm_poolshark/enm_pool_shark_art.model",   # no base: stays listed
 ]
 LISTED = frozenset(p.casefold() for p in PATHS)
 
@@ -51,12 +56,16 @@ class VariantKindTests(unittest.TestCase):
         self.assertEqual(kind(PATHS[2]), "skeleton")
         self.assertEqual(kind(PATHS[5]), "special")
         self.assertEqual(kind(PATHS[13]), "snow")
+        self.assertEqual(kind(PATHS[16]), "art")
+        self.assertEqual(kind(PATHS[18]), "economy")
+        self.assertIsNone(kind(PATHS[19]))
 
     def test_case_and_backslashes(self):
         self.assertEqual(kind(PATHS[1].upper().replace("/", "\\")), "topiary")
 
-    def test_defaults_hide_topiary_test_folders_and_models_without_geometry(self):
-        self.assertEqual({k.key for k in VARIANT_KINDS if k.hidden_by_default}, {"topiary", "test", "no_geometry"})
+    def test_defaults_hide_topiary_test_folders_lighter_copies_and_models_without_geometry(self):
+        self.assertEqual({k.key for k in VARIANT_KINDS if k.hidden_by_default},
+                         {"topiary", "test", "economy", "art", "no_geometry"})
 
     def test_a_record_flag_marks_models_without_geometry(self):
         from nwo.app.batch import PipelineModelCandidate

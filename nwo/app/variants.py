@@ -31,7 +31,10 @@ VARIANT_KINDS = (
     VariantKind("duplicate", "Static and animated copies (_anim, _static, _nonstatic)", False,
                 suffixes=("_anim", "_static", "_nonstatic")),
     VariantKind("snow", "Snow versions (_snow)", False, suffixes=("_snow",)),
-    VariantKind("economy", "Economy versions (_economy)", False, suffixes=("_economy",)),
+    # Lighter copies of a listed model: _economy crowd versions (fewer vertices, joints and looks; cinematics and
+    # ambient crowds) and _art static set-dressing versions (no joints, lighter mesh).
+    VariantKind("economy", "Economy versions (_economy)", True, suffixes=("_economy",)),
+    VariantKind("art", "Static art versions (_art)", True, suffixes=("_art",)),
     VariantKind("special", "Cutscene, hologram and dimension-swap versions", False,
                 suffixes=("_cine", "_hologram", "_dimensionswap")),
     VariantKind("no_geometry", "Models without geometry (collision, joints or placeholders)", True, flag="no_geometry",
