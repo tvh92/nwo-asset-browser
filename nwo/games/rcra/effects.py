@@ -63,7 +63,9 @@ def _kind(path):
 
 def activated_effects(source, model_path, attach_names):
     """[{'effect', 'locator', 'conduit', 'actor'}]: the effects the model's actors start on activation, deduplicated by
-    (effect, locator), from the conduits whose activation responses only name ``attach_names`` (locators and joints)."""
+    (effect, locator), from the conduits whose activation responses only name ``attach_names`` (locators and joints).
+    Responses behind a game-state filter (``condition``, such as a mission name) are left out: they belong to a
+    look the model only has in those states."""
     from nwo.games.rcra.clip_library import dag_index
     index = dag_index(source)
     model = index.by_path.get(model_path.replace('\\', '/').lower())
@@ -84,7 +86,7 @@ def activated_effects(source, model_path, attach_names):
                 responses = vfx.conduit_effects(source.asset_data(keys[0]))
             except (ValueError, KeyError, OSError):
                 continue
-            started = [r for r in responses if r['event'] == 'ActivatedEvent' and r['start']]
+            started = [r for r in responses if r['event'] == 'ActivatedEvent' and r['start'] and not r['condition']]
             if not started or any(r['locator'] and r['locator'] not in attach_names for r in started):
                 continue
             for r in started:

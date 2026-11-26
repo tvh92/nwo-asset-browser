@@ -320,6 +320,18 @@ class VendorEffectsTest(unittest.TestCase):
                                    ('npc_weapon_vendor_holo_logo.visualeffect', 'igLoc_projection_vfx'),
                                    ('npc_weapon_vendor_holo_logo_projector.visualeffect', 'igLoc_projection_vfx')})
         self.assertTrue(any(not f['start'] for f in found if f['event'] == 'DeactivatedEvent'))
+        self.assertFalse(any(f['condition'] for f in found))
+
+    def test_mission_filtered_effects_stay_off(self):
+        from nwo.games.rcra.effects import activated_effects
+        found = vfx.conduit_effects(self.data(
+            'conduit/characters/enemy/enm_indigenous_grunthor_vfx/enm_indigenous_grunthor_vfx.conduit'))
+        skeleton = [f for f in found if 'skeleton' in f['effect']]
+        self.assertTrue(skeleton)
+        self.assertTrue(all(f['condition'].startswith('kMissionName kSelOpEQ MIS_') for f in skeleton))
+        names = {'RT_lowlid_half', 'LF_lowlid_half', 'igLoc_chest_soul', 'LF_toeA', 'RT_toeA'}
+        attached = activated_effects(self.source, 'characters/enemy/enm_grunthor_rcf/enm_grunthor_rcf.model', names)
+        self.assertFalse([a for a in attached if 'skeleton' in a['effect']])
 
     def test_vendor_view_decode_carries_the_logo(self):
         from nwo.games import rcra_game

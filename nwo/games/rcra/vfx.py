@@ -295,21 +295,28 @@ def _items(value):
 
 
 def conduit_effects(data):
-    """[{'event', 'label', 'response', 'effect', 'locator', 'start'}] of a conduit's kVFX responses.
+    """[{'event', 'label', 'condition', 'response', 'effect', 'locator', 'start'}] of a conduit's kVFX responses.
 
     ``start`` is False for a response that stops its effect (a ``StartEffect`` field). ``label`` is the event label the
-    filter selects on (``start_fx``), or None for an unfiltered event such as ``ActivatedEvent``."""
+    filter selects on (``start_fx``), or None for an unfiltered event such as ``ActivatedEvent``. ``condition`` is the
+    game state the filter tests, such as ``kMissionName kSelOpEQ MIS_SVALI_02_SECOND_VISIT`` (the grunthor's skeleton
+    look, only in those missions), or None when the filter has no global operand."""
     root = _serialized(data, CONDUIT_BUILT)
     if not isinstance(root, dict):
         return []
     found = []
     for event in _items(root.get('Events')):
         for flt in _items(event.get('Filters')):
-            label = None
+            label = condition = None
             selector = flt.get('Selector')
-            for value in _items(selector.get('Value') if isinstance(selector, dict) else None):
+            values = _items(selector.get('Value') if isinstance(selector, dict) else None)
+            for value in values:
                 if value.get('Type') == 'kFieldConst':
                     label = value.get('Value')
+            if any(value.get('Type') == 'kFieldGlobal' for value in values):
+                condition = ' '.join(str(part) for part in (
+                    [v.get('Value') for v in values if v.get('Type') == 'kFieldGlobal'] + [selector.get('Op')]
+                    + [v.get('Value') for v in values if v.get('Type') != 'kFieldGlobal']))
             for response in _items(flt.get('Response')):
                 if response.get('Type') != 'kVFX':
                     continue
@@ -320,7 +327,7 @@ def conduit_effects(data):
                         fields[dest.get('Value')] = source.get('Value')
                 if not fields.get('FXPackage'):
                     continue
-                found.append(dict(event=event.get('Name'), label=label, response=response.get('Name'),
+                found.append(dict(event=event.get('Name'), label=label, condition=condition, response=response.get('Name'),
                                   effect=_path(fields['FXPackage']), locator=fields.get('AttachLocJoint'),
                                   start='StartEffect' not in fields))
     return found
