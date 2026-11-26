@@ -10,6 +10,9 @@ exposure 0.18 / adapted luminance, then the game's own 32^3 ACES lookup (nwo.gam
 atmosphere's colour-correction LUT mixed in at weight 1 (one fully active atmosphere), sampled trilinearly at its log2
 coordinate, as CS_ToneMap does; the view transform is Raw, so Blender adds nothing after it.
 The metered exposure stays fixed: moving the camera does not re-meter (the group's Exposure input can be changed).
+``apply_fill`` then adds a presentation light that is not the game's: a soft, neutral sun shining up from below at a
+third of the key light's strength (it is added after the metering, so it brightens the shot; its strength can be
+changed on the lamp).
 Not reproduced in the .blend: bloom, vignette and film grain. ``check`` validates a reopened file.
 """
 import json
@@ -32,6 +35,10 @@ TREE_NAME = 'Rift Apart display compositor'
 LOOKUP_IMAGE = 'Rift Apart display 3D lookup (tiled)'
 METER_EDGE = 512        # long edge of the metering render
 METER_SAMPLES = 32
+FILL_NAME = 'Presentation fill from below (not game lighting)'
+FILL_ROLE = 'presentation_fill_below'
+FILL_ANGLE = 1.5708     # a 90-degree disc: soft shading and shadows
+FILL_RATIO = 1 / 3      # fill strength / key light strength
 
 
 def _world_nodes(scene):
@@ -226,6 +233,30 @@ def apply_display(scene, bake_path=None):
     return display
 
 
+def fill_irradiance(record):
+    """Blender sun strength of the presentation fill: FILL_RATIO x the key light's (a 3:1 key-to-fill ratio, a
+    photographic convention, not game data)."""
+    return float(FILL_RATIO * record['sun_energy'])
+
+
+def apply_fill(scene):
+    """Add the presentation fill (see the module): a neutral sun lamp pointing straight up, invisible in glossy rays (no
+    highlight from below); returns the record stored in scene['rcra_fill']."""
+    record = json.loads(scene['rcra_atmosphere'])
+    energy = fill_irradiance(record)
+    data = bpy.data.lights.new(FILL_NAME, 'SUN')
+    data.energy, data.color, data.angle = energy, (1.0, 1.0, 1.0), FILL_ANGLE
+    fill = bpy.data.objects.new(FILL_NAME, data)
+    fill.rotation_euler = (np.pi, 0.0, 0.0)          # a sun shines along its -Z: turned over, it shines up
+    fill.visible_glossy = False
+    fill['lighting_role'] = FILL_ROLE
+    scene.collection.objects.link(fill)
+    result = dict(name=FILL_NAME, energy=energy, angle=FILL_ANGLE, presentation=True,
+                  rule='key light strength / 3, neutral (presentation, not game lighting)')
+    scene['rcra_fill'] = json.dumps(result, sort_keys=True)
+    return result
+
+
 def check(scene):
     """Problems with a reopened file's atmosphere lighting and display, [] when it matches its records."""
     problems = []
@@ -245,6 +276,13 @@ def check(scene):
     keys = [o for o in scene.objects if o.type == 'LIGHT' and o.get('lighting_role') == KEY_ROLE]
     if len(keys) != 1 or keys[0].data.type != 'SUN' or abs(keys[0].data.energy - record['sun_energy']) > 1e-4:
         problems.append('atmosphere.key_light')
+    fills = [o for o in scene.objects if o.type == 'LIGHT' and o.get('lighting_role') == FILL_ROLE]
+    if 'rcra_fill' in scene:
+        fill = json.loads(scene['rcra_fill'])
+        if len(fills) != 1 or fills[0].data.type != 'SUN' or abs(fills[0].data.energy - fill['energy']) > 1e-4:
+            problems.append('atmosphere.fill')
+    elif fills:
+        problems.append('atmosphere.fill')
     from nwo.pipeline import scene_defaults
     if any(scene_defaults.review_sun(o) for o in scene.objects):
         problems.append('atmosphere.review_sun')

@@ -141,8 +141,10 @@ if args.blend:
             lighting = rcra_atmosphere_blender.apply_lighting(scene, args.atmosphere)
             bpy.ops.file.pack_all()
             display = rcra_atmosphere_blender.apply_display(scene, args.atmosphere)
-            print('SCENE', 'atmosphere %s, metered %.2f EV, exposure %.4f, camera and render region'
-                  % (lighting['path'], display['measured_ev'], display['exposure']), flush=True)
+            fill = rcra_atmosphere_blender.apply_fill(scene)   # a presentation light, after the metering
+            print('SCENE', 'atmosphere %s, metered %.2f EV, exposure %.4f, fill %s, camera and render region'
+                  % (lighting['path'], display['measured_ev'], display['exposure'],
+                     '%.3f' % fill['energy'] if fill else 'none'), flush=True)
         else:
             scene_defaults.pack_scene_images(scene)   # packs the HDRI too, checked against the shared EXR
             print('SCENE', 'review lighting, camera and render region', flush=True)
