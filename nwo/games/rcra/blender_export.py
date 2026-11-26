@@ -30,6 +30,7 @@ side (nwo/export/rcra_blender.py build_fur_shells) draws each layer as a copy of
 """
 import json
 import math
+import os
 import re
 from pathlib import Path
 
@@ -593,14 +594,131 @@ def fur_control_path(source, data):
     return result['textures'][fur.CONTROL_BINDING]
 
 
+# The entry cache: material_entry results in the source's translation disk cache (nwo.viewer.native_glsl
+# TranslationDiskCache), their image files in a content-addressed BlobDiskCache beside it. The key holds the material and
+# graph bytes (or the fur program), the archive's identity (the images come from its textures), the translation code
+# (viewer_materials.CODE_SHA256) and the image-writing code below.
+ENTRY_CACHE_VERSION = 1
+IMAGE_CODE_FILES = ('formats/linear_png.py', 'viewer/textures.py')
+IMAGE_CACHE_BYTES = 2 * 1024 ** 3
+_UNITS = 'rcra-units:'   # a stored entry's image path, relative to the units folder
+
+
+def _image_code_sha256():
+    from hashlib import sha256
+    package = Path(__file__).resolve().parents[2]
+    try:
+        return sha256(b''.join(name.encode() + (package / name).read_bytes() for name in IMAGE_CODE_FILES)).hexdigest()
+    except OSError:   # frozen executable without sources: no entry cache
+        return None
+
+
+IMAGE_CODE_SHA256 = _image_code_sha256()
+
+
+def entry_cache_key(source, material_path):
+    """cached_material_entry's key, or None when the entry is not cached (no disk cache or sources, or no graph)."""
+    from nwo.games.rcra import viewer_materials as vm
+    from nwo.games.rcra.material import _material_key
+    disk = getattr(source, 'translation_disk_cache', None)
+    if disk is None or not vm.CODE_SHA256 or not IMAGE_CODE_SHA256:
+        return None
+    try:
+        key = _material_key(source, material_path)
+        if key is None:
+            return None
+        data = source.asset_data(key)
+        graph = vm._graph(source, key)
+        if graph is None:
+            from nwo.games.rcra.fur import fur_program
+            part = fur_program(source, data)['key']
+        else:
+            part = bytes(graph)
+    except (vm.NotTranslated, ValueError, KeyError, OSError):
+        return None
+    variant = 'rcra-blender:%d:%s:%s:%r' % (ENTRY_CACHE_VERSION, vm.CODE_SHA256, IMAGE_CODE_SHA256,
+                                            sorted(getattr(source, 'metadata', {}).items()))
+    return disk.key(bytes(data), [part], variant, own_code=True)
+
+
+def _image_cache(source):
+    from nwo.viewer.blob_cache import BlobDiskCache
+    cache = source.__dict__.get('_rcra_blender_images')
+    if cache is None:
+        cache = source.__dict__['_rcra_blender_images'] = BlobDiskCache(
+            Path(source.translation_disk_cache.folder).parent / 'blender_images', IMAGE_CACHE_BYTES)
+    return cache
+
+
+def _relocate(value, old, new):
+    """``value`` with every string that starts with ``old`` starting with ``new`` instead."""
+    if isinstance(value, str):
+        return new + value[len(old):] if value.startswith(old) else value
+    if isinstance(value, dict):
+        return {k: _relocate(v, old, new) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_relocate(v, old, new) for v in value)
+    return value
+
+
+def _image_paths(value, prefix, found):
+    if isinstance(value, str):
+        if value.startswith(prefix):
+            found.add(value[len(prefix):])
+    elif isinstance(value, dict):
+        for v in value.values():
+            _image_paths(v, prefix, found)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _image_paths(v, prefix, found)
+    return found
+
+
+def cached_material_entry(source, material_path, folder, texture_cache=None, graph_cache=None):
+    """material_entry, kept across sessions: a stored entry writes its images into ``folder`` from the image cache;
+    without a key, or when a stored image is missing, the material is translated."""
+    import hashlib
+    disk = getattr(source, 'translation_disk_cache', None)
+    key = entry_cache_key(source, material_path)
+    folder = Path(folder)
+    prefix = str(folder) + os.sep
+    stored = disk.get(key) if key else None
+    if stored is not None:
+        images, blobs = _image_cache(source), {}
+        for name, digest in stored['files'].items():
+            target = folder / name
+            if not target.is_file():
+                blobs[name] = images.get(digest)
+                if blobs[name] is None:
+                    stored = None
+                    break
+        if stored is not None:
+            for name, blob in blobs.items():
+                (folder / name).parent.mkdir(parents=True, exist_ok=True)
+                (folder / name).write_bytes(blob)
+            return _relocate(stored['entry'], _UNITS, prefix)
+    entry = material_entry(source, material_path, folder, texture_cache, graph_cache)
+    if key:
+        files = {}
+        for name in sorted(_image_paths(entry, prefix, set())):
+            try:
+                blob = (folder / name).read_bytes()
+            except OSError:
+                return entry
+            files[name] = hashlib.sha256(blob).hexdigest()
+            _image_cache(source).put(files[name], blob)
+        disk.put(key, dict(entry=_relocate(entry, prefix, _UNITS), files=files))
+    return entry
+
+
 def blender_materials(source, materials, folder):
     """Write ``rcra_materials.json`` for {glTF material name: material dict}; returns (path, {name: error})."""
     folder = Path(folder)
     texture_cache, graph_cache, entries, errors = {}, {}, {}, {}
     for name, material in materials.items():
         path = material.get('path')
-        entry = material_entry(source, path, folder / 'textures' / 'units', texture_cache, graph_cache) if path else \
-            dict(error='no material asset')
+        entry = cached_material_entry(source, path, folder / 'textures' / 'units', texture_cache, graph_cache) if path \
+            else dict(error='no material asset')
         entries[name] = dict(entry, material=path)
         if 'error' in entry:
             errors[name] = entry['error']

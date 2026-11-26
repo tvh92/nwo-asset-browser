@@ -101,6 +101,17 @@ def safe_name(value, maximum=70):
     return (value or 'model')[:maximum]
 
 
+def material_name(material, slot):
+    """A material slot's name, as the games' ``material_maps`` give it."""
+    return material.get('name') or (Path(material['path']).stem if material.get('path') else f'material_{slot}')
+
+
+def plain_maps(material, slot, note):
+    """``material_maps``'s dict without textures: a white opaque material with ``note``."""
+    return dict(name=material_name(material, slot), base=None, mr=None, normal=None, emissive=None, emissive_strength=0.0,
+                alpha_mode='OPAQUE', alpha=1.0, double_sided=False, notes=[note], sources={}, png={})
+
+
 # ---------------------------------------------------------------- textures / materials
 def _srgb_to_linear(x):
     x = np.asarray(x)
@@ -972,20 +983,30 @@ class ModelExporter:
 
         # Materials: only slots the selected meshes use.
         used = sorted({p['material'] for p in parts if p['material'] is not None})
+        obj_names, names = {}, set()
+        for slot in used:
+            name = safe_name(material_name(by_index.get(slot, {}), slot), 50)
+            while name in names:
+                name += f'_{slot}'
+            names.add(name); obj_names[slot] = name
+        translated = None
+        if needs_blender and options.textures and tuple(options.formats) == ('blend',):
+            # The .blend alone: the game's translated material replaces the glTF one, so its glTF maps are only made for
+            # the materials that do not translate.
+            folder.mkdir(parents=True, exist_ok=True)
+            self.log('  translating game materials for Blender')
+            translated = game.blender_materials(archive, {obj_names[slot]: by_index.get(slot, {}) for slot in used}, folder)
         maps = {}
         for slot in used:
             self._check()
             material = by_index.get(slot, {})
-            self.log(f"  material {slot}: {material.get('name') or material.get('path') or '(none)'}")
-            maps[slot] = game.material_maps(archive, material, self.texture_cache, self.map_cache) if options.textures else \
-                dict(name=material.get('name') or f'material_{slot}', base=None, mr=None, normal=None, emissive=None,
-                     emissive_strength=0.0, alpha_mode='OPAQUE', alpha=1.0, double_sided=False, notes=['textures not exported'], sources={}, png={})
-        names = set()
-        for slot, m in maps.items():
-            name = safe_name(m['name'], 50)
-            while name in names:
-                name += f'_{slot}'
-            names.add(name); m['obj_name'] = name
+            if translated is not None and obj_names[slot] not in translated[1]:
+                maps[slot] = plain_maps(material, slot, 'translated for Blender; no glTF maps')
+            else:
+                self.log(f"  material {slot}: {material.get('name') or material.get('path') or '(none)'}")
+                maps[slot] = game.material_maps(archive, material, self.texture_cache, self.map_cache) if options.textures \
+                    else plain_maps(material, slot, 'textures not exported')
+            maps[slot]['obj_name'] = obj_names[slot]
 
         # Animations.
         clips_out, skipped = [], []
@@ -1057,8 +1078,7 @@ class ModelExporter:
                 notes.append('OBJ holds the static rest pose only (no skeleton or animation).')
         if needs_blender:
             self._check()
-            translated = None
-            if options.textures:
+            if translated is None and options.textures:
                 self.log('  translating game materials for Blender')
                 translated = game.blender_materials(archive, {m['obj_name']: by_index.get(slot, {}) for slot, m in maps.items()},
                                                     folder)

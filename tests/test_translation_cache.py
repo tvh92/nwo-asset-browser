@@ -215,6 +215,72 @@ class RcraReceiptKeyTests(unittest.TestCase):
         self.assertIn('games/rcra/surface.py', ran)
         self.assertEqual(ran - set(vm.CODE_FILES) - set(vm.READERS), set())
 
+    @unittest.skipUnless(os.environ.get('RCRA_GAME'), 'RCRA_GAME is not set')
+    def test_blender_entries_run_only_keyed_code(self):
+        """Every function that runs while Blender entries are made (cache off) is in the entry cache's key."""
+        import sys
+        from nwo.games.rcra import blender_export as bexp, viewer_materials as vm
+        from nwo.games.rcra.source import RcraSource
+        package = Path(vm.__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as folder:
+            source = RcraSource(os.environ['RCRA_GAME'], Path(folder) / 'out')
+            try:
+                ran, monitor = set(), sys.monitoring
+                tool = monitor.PROFILER_ID
+                monitor.use_tool_id(tool, 'entry-key-test')
+
+                def started(code, _offset):
+                    path = Path(code.co_filename)
+                    if path.is_relative_to(package):
+                        ran.add(path.relative_to(package).as_posix())
+                    return monitor.DISABLE
+                monitor.register_callback(tool, monitor.events.PY_START, started)
+                monitor.set_events(tool, monitor.events.PY_START)
+                try:
+                    for path in ('material/characters/hero/hero_ratchet_head/hero_ratchet_head_fur.material',
+                                 'material/visualeffect/global/gbl_camera_pane/gbl_camera_pane_hologram.material',
+                                 'material/character/enemy/enm_molonoth_robot/enm_dr_nefarious_laser_tube.material'):
+                        bexp.material_entry(source, path, Path(folder) / 'units')
+                finally:
+                    monitor.set_events(tool, 0)
+                    monitor.free_tool_id(tool)
+            finally:
+                source.close()
+        self.assertIn('games/rcra/surface.py', ran)
+        self.assertEqual(ran - set(vm.CODE_FILES) - set(vm.READERS) - set(bexp.IMAGE_CODE_FILES), set())
+
+
+class BlenderEntryCacheTests(unittest.TestCase):
+    """blender_export.cached_material_entry: an entry and its images come back from disk into another folder."""
+
+    def test_entry_and_images_are_reused_in_a_new_folder(self):
+        from nwo.games.rcra import blender_export as bexp
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            source = type('Source', (), {})()
+            source.translation_disk_cache = TranslationDiskCache(tmp / 'cache' / 'native_translation')
+            calls = []
+
+            def entry(_source, path, folder, *_args):
+                calls.append(path)
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / 'a_c.png').write_bytes(b'png bytes')
+                return dict(images={'t0': dict(path=str(folder / 'a_c.png'), source='texture/a_c.texture')},
+                            recipe=dict(nodes=[1, 2]), blend='opaque')
+
+            with patch.object(bexp, 'entry_cache_key', return_value='k' * 64), patch.object(bexp, 'material_entry', entry):
+                first = bexp.cached_material_entry(source, 'a.material', tmp / 'one' / 'units')
+                second = bexp.cached_material_entry(source, 'a.material', tmp / 'two' / 'units')
+                self.assertEqual(calls, ['a.material'])
+                self.assertEqual(second['images']['t0']['path'], str(tmp / 'two' / 'units' / 'a_c.png'))
+                self.assertEqual((tmp / 'two' / 'units' / 'a_c.png').read_bytes(), b'png bytes')
+                self.assertEqual(second['recipe'], first['recipe'])
+                # A stored image that is gone means translating again.
+                for blob in (tmp / 'cache' / 'blender_images').rglob('*.blob'):
+                    blob.unlink()
+                bexp.cached_material_entry(source, 'a.material', tmp / 'three' / 'units')
+                self.assertEqual(calls, ['a.material', 'a.material'])
+
 
 if __name__ == '__main__':
     unittest.main()

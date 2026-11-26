@@ -59,10 +59,10 @@ CODE_FILES = ('games/rcra/viewer_materials.py', 'games/rcra/surface.py', 'games/
               'viewer/rcra_glsl.py')
 READERS = ('games/rcra/source.py', 'games/rcra/dsar.py', 'games/rcra/toc.py', 'games/rcra/gdeflate.py')
 # Modules the CODE_FILES import that a translation does not use: display texture loading and Blender image export
-# (viewer.textures, formats.linear_png), the GLSL program emission rcra_glsl runs on a receipt (viewer.shading,
-# viewer.native_glsl) and the 2016 archive readers that formats.texture also serves.
-NOT_TRANSLATION = ('viewer/textures.py', 'formats/linear_png.py', 'viewer/shading.py', 'viewer/native_glsl.py',
-                   'formats/container.py', 'formats/archive.py')
+# (viewer.textures, formats.linear_png) and its image store (viewer.blob_cache), the GLSL program emission rcra_glsl runs on
+# a receipt (viewer.shading, viewer.native_glsl) and the 2016 archive readers that formats.texture also serves.
+NOT_TRANSLATION = ('viewer/textures.py', 'formats/linear_png.py', 'viewer/blob_cache.py', 'viewer/shading.py',
+                   'viewer/native_glsl.py', 'formats/container.py', 'formats/archive.py')
 
 
 def _code_sha256():

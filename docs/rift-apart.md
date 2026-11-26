@@ -1430,7 +1430,7 @@ A Blender export (`.blend`, FBX or USD, through `nwo/export/blender_convert.py`)
 | Module | Role |
 | --- | --- |
 | `nwo/games/rcra/surface.py` | Translates the G-buffer writer (slot 4) and unpacks the engine's packing into surface terms: a recipe. For blended materials it also translates the forward program (slot 1) into colour and alpha. |
-| `nwo/games/rcra/blender_export.py` | The `Game.blender_materials` hook: recipes and unit textures, written as `rcra_materials.json` beside the export |
+| `nwo/games/rcra/blender_export.py` | The `Game.blender_materials` hook: recipes and unit textures, written as `rcra_materials.json` beside the export. Each material's entry (`cached_material_entry`) is kept across sessions: the entry in the source's translation disk cache, its unit textures in a content-addressed store beside it (`<game cache>/blender_images`, at most 2 GB). The key (`entry_cache_key`) covers the material and graph bytes (or the fur program), the archive's identity, the translation code (`viewer_materials.CODE_SHA256`) and the image-writing code (`IMAGE_CODE_FILES`); a missing stored image means translating again |
 | `nwo/export/rcra_blender.py` | Runs in Blender: the "RC RA Deferred BRDF" group, and one Math node per recipe operation. A division by a constant 0 (a neutral profile value) is x × Exponent(10000), which is x × inf as in D3D; Blender's Divide alone returns 0. A `lookup` (below) is a one-row float32 image read with Closest. Saturate is Maximum then Minimum, which drop NaN as D3D does |
 
 ### Surface terms
