@@ -65,6 +65,43 @@ VOLUME = 'volume'
 CUBE = 'cube'   # a layout is (CUBE, index of the cube in the array)
 CLASS_LIMITATION = ('Blender lights this material with the class-0 BRDF: the game applies lighting class %d (%s) with its own '
                     'apply program, which Cycles has no closure for (the viewer draws it, nwo.games.rcra.lighting).')
+# Classes 1, 2 and 5: their own Blender groups (nwo.export.rcra_closures, nwo.export.rcra_blender).
+SUBSURFACE_LIMITATION = (
+    'Lighting class 1 (subsurface): Blender mixes the class-1 program\'s two GGX lobes by the view depth (sat(0.15 - 0.03 '
+    'depth) of the near lobe, alpha^1.66) and draws the skin pass\'s screen-space blur as Cycles\' Christensen-Burley '
+    'subsurface at the same diffusion distance (the skin profile texel x 0.005 x (0.6 occlusion + 0.4) x (2^blur - 1) / 7 '
+    'world units): Cycles blurs over the surface where the game blurs seven taps in screen space. Not drawn: the '
+    'program\'s Henyey-Greenstein scatter on its second normal (at most 0.003 x 10 of the specular weight, at grazing '
+    'views) and the transmission through the shadow-map depth.')
+NO_PROFILE_LIMITATION = ('The skin profile index is not constant in this material: Blender draws its diffuse without the '
+                         'skin pass blur (Burley radius 0).')
+CLOTH_LIMITATION = (
+    'Lighting class 2 (cloth): Blender draws the program\'s specular on the second normal, mix(GGX, sheen, sheen field / '
+    '31) with r = 0.9725 - 0.6011 gloss: the GGX exactly, the Charlie sheen (Neubelt visibility, tinted by F0) as a fitted '
+    'Ashikhmin velvet of the same mean reflectance (about 55 % relative L2 difference in shape). The diffuse, wrapped and '
+    'scaled per channel by min(|N.L| + w sqrt(albedo), 1), is a Diffuse and a Translucent BSDF of the same irradiance from '
+    'each hemisphere: ambient light is the program\'s, a single light falls off as Lambert. Not drawn: the scatter lobe '
+    '(Henyey-Greenstein, at most 3 % of the specular).')
+FOLIAGE_LIMITATION = (
+    'Lighting class 5 (foliage): Blender draws the wrapped diffuse and back transmission as a Diffuse and a Translucent '
+    'BSDF of the same irradiance from each hemisphere (ambient light is the program\'s, a single light falls off as '
+    'Lambert), and the class-0 specular as the program does.')
+CLASS_LIMITATIONS = {1: SUBSURFACE_LIMITATION, 2: CLOTH_LIMITATION, 5: FOLIAGE_LIMITATION}
+
+
+def skin_profile(source, recipe):
+    """The linear skin profile texel (rgb) of a class-1 recipe whose profile index (extra.4) is constant, else None:
+    lighting.PROFILE_TEXTURE as the engine binds it, texel PROFILE_BASE + index (lighting.profile_texel)."""
+    from nwo.games.rcra.texture import load_texture_full
+    i = recipe['terms'].get('extra.%d' % lighting.PROFILE_FIELD)
+    node = recipe['nodes'][i] if i is not None else None
+    if node is None or node['op'] != 'const':
+        return None
+    texture = load_texture_full(source, lighting.PROFILE_TEXTURE)
+    texels = texel_array(texture)[0]
+    if texture['format'] in SRGB_FORMATS:
+        texels[:, :3] = _srgb_to_linear(texels[:, :3])
+    return [float(x) for x in lighting.profile_texel(texels, int(node['value']))[:3]]
 # Class 4: Cycles' anisotropic GGX has the program's lobes (nwo.games.rcra.lighting.cycles_anisotropic).
 ANISOTROPIC_LIMITATION = ('Lighting class 4 (anisotropic): Blender averages two anisotropic GGX lobes as the class-4 apply '
                           'program does, on the G-buffer tangent and on it turned by the rotation field, with alpha r^4 '
@@ -473,13 +510,25 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
         else:
             limitations.append('The game draws this material %s in its forward pass, which does not translate (%s): '
                                'Blender gets its opaque G-buffer surface.' % (blend, errors['forward']))
+    skin = None
     if 'recipe' in results:
         limitations += results['recipe']['limitations']
         cls = results['recipe']['graph'].value(results['recipe']['terms']['class'])
+        cls = int(cls) if cls is not None else 0
+        own = cls in CLASS_LIMITATIONS and all('extra.%d' % k in recipes['recipe']['terms']
+                                               for k in range(len(lighting.EXTRA_FIELDS[cls])))
         if lighting.anisotropic(recipes['recipe']):
             limitations.append(ANISOTROPIC_LIMITATION)
+        elif own:
+            limitations.append(CLASS_LIMITATIONS[cls])
         elif cls:
-            limitations.append(CLASS_LIMITATION % (int(cls), lighting.CLASS_NAMES[int(cls)]))
+            limitations.append(CLASS_LIMITATION % (cls, lighting.CLASS_NAMES[cls]))
+        if own and cls == 1:
+            profile = skin_profile(source, recipes['recipe'])
+            if profile is None:
+                limitations.append(NO_PROFILE_LIMITATION)
+            else:
+                skin = profile
     limitations += [CUBE_LIMITATION % binding for binding, row in sorted(images.items()) if 'cube' in row]
     limitations += [
         'Tangent frame: the decoded vertex tangent and TEXCOORD3.w, carried as coordinates in Blender\'s UV0 tangent '
@@ -488,6 +537,8 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
     entry = dict(graph=graph_path, blend=blend if 'forward' in results else 'opaque', game_blend=blend, images=images,
                  limitations=limitations, double_sided=double_sided(data))
     entry.update(recipes)
+    if skin is not None:
+        entry['skin_profile'] = skin
     if program is not None:
         try:
             entry.update(fur_shells(source, data, folder, texture_cache))

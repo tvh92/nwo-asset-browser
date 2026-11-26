@@ -52,7 +52,9 @@ CLASSES = (0, 1, 2, 3, 4, 5)
 CLASS_NAMES = {0: 'standard', 1: 'subsurface', 2: 'cloth', 3: 'hair', 4: 'anisotropic', 5: 'foliage'}
 # The g_GBufExtra fields each class's apply program reads: (bit offset, width), in the order of the terms extra.0, extra.1, ...
 EXTRA_FIELDS = {
-    1: ((0, 3), (9, 6), (18, 7), (25, 7), (5, 4)),    # scatter, transmission, second normal (7 + 7 bits), skin profile
+    # scatter, transmission, second normal (7 + 7 bits), skin profile, and the skin pass's blur scale (bits 15 to 17, which
+    # the apply program does not read; nwo.export.rcra_closures.skin_blur_distance)
+    1: ((0, 3), (9, 6), (18, 7), (25, 7), (5, 4), (15, 3)),
     2: ((0, 8), (8, 8), (16, 5), (21, 6), (27, 5)),   # second normal (8 + 8), sheen mix, scatter lobe, wrap
     3: ((0, 9), (9, 9), (18, 1), (19, 7), (26, 6)),   # strand tangent (9 + 9, z sign), transmittance, lobe shift
     4: ((0, 9), (9, 9), (18, 1), (19, 6), (25, 7)),   # tangent (9 + 9, z sign), rotation, second gloss

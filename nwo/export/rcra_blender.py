@@ -39,7 +39,13 @@ BRDF group "RC RA Deferred BRDF", from the engine's class-0 deferred apply progr
 
 Lighting class 4 (anisotropic) materials take "RC RA Anisotropic BRDF" instead: the same diffuse and self-lit terms, and the
 class-4 program's specular, the average of two anisotropic GGX lobes on the G-buffer tangent and on it turned by the
-rotation field (``build_anisotropic_group``). The other classes take the class-0 group (labelled by the export).
+rotation field (``build_anisotropic_group``). Classes 1, 2 and 5 take their own groups (nwo.export.rcra_closures):
+- 1 subsurface, "RC RA Subsurface BRDF": the program's two GGX lobes mixed by the view depth, and Cycles' Burley subsurface
+  at the skin pass's diffusion distance (the material's skin profile texel, its blur field and occlusion);
+- 2 cloth, "RC RA Cloth BRDF": GGX and a fitted Ashikhmin sheen on the second normal, and the diffuse shape as Diffuse and
+  Translucent BSDFs of the same irradiance;
+- 5 foliage, "RC RA Foliage BRDF": class 0's specular, and the wrapped diffuse and back transmission the same way.
+Class 3 (hair) takes the class-0 group (labelled by the export).
 
 Blended materials (entry ``blend`` additive, blended or modulate) carry a forward recipe: the colour and alpha the game
 blends, with every engine light source zero, and a background tint B where the program passes the scene behind it
@@ -269,6 +275,281 @@ def build_anisotropic_group():
     return group
 
 
+# Lighting classes 1, 2 and 5 (nwo.export.rcra_closures): class 1's specular is exact and its diffuse is Cycles' Burley
+# subsurface at the skin pass's profile; the cloth and foliage diffuse shapes are projected onto a Diffuse and a Translucent
+# BSDF (their irradiance), and the cloth sheen is a fitted Ashikhmin velvet.
+SUBSURFACE_GROUP = 'RC RA Subsurface BRDF'
+CLOTH_GROUP = 'RC RA Cloth BRDF'
+FOLIAGE_GROUP = 'RC RA Foliage BRDF'
+CLASS_VERSION = 1
+GROUP_VERSIONS.update({SUBSURFACE_GROUP: CLASS_VERSION, CLOTH_GROUP: CLASS_VERSION, FOLIAGE_GROUP: CLASS_VERSION})
+# Per class: the group's field inputs and the extra term (nwo.games.rcra.lighting.EXTRA_FIELDS index) each one reads.
+CLASS_FIELDS = {
+    1: (('Blur field', 5),),
+    2: (('Second normal field x', 0), ('Second normal field z', 1), ('Sheen field', 2), ('Wrap field', 4)),
+    4: tuple((name, k) for k, name in enumerate(ANISOTROPIC_INPUTS)),
+    5: (('Transmittance field', 3), ('Wrap field', 4)),
+}
+CLOTH_TABLE_IMAGE = 'RC RA cloth diffuse weights'
+FOLIAGE_TABLE_IMAGE = 'RC RA foliage diffuse weights'
+
+
+def _table_image(name, rows):
+    """A float image of 4-channel rows (bottom row first), packed as float32 EXR; reused when present."""
+    image = bpy.data.images.get(name)
+    height, width = len(rows), len(rows[0])
+    if image is None or tuple(image.size) != (width, height):
+        if image is not None:
+            bpy.data.images.remove(image)
+        image = bpy.data.images.new(name, width=width, height=height, float_buffer=True, alpha=True)
+        image.colorspace_settings.name = 'Non-Color'
+        image.alpha_mode = 'CHANNEL_PACKED'
+        image.use_half_precision = False
+        image.pixels.foreach_set([float(x) for row in rows for cell in row for x in cell])
+        image.file_format = 'OPEN_EXR'
+        image.pack()
+    return image
+
+
+def _vector_math(nodes, links, operation, *args, name=None):
+    node = nodes.new('ShaderNodeVectorMath')
+    node.operation = operation
+    if name:
+        node.name = name
+    for k, a in enumerate(args):
+        socket = node.inputs['Scale'] if operation == 'SCALE' and k == 1 else node.inputs[k]
+        if isinstance(a, (tuple, list, int, float)):
+            socket.default_value = a
+        else:
+            links.new(a, socket)
+    return node.outputs['Vector'] if operation not in ('DOT_PRODUCT', 'LENGTH', 'DISTANCE') else node.outputs['Value']
+
+
+def _combine(nodes, links, parts, kind='ShaderNodeCombineXYZ', name=None):
+    node = nodes.new(kind)
+    if name:
+        node.name = name
+    for k, p in enumerate(parts):
+        if isinstance(p, (int, float)):
+            node.inputs[k].default_value = float(p)
+        else:
+            links.new(p, node.inputs[k])
+    return node.outputs[0]
+
+
+def _separate(nodes, links, socket, kind='ShaderNodeSeparateXYZ'):
+    node = nodes.new(kind)
+    links.new(socket, node.inputs[0])
+    return node.outputs[:3]
+
+
+def _diffuse_tint(nodes, links, inp):
+    """Albedo x (1 + "Occlusion on diffuse" x (occlusion - 1)), as the class-0 group's Lambert colour."""
+    m = lambda op, *a: _node_math(nodes, links, op, *a)   # noqa: E731
+    scale = m('MULTIPLY_ADD', m('SUBTRACT', inp.outputs['Occlusion'], 1.0), inp.outputs['Occlusion on diffuse'], 1.0)
+    return _vector_math(nodes, links, 'SCALE', inp.outputs['Albedo'], scale)
+
+
+def _add_shaders(nodes, links, out, *shaders):
+    total = shaders[0]
+    for s in shaders[1:]:
+        add = nodes.new('ShaderNodeAddShader')
+        links.new(total, add.inputs[0])
+        links.new(s, add.inputs[1])
+        total = add.outputs[0]
+    links.new(total, out.inputs['Shader'])
+
+
+def _self_lit(nodes, links, inp):
+    emission = nodes.new('ShaderNodeEmission')
+    emission.name = 'Self-lit albedo x E'
+    links.new(inp.outputs['Albedo'], emission.inputs['Color'])
+    links.new(inp.outputs['Emission'], emission.inputs['Strength'])
+    return emission.outputs[0]
+
+
+def _layout(group):
+    for k, node in enumerate(group.nodes):
+        node.location = ((k % 12) * 220, -(k // 12) * 220)
+
+
+def build_subsurface_group():
+    """The shared "RC RA Subsurface BRDF" group (lighting class 1: skin, heads).
+
+    Specular: (1 - m) GGX(r^4) + m GGX(r^(4 x 1.66)) with m = sat(0.15 - 0.03 x View Z Depth), the class-1 program's two
+    lobes. Diffuse: Cycles' Christensen-Burley subsurface, its radius the skin pass's Burley distance
+    d = profile x 0.005 x (0.6 occlusion + 0.4) x (2^blur field - 1) / 7 (world units, the "Skin profile" input being the
+    material's profile texel): radius x scale = 4 pi d, so Cycles' profile is the game's. A blur field of 0 gives radius 0,
+    which Cycles draws as a plain diffuse."""
+    from nwo.export import rcra_closures as rc
+    group = _new_brdf_group(SUBSURFACE_GROUP, CLASS_VERSION, [name for name, _k in CLASS_FIELDS[1]])
+    if group is None:
+        return bpy.data.node_groups[SUBSURFACE_GROUP]
+    _socket(group, 'Skin profile', 'INPUT', 'NodeSocketColor', (0.0, 0.0, 0.0, 1.0))
+    nodes, links = group.nodes, group.links
+    inp, out = nodes.new('NodeGroupInput'), nodes.new('NodeGroupOutput')
+
+    def m(operation, *args, name=None):
+        return _node_math(nodes, links, operation, *args, name=name)
+    r = m('MULTIPLY_ADD', inp.outputs['Gloss'], -rc.GGX_SLOPE, rc.ROUGHNESS_BASE, name='r = 0.9725 - 0.7514 gloss')
+    far = _metallic(nodes, links, inp, 'Lobe GGX r^4')
+    links.new(m('MULTIPLY', r, r, name='Roughness r^2'), far.inputs['Roughness'])
+    near = _metallic(nodes, links, inp, 'Near lobe GGX (r^4)^1.66')
+    links.new(m('POWER', r, 2.0 * rc.NEAR_LOBE_POWER, name='Roughness r^3.32'), near.inputs['Roughness'])
+    camera = nodes.new('ShaderNodeCameraData')
+    mix = nodes.new('ShaderNodeMixShader')
+    mix.name = 'Near lobe weight sat(0.15 - 0.03 depth)'
+    weight = m('MULTIPLY_ADD', camera.outputs['View Z Depth'], rc.NEAR_MIX[1], rc.NEAR_MIX[0])
+    links.new(m('MINIMUM', m('MAXIMUM', weight, 0.0), 1.0), mix.inputs['Fac'])
+    links.new(far.outputs[0], mix.inputs[1])
+    links.new(near.outputs[0], mix.inputs[2])
+    tint = _diffuse_tint(nodes, links, inp)
+    scale = m('MULTIPLY', m('MULTIPLY_ADD', inp.outputs['Occlusion'], rc.SKIN_OCCLUSION[0], rc.SKIN_OCCLUSION[1]),
+              m('MULTIPLY', m('SUBTRACT', m('POWER', 2.0, inp.outputs['Blur field']), 1.0), rc.SKIN_KERNEL / 7.0),
+              name='Kernel unit 0.005 (0.6 o + 0.4)(2^f - 1) / 7')
+    sss = nodes.new('ShaderNodeSubsurfaceScattering')
+    sss.name = 'Skin pass blur: Burley at the profile'
+    sss.falloff = 'BURLEY'
+    links.new(tint, sss.inputs['Color'])
+    links.new(m('MULTIPLY', scale, rc.BURLEY_RADIUS, name='Cycles radius 4 pi d'), sss.inputs['Scale'])
+    links.new(inp.outputs['Skin profile'], sss.inputs['Radius'])
+    links.new(inp.outputs['Normal'], sss.inputs['Normal'])
+    _add_shaders(nodes, links, out, sss.outputs[0], mix.outputs[0], _self_lit(nodes, links, inp))
+    _layout(group)
+    return group
+
+
+def _hemisphere_shaders(nodes, links, inp, tint, front, back, name):
+    """A Diffuse BSDF of colour tint x front and a Translucent BSDF of tint x back (irradiance-matched weights)."""
+    diffuse = nodes.new('ShaderNodeBsdfDiffuse')
+    diffuse.name = name + ': front (Diffuse)'
+    diffuse.inputs['Roughness'].default_value = 0.0
+    links.new(_vector_math(nodes, links, 'MULTIPLY', tint, front), diffuse.inputs['Color'])
+    links.new(inp.outputs['Normal'], diffuse.inputs['Normal'])
+    translucent = nodes.new('ShaderNodeBsdfTranslucent')
+    translucent.name = name + ': back (Translucent)'
+    links.new(_vector_math(nodes, links, 'MULTIPLY', tint, back), translucent.inputs['Color'])
+    links.new(inp.outputs['Normal'], translucent.inputs['Normal'])
+    return diffuse.outputs[0], translucent.outputs[0]
+
+
+def _class0_specular(nodes, links, inp):
+    from nwo.export import rcra_closures as rc
+    r = _node_math(nodes, links, 'MULTIPLY_ADD', inp.outputs['Gloss'], -rc.GGX_SLOPE, rc.ROUGHNESS_BASE)
+    spec = _metallic(nodes, links, inp, 'Specular GGX Schlick F90 1')
+    links.new(_node_math(nodes, links, 'MULTIPLY', r, r), spec.inputs['Roughness'])
+    return spec.outputs[0]
+
+
+def _table_lookup(nodes, links, image, u, v, interpolation='Linear'):
+    tex = nodes.new('ShaderNodeTexImage')
+    tex.image, tex.interpolation, tex.extension = image, interpolation, 'EXTEND'
+    links.new(_combine(nodes, links, (u, v, 0.0)), tex.inputs['Vector'])
+    r, g, b = _separate(nodes, links, tex.outputs['Color'], 'ShaderNodeSeparateColor')
+    return r, g, b, tex.outputs['Alpha']
+
+
+def build_foliage_group():
+    """The shared "RC RA Foliage BRDF" group (lighting class 5): class 0's specular; the wrapped diffuse and back
+    transmission as a Diffuse and a Translucent BSDF weighted by their irradiance (rcra_closures.foliage_weights, read
+    from a 128 x 1 table at the wrap field)."""
+    from nwo.export import rcra_closures as rc
+    group = _new_brdf_group(FOLIAGE_GROUP, CLASS_VERSION, [name for name, _k in CLASS_FIELDS[5]])
+    if group is None:
+        return bpy.data.node_groups[FOLIAGE_GROUP]
+    nodes, links = group.nodes, group.links
+    inp, out = nodes.new('NodeGroupInput'), nodes.new('NodeGroupOutput')
+    image = _table_image(FOLIAGE_TABLE_IMAGE, [rc.foliage_table()])
+
+    def m(operation, *args):
+        return _node_math(nodes, links, operation, *args)
+    u = m('DIVIDE', m('ADD', inp.outputs['Wrap field'], 0.5), float(rc.FOLIAGE_STEPS + 1))
+    f1, f2, b1, b2 = _table_lookup(nodes, links, image, u, 0.5, 'Closest')
+    t = m('DIVIDE', inp.outputs['Transmittance field'], float(rc.FOLIAGE_STEPS))
+    front, back = m('MULTIPLY_ADD', t, f2, f1), m('MULTIPLY_ADD', t, b2, b1)
+    tint = _diffuse_tint(nodes, links, inp)
+    shaders = _hemisphere_shaders(nodes, links, inp, tint, _combine(nodes, links, (front,) * 3),
+                                  _combine(nodes, links, (back,) * 3), 'Wrapped diffuse and transmission')
+    _add_shaders(nodes, links, out, *shaders, _class0_specular(nodes, links, inp), _self_lit(nodes, links, inp))
+    _layout(group)
+    return group
+
+
+def build_cloth_group():
+    """The shared "RC RA Cloth BRDF" group (lighting class 2).
+
+    Specular, on the second normal (extra fields 0 and 1, octahedral about the game's Y axis): mix(GGX, sheen, sheen field
+    / 31) with r = 0.9725 - 0.6011 gloss; GGX exact, the Charlie sheen a fitted Ashikhmin velvet (rcra_closures
+    sheen_sigma, colour F0 x sheen_scale). Diffuse per channel: Diffuse and Translucent BSDFs weighted by the irradiance
+    of the program's shape (rcra_closures.cloth_weights from a 129 x 32 table at k = w sqrt(albedo) and the wrap field)."""
+    from nwo.export import rcra_closures as rc
+    group = _new_brdf_group(CLOTH_GROUP, CLASS_VERSION, [name for name, _k in CLASS_FIELDS[2]])
+    if group is None:
+        return bpy.data.node_groups[CLOTH_GROUP]
+    nodes, links = group.nodes, group.links
+    inp, out = nodes.new('NodeGroupInput'), nodes.new('NodeGroupOutput')
+    image = _table_image(CLOTH_TABLE_IMAGE, rc.cloth_table())
+
+    def m(operation, *args, name=None):
+        return _node_math(nodes, links, operation, *args, name=name)
+    # Second normal: x, z = field / 127.5 - 1, y = 1 - |x| - |z|, folded when y < 0; game (x, y, z) -> Blender (x, -z, y).
+    x = m('SUBTRACT', m('DIVIDE', inp.outputs['Second normal field x'], 127.5), 1.0)
+    z = m('SUBTRACT', m('DIVIDE', inp.outputs['Second normal field z'], 127.5), 1.0)
+    y = m('SUBTRACT', m('SUBTRACT', 1.0, m('ABSOLUTE', x)), m('ABSOLUTE', z))
+    t = m('MAXIMUM', m('MULTIPLY', y, -1.0), 0.0)
+    folded = []
+    for c in (x, z):   # c - t when c >= 0, c + t otherwise
+        sign = m('SUBTRACT', 1.0, m('MULTIPLY', m('LESS_THAN', c, 0.0), 2.0))
+        folded.append(m('SUBTRACT', c, m('MULTIPLY', sign, t)))
+    n2 = _vector_math(nodes, links, 'NORMALIZE',
+                      _combine(nodes, links, (folded[0], m('MULTIPLY', folded[1], -1.0), y), name='Second normal (Blender)'))
+    r = m('MULTIPLY_ADD', inp.outputs['Gloss'], -rc.CLOTH_SLOPE, rc.ROUGHNESS_BASE, name='r = 0.9725 - 0.6011 gloss')
+    ggx = _metallic(nodes, links, inp, 'Cloth GGX on the second normal')
+    links.new(n2, ggx.inputs['Normal'])
+    links.new(m('MULTIPLY', r, r), ggx.inputs['Roughness'])
+    sheen = nodes.new('ShaderNodeBsdfSheen')
+    sheen.name = 'Cloth sheen: fitted Ashikhmin velvet'
+    sheen.distribution = 'ASHIKHMIN'
+    links.new(n2, sheen.inputs['Normal'])
+    sigma = 0.0
+    for c in rc.SHEEN_SIGMA:   # Horner in r
+        sigma = m('MULTIPLY_ADD', sigma, r, c) if not isinstance(sigma, float) else m('MULTIPLY_ADD', r, sigma, c)
+    links.new(sigma, sheen.inputs['Roughness'])
+    inv = m('DIVIDE', 1.0, r)
+    k = 0.0
+    for c in rc.SHEEN_SCALE:   # Horner in 1 / r
+        k = m('MULTIPLY_ADD', k, inv, c) if not isinstance(k, float) else m('MULTIPLY_ADD', inv, k, c)
+    links.new(_vector_math(nodes, links, 'SCALE', inp.outputs['F0'], k), sheen.inputs['Color'])
+    mix = nodes.new('ShaderNodeMixShader')
+    mix.name = 'Sheen mix field / 31'
+    links.new(m('DIVIDE', inp.outputs['Sheen field'], float(rc.SHEEN_STEPS)), mix.inputs['Fac'])
+    links.new(ggx.outputs[0], mix.inputs[1])
+    links.new(sheen.outputs[0], mix.inputs[2])
+    # Diffuse weights per channel from the table: row = wrap field, column k = w sqrt(albedo).
+    w = m('DIVIDE', inp.outputs['Wrap field'], float(rc.CLOTH_WRAP_STEPS - 1))
+    v = m('DIVIDE', m('ADD', inp.outputs['Wrap field'], 0.5), float(rc.CLOTH_WRAP_STEPS))
+    albedo = _separate(nodes, links, inp.outputs['Albedo'], 'ShaderNodeSeparateColor')
+    lum = m('ADD', m('ADD', m('MULTIPLY', albedo[0], rc.LUMINANCE[0]), m('MULTIPLY', albedo[1], rc.LUMINANCE[1])),
+            m('MULTIPLY', albedo[2], rc.LUMINANCE[2]))
+    wy = m('MULTIPLY', w, lum, name='w Y')
+    front, back = [], []
+    for a in albedo:
+        kk = m('MINIMUM', m('MULTIPLY', w, m('SQRT', m('MAXIMUM', a, 0.0))), 1.0)
+        u = m('DIVIDE', m('MULTIPLY_ADD', kk, float(rc.CLOTH_TABLE_K - 1), 0.5), float(rc.CLOTH_TABLE_K))
+        f1, f2, b1, b2 = _table_lookup(nodes, links, image, u, v)
+        front.append(m('MULTIPLY_ADD', wy, f2, f1))
+        back.append(m('MULTIPLY_ADD', wy, b2, b1))
+    tint = _diffuse_tint(nodes, links, inp)
+    shaders = _hemisphere_shaders(nodes, links, inp, tint, _combine(nodes, links, front), _combine(nodes, links, back),
+                                  'Cloth diffuse')
+    _add_shaders(nodes, links, out, *shaders, mix.outputs[0], _self_lit(nodes, links, inp))
+    _layout(group)
+    return group
+
+
+CLASS_BUILDERS = {1: build_subsurface_group, 2: build_cloth_group, 4: build_anisotropic_group, 5: build_foliage_group}
+
+
 def lighting_class(recipe):
     """The constant lighting class of a surface recipe (term ``class``), 0 without one."""
     i = recipe['terms'].get('class')
@@ -276,10 +557,18 @@ def lighting_class(recipe):
     return int(node['value']) if node is not None and node['op'] == 'const' else 0
 
 
+def class_fields(recipe):
+    """The (group input, extra index) pairs of the recipe's lighting-class group, or None when it takes the class-0 group
+    (class 0 or 3, or a recipe without the class's extra fields)."""
+    fields = CLASS_FIELDS.get(lighting_class(recipe))
+    if fields is None or not all('extra.%d' % k in recipe['terms'] for _name, k in fields):
+        return None
+    return fields
+
+
 def anisotropic(recipe):
     """True when the surface recipe is lit by class 4 and carries its five extra fields."""
-    return (lighting_class(recipe) == ANISOTROPIC_CLASS
-            and all('extra.%d' % k in recipe['terms'] for k in range(len(ANISOTROPIC_INPUTS))))
+    return lighting_class(recipe) == ANISOTROPIC_CLASS and class_fields(recipe) is not None
 
 
 # ----------------------------------------------------------------------------------------------- surface emitter
@@ -861,16 +1150,20 @@ def load_images(rows):
 def _surface_shader(tree, entry, images, uv_maps, colour_attribute, blended, tangent=False):
     """The surface group feeding the BRDF group; returns the shader socket (alpha clip applied when opaque)."""
     recipe = entry['recipe']
-    fields = len(ANISOTROPIC_INPUTS) if anisotropic(recipe) else 0
-    surface = build_surface_group(recipe, images, uv_maps, colour_attribute, tangent=tangent, extras=fields)
+    fields = class_fields(recipe)
+    extras = 1 + max(k for _name, k in fields) if fields else 0
+    surface = build_surface_group(recipe, images, uv_maps, colour_attribute, tangent=tangent, extras=extras)
     s = tree.nodes.new('ShaderNodeGroup')
     s.node_tree, s.name, s.location = surface, 'Translated surface', (0, 0)
     b = tree.nodes.new('ShaderNodeGroup')
-    b.node_tree, b.name, b.location = build_anisotropic_group() if fields else build_brdf_group(), 'Game BRDF', (300, 0)
+    brdf = CLASS_BUILDERS[lighting_class(recipe)]() if fields else build_brdf_group()
+    b.node_tree, b.name, b.location = brdf, 'Game BRDF', (300, 0)
     for socket in ('Albedo', 'F0', 'Gloss', 'Normal', 'Occlusion') + (() if blended else ('Emission',)):
         tree.links.new(s.outputs[socket], b.inputs[socket])
-    for k, socket in enumerate(ANISOTROPIC_INPUTS[:fields]):
+    for socket, k in fields or ():
         tree.links.new(s.outputs['Extra %d' % k], b.inputs[socket])
+    if 'Skin profile' in b.inputs:   # the material's skin profile texel (blender_export), constant per material
+        b.inputs['Skin profile'].default_value = tuple(entry.get('skin_profile', (0.0, 0.0, 0.0))[:3]) + (1.0,)
     body = b.outputs['Shader']
     if not blended and 'unlit.r' in recipe['terms']:   # a forward technique's unlit colour, added unlit
         glow = tree.nodes.new('ShaderNodeEmission')

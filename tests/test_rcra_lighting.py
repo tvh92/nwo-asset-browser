@@ -134,6 +134,108 @@ class ClassTests(unittest.TestCase):
             want = 0.5 * (_cycles_lobe(rough, aniso, rot1, tangent, light) + _cycles_lobe(rough, aniso, rot2, tangent, light))
             self.assertAlmostEqual(got, want, delta=1e-4 * max(want, 1.0), msg=str(case))
 
+    def test_class_weights_are_the_hemisphere_integrals(self):
+        """The Diffuse and Translucent weights of classes 2 and 5 are 2 x the integral of the diffuse shape over each
+        hemisphere (midpoint rule at 20,000 points per side as the reference); the cloth table holds them at its grid."""
+        from nwo.export import rcra_closures as rc
+
+        def brute(f, n=20000):
+            h = 1.0 / n
+            return (2 * h * sum(f((i + 0.5) * h) for i in range(n)), 2 * h * sum(f(-(i + 0.5) * h) for i in range(n)))
+        rng = random.Random(3)
+        for _ in range(3):
+            w, a = rng.uniform(0, 1), rng.uniform(0, 1)
+            k = w * math.sqrt(a)
+            m = lambda c: min(abs(c) + k, 1.0)   # noqa: E731
+            (f1, b1), (f2, b2) = brute(lambda c: rc.wrap(c, w) * m(c)), brute(lambda c: rc.back(c, w) * m(c))
+            for got, want in zip(rc.cloth_weights(w, k), (f1, f2, b1, b2)):
+                self.assertAlmostEqual(got, want, delta=1e-7)
+            (f1, b1), (f2, b2) = brute(lambda c: rc.wrap(c, w)), brute(lambda c: rc.back(c, w))
+            for got, want in zip(rc.foliage_weights(w), (f1, f2, b1, b2)):
+                self.assertAlmostEqual(got, want, delta=1e-7)
+        front, f2, back, b2 = rc.foliage_weights(0.0)
+        self.assertEqual((front, f2, back), (1.0, 0.0, 0.0))   # Lambert in front
+        self.assertAlmostEqual(b2, 2 * 0.445325, delta=1e-12)   # the transmission's own weight behind
+        front, _f2, back, _b2 = rc.foliage_weights(1.0)
+        self.assertAlmostEqual(front + back, 1.0, delta=1e-12)   # the full wrap keeps the energy, a quarter behind
+        table = rc.cloth_table()
+        self.assertEqual((len(table), len(table[0])), (rc.CLOTH_WRAP_STEPS, rc.CLOTH_TABLE_K))
+        self.assertEqual(table[20][64], rc.cloth_weights(20 / 31.0, 0.5))
+
+    def test_sheen_fit_follows_its_samples(self):
+        """The velvet's sigma and scale cubics stay within their fit of the Charlie lobe (the research fit's samples at
+        r = 0.3714 and 0.9725, the ends of the cloth range), and the velvet is zero outside its hemisphere."""
+        from nwo.export import rcra_closures as rc
+        self.assertAlmostEqual(rc.sheen_sigma(0.3714), 0.1445, delta=0.008)
+        self.assertAlmostEqual(rc.sheen_sigma(0.9725), 0.7437, delta=0.008)
+        self.assertAlmostEqual(rc.sheen_scale(0.3714) / 2.3712, 1.0, delta=0.025)
+        self.assertAlmostEqual(rc.sheen_scale(0.9725) / 0.6297, 1.0, delta=0.025)
+        self.assertEqual(rc.velvet([0, 0, 1], [0, 0, -1], [0, 0, 1], 0.5), 0.0)
+
+    @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
+    def test_blender_class_groups_render_their_closures(self):
+        """The class 1, 2 and 5 groups rendered in Cycles on a plane under one sun (strength pi), against the closed forms
+        of nwo.export.rcra_closures: diffuse weights in front and behind (the render with the albedo minus the render
+        without), the fitted velvet, and class 1's two lobes at two view depths."""
+        import json
+        import subprocess
+        from nwo.export import rcra_closures as rc
+        cases, checks = [], []
+
+        def direction(theta, phi=0.0):
+            t, p = math.radians(theta), math.radians(phi)
+            return [math.sin(t) * math.cos(p), math.sin(t) * math.sin(p), math.cos(t)]
+        up = [0.0, 0.0, 1.0]
+        for wrap, trans, theta in ((64, 100, 30.0), (127, 40, 100.0)):
+            f1, f2, b1, b2 = rc.foliage_weights(wrap / 127.0)
+            c, t = math.cos(math.radians(theta)), trans / 127.0
+            want = 0.6 * ((f1 + t * f2) * max(c, 0.0) + (b1 + t * b2) * max(-c, 0.0))
+            for albedo in (0.6, 0.0):
+                cases.append(dict(group='foliage', light=direction(theta), view=up, inputs={
+                    'Wrap field': wrap, 'Transmittance field': trans, 'F0': [0.0] * 3, 'Gloss': 0.0,
+                    'Albedo': [albedo] * 3}))
+            checks.append(('pair', [want] * 3, 3e-3))
+        albedo = (0.8, 0.4, 0.1)
+        lum = sum(a * k for a, k in zip(albedo, rc.LUMINANCE))
+        for wrap, theta in ((20, 40.0), (5, 120.0)):
+            w, c = wrap / 31.0, math.cos(math.radians(theta))
+            want = []
+            for a in albedo:
+                f1, f2, b1, b2 = rc.cloth_weights(w, min(w * math.sqrt(a), 1.0))
+                want.append(a * ((f1 + w * lum * f2) * max(c, 0.0) + (b1 + w * lum * b2) * max(-c, 0.0)))
+            for alb in (list(albedo), [0.0] * 3):
+                cases.append(dict(group='cloth', light=direction(theta), view=up, inputs={
+                    'Wrap field': wrap, 'Sheen field': 0, 'Second normal field x': 127.5,
+                    'Second normal field z': 127.5, 'F0': [0.0] * 3, 'Gloss': 0.0, 'Albedo': alb}))
+            checks.append(('pair', want, 3e-3))
+        r = rc.roughness(0.5, rc.CLOTH_SLOPE)
+        view, light = direction(75.0), direction(70.0, 20.0)
+        cases.append(dict(group='cloth', light=light, view=view, inputs={
+            'Albedo': [0.0] * 3, 'F0': [0.5] * 3, 'Gloss': 0.5, 'Sheen field': 31, 'Wrap field': 0,
+            'Second normal field x': 127.5, 'Second normal field z': 127.5}))
+        checks.append(('one', [rc.sheen_scale(r) * 0.5 * rc.velvet(up, light, view, rc.sheen_sigma(r))] * 3, 1e-4))
+        for depth in (5.0, 1.0):
+            r, m, light = rc.roughness(0.5), rc.near_lobe_mix(depth), direction(20.0)
+            far = _cycles_lobe(r * r, 0.0, 0.0, (1.0, 0.0, 0.0), light) * math.pi
+            near = _cycles_lobe(rc.near_lobe_roughness(r), 0.0, 0.0, (1.0, 0.0, 0.0), light) * math.pi
+            cases.append(dict(group='subsurface', light=light, view=up, depth=depth, inputs={
+                'Albedo': [0.0] * 3, 'F0': [1.0] * 3, 'Gloss': 0.5, 'Blur field': 0}))
+            checks.append(('one', [(1 - m) * far + m * near] * 3, 1e-4))
+        with tempfile.TemporaryDirectory() as folder:
+            script = Path(folder) / 'groups.py'
+            script.write_text(GROUP_SCRIPT)
+            run = subprocess.run([BLENDER, '--background', '--factory-startup', '--python-exit-code', '1', '--python',
+                                  str(script), '--', str(Path(__file__).resolve().parents[1]), folder, json.dumps(cases)],
+                                 capture_output=True, text=True, timeout=900)
+        line = next((x for x in run.stdout.splitlines() if x.startswith('GROUPS ')), None)
+        self.assertIsNotNone(line, run.stdout[-2000:] + run.stderr[-2000:])
+        got, k = json.loads(line[7:]), 0
+        for kind, want, tolerance in checks:
+            value = [a - b for a, b in zip(got[k], got[k + 1])] if kind == 'pair' else got[k]
+            k += 2 if kind == 'pair' else 1
+            for g, w in zip(value, want):   # Cycles' Translucent BSDF estimate runs about 0.2 % low
+                self.assertAlmostEqual(g, w, delta=tolerance * max(abs(w), 1.0), msg='%s %s' % (cases[k - 1], want))
+
     def test_probe_records_follow_the_tables(self):
         from nwo.games.rcra import probe
         r = probe.record(2, 3)
@@ -235,6 +337,79 @@ for gloss, second, turn, fx, fy, sign, theta, phi in json.loads(cases):
     values.append(float(np.array(image.pixels[:]).reshape(-1, 4)[:, 0].mean()))
     bpy.data.images.remove(image)
 print('ANISO ' + json.dumps(values))
+'''
+
+
+# The class groups on a plane under one sun of strength pi (a pixel is the game's light term), one value per case.
+GROUP_SCRIPT = r'''
+import json
+import math
+import os
+import sys
+
+import bpy
+import numpy as np
+from mathutils import Vector
+
+root, out_dir, cases = sys.argv[sys.argv.index('--') + 1:]
+sys.path.insert(0, root)
+from nwo.export import rcra_blender as rb  # noqa: E402
+
+bpy.ops.wm.read_factory_settings(use_empty=True)
+scene = bpy.context.scene
+scene.render.engine = 'CYCLES'
+scene.cycles.device, scene.cycles.samples, scene.cycles.use_denoising, scene.cycles.max_bounces = 'CPU', 64, False, 0
+scene.cycles.sample_clamp_direct = scene.cycles.sample_clamp_indirect = 0.0
+scene.render.resolution_x = scene.render.resolution_y = 8
+scene.render.image_settings.file_format, scene.render.image_settings.color_depth = 'OPEN_EXR', '32'
+scene.view_settings.view_transform = 'Standard'
+world = bpy.data.worlds.new('w')
+world.use_nodes = True
+world.node_tree.nodes['Background'].inputs['Strength'].default_value = 0.0
+scene.world = world
+bpy.ops.mesh.primitive_plane_add(size=10)
+plane = bpy.context.object
+material = bpy.data.materials.new('m')
+material.use_nodes = True
+tree = material.node_tree
+tree.nodes.clear()
+out = tree.nodes.new('ShaderNodeOutputMaterial')
+group = tree.nodes.new('ShaderNodeGroup')
+normal = tree.nodes.new('ShaderNodeCombineXYZ')
+normal.inputs[2].default_value = 1.0
+plane.data.materials.append(material)
+camera = bpy.data.objects.new('c', bpy.data.cameras.new('c'))
+camera.data.type, camera.data.ortho_scale = 'ORTHO', 0.01
+camera.data.clip_start, camera.data.clip_end = 0.001, 1000.0
+scene.collection.objects.link(camera)
+scene.camera = camera
+sun = bpy.data.objects.new('s', bpy.data.lights.new('s', 'SUN'))
+sun.data.energy, sun.data.angle = math.pi, 0.0
+scene.collection.objects.link(sun)
+builders = {'subsurface': rb.build_subsurface_group, 'cloth': rb.build_cloth_group, 'foliage': rb.build_foliage_group,
+            'class0': rb.build_brdf_group}
+values = []
+for case in json.loads(cases):
+    group.node_tree = builders[case['group']]()
+    tree.links.new(normal.outputs[0], group.inputs['Normal'])
+    tree.links.new(group.outputs['Shader'], out.inputs['Surface'])
+    for item in group.node_tree.interface.items_tree:   # every input back to its default
+        if item.item_type == 'SOCKET' and item.in_out == 'INPUT' and hasattr(item, 'default_value'):
+            group.inputs[item.name].default_value = item.default_value
+    for name, value in case['inputs'].items():
+        socket = group.inputs[name]
+        socket.default_value = tuple(value) + ((1.0,) if len(value) == 3 else ()) if isinstance(value, list) else value
+    view = Vector(case['view']).normalized()
+    camera.location = view * case.get('depth', 5.0)
+    camera.rotation_euler = (-view).to_track_quat('-Z', 'Y').to_euler()
+    sun.rotation_euler = Vector(case['light']).normalized().to_track_quat('Z', 'Y').to_euler()
+    scene.render.filepath = os.path.join(out_dir, 'group.exr')
+    bpy.ops.render.render(write_still=True)
+    image = bpy.data.images.load(scene.render.filepath)
+    px = np.array(image.pixels[:]).reshape(-1, 4)
+    values.append([float(px[:, k].mean()) for k in range(3)])
+    bpy.data.images.remove(image)
+print('GROUPS ' + json.dumps(values))
 '''
 
 
@@ -367,6 +542,58 @@ class RealLightingTests(unittest.TestCase):
             for got, w in zip(lighting.evaluate(recipe, v), want):
                 self.assertAlmostEqual(got, w, delta=0.01 * max(abs(w), 1e-3))
             checked += 1
+
+    def _closed_form(self, cls, want, fixed, trials=60, seed=5):
+        """The class recipe against ``want(values, n, light, view) -> 3 light terms / LIGHT``, with ``fixed`` extra fields."""
+        recipe = lighting.direct(GAME, cls)
+        rng = random.Random(seed)
+        for _ in range(trials):
+            v = _inputs(rng, cls)
+            v.update(fixed)
+            n, light = [v['normal.' + c] for c in 'xyz'], [v['L.' + c] for c in 'xyz']
+            view = _unit([-v['VIEW.' + c] for c in 'xyz'])
+            for c, got, w in zip('rgb', lighting.evaluate(recipe, v), want(v, n, light, view)):
+                w *= v['LIGHT.' + c]
+                self.assertAlmostEqual(got, w, delta=0.01 * abs(w) + 2e-3 * v['LIGHT.' + c], msg='%d %s' % (cls, c))
+
+    def test_class_1_is_two_lobes_mixed_by_view_depth(self):
+        """With the scatter field 0 (no Henyey-Greenstein term): Lambert plus (1 - m) GGX(r^4) + m GGX(r^(4 x 1.66)),
+        m = sat(0.15 - 0.03 depth) (rcra_closures, the Blender subsurface group)."""
+        from nwo.export import rcra_closures as rc
+
+        def want(v, n, light, view):
+            alpha = rc.roughness(v['gloss']) ** 4
+            m = rc.near_lobe_mix(v['DEPTH'])
+            nl = max(min(sum(a * b for a, b in zip(n, light)), 1.0), 0.0)
+            return [v['albedo.' + c] * nl + (1 - m) * rc.ggx(n, light, view, v['f0.' + c], alpha)
+                    + m * rc.ggx(n, light, view, v['f0.' + c], rc.near_lobe_roughness(alpha ** 0.25) ** 2) for c in 'rgb']
+        self._closed_form(1, want, {'extra.0': 0.0}, seed=5)
+        rng = random.Random(1)
+        self._closed_form(1, want, {'extra.0': 0.0, 'DEPTH': rng.uniform(0.01, 0.2)}, trials=20, seed=6)
+
+    def test_class_2_is_wrapped_diffuse_and_sheen_on_the_second_normal(self):
+        from nwo.export import rcra_closures as rc
+
+        def want(v, n, light, view):
+            n2 = rc.cloth_normal(v['extra.0'], v['extra.1'])
+            c = sum(a * b for a, b in zip(n, light))
+            lum = sum(v['albedo.' + ch] * k for ch, k in zip('rgb', rc.LUMINANCE))
+            return [v['albedo.' + ch] * rc.cloth_diffuse(c, v['extra.4'] / 31.0, v['albedo.' + ch], lum)
+                    + rc.cloth_specular(n2, light, view, v['f0.' + ch], v['gloss'], v['extra.2'] / 31.0) for ch in 'rgb']
+        self._closed_form(2, want, {'extra.3': 0.0}, seed=7)
+
+    def test_class_5_is_wrapped_diffuse_with_back_transmission(self):
+        from nwo.export import rcra_closures as rc
+
+        def want(v, n, light, view):
+            c = sum(a * b for a, b in zip(n, light))
+            d = rc.foliage_diffuse(c, v['extra.4'] / 127.0, v['extra.3'] / 127.0)
+            alpha = rc.roughness(v['gloss']) ** 4
+            return [v['albedo.' + ch] * d + rc.ggx(n, light, view, v['f0.' + ch], alpha) for ch in 'rgb']
+        self._closed_form(5, want, {}, seed=8)
+        for k, light in enumerate(((0.0, -1.0, 0.0), (0.6, -0.8, 0.0), (0.0, -0.2, 0.9797959))):   # from behind
+            self._closed_form(5, want, {'L.x': light[0], 'L.y': light[1], 'L.z': light[2], 'normal.x': 0.0,
+                                        'normal.y': 1.0, 'normal.z': 0.0}, trials=8, seed=9 + k)
 
     def test_class_1_reads_the_skin_profile_only_through_shadow_transmission(self):
         """The class-1 program loads texel 64 + the profile field (checked inside lighting.translate); with the review

@@ -1492,7 +1492,16 @@ The BRDF group follows the deferred apply program:
 
 Light strength is π × the game's light colour, as for R&C 2016. Cycles uses the exact Smith term rather than the game's joint approximation. The game applies occlusion to ambient light only, which Cycles cannot separate; the group's "Occlusion on diffuse" input (default 0) applies it to the diffuse colour instead.
 
-The group is the class-0 BRDF. Cycles has no closure that runs another apply program per light. Class 4 ([Lighting classes](#lighting-classes)) has its own group, because Cycles' anisotropic GGX is the program's lobe. Classes 1, 2, 3 and 5 take the class-0 group, and their limitations say so (`blender_export.CLASS_LIMITATION`): no closure has their wrapped diffuse, Charlie sheen, Henyey–Greenstein scatter, view-depth lobe mix or strand lobes. The glTF export's roughness is r² for the same reason (`models.rcra_roughness`).
+The group is the class-0 BRDF. Cycles has no closure that runs another apply program per light. Classes 1, 2, 4 and 5 ([Lighting classes](#lighting-classes)) have their own groups, built from the closed forms in `nwo/export/rcra_closures.py` (checked against the translated programs by `tests/test_rcra_lighting.py`):
+
+| Class | Group | Specular | Diffuse |
+| --- | --- | --- | --- |
+| 1 subsurface | "RC RA Subsurface BRDF" | exact: (1 − m) GGX(α) + m GGX(α^1.66), m = sat(0.15 − 0.03 × View Z Depth) | Cycles' Christensen-Burley subsurface at the skin pass's distance d = profile texel × 0.005 × (0.6 occlusion + 0.4) × (2^f − 1) / 7 (f: extra bits 15 to 17, `EXTRA_FIELDS[1]` field 5). Cycles 5.0's Burley has d = radius × scale / 4π at any albedo (measured on a shadow edge, within 1 % at albedos 0.2, 0.5 and 0.9) |
+| 2 cloth | "RC RA Cloth BRDF" | on the second normal (8-bit octahedral about game Y): mix(GGX, sheen, field / 31), r = 0.9725 − 0.6011 gloss; GGX exact, the Charlie sheen a fitted Ashikhmin velvet (σ and an F0 scale keeping its mean reflectance; about 55 % L2 difference in shape) | Diffuse and Translucent BSDFs weighted by the shape's irradiance from each hemisphere (2 ∫ f), per channel from a 129 × 32 table |
+| 4 anisotropic | "RC RA Anisotropic BRDF" | below | Lambert |
+| 5 foliage | "RC RA Foliage BRDF" | class 0's | wrapped diffuse and back transmission as Diffuse and Translucent BSDFs of the same irradiance |
+
+The projected diffuse keeps ambient light; a single light falls off as Lambert on each side. Not drawn: class 1's and class 2's Henyey–Greenstein scatter terms (g = 0.65, small except at grazing views) and class 1's transmission through the shadow-map depth. Class 3 (hair) takes the class-0 group (`blender_export.CLASS_LIMITATION`). The glTF export's roughness is r² (`models.rcra_roughness`).
 
 **Anisotropic group** (class 4, "RC RA Anisotropic BRDF", `rcra_blender.build_anisotropic_group`). It has the class-0 diffuse, self-lit and occlusion terms. Its specular is two Metallic BSDFs (GGX, F82 with a white edge tint), mixed at 0.5. The surface group passes the five G-buffer fields as `Extra 0` to `Extra 4`. The group decodes the tangent from them, turns it into Blender space and maps the lobes with `lighting.cycles_anisotropic`:
 
@@ -1574,7 +1583,7 @@ The viewer reads the model's colour section (`0x5CBA9DE9`) as normalized bytes i
 
 - **Blended materials that read the scene behind in scene mode** (27 of 1,747): Blender gets their G-buffer surface, opaque.
 - **Forward lighting in Blender:** Blender's lights shade the G-buffer surface, which assumes that the forward program lights the same terms as the deferred apply. The viewer uses the program's own key-light term ([Own key light](#own-key-light)). Only that term is used: the programs' local light lists, probes and reflections are not (the review rig has no light grid). The viewer draws the forward programs' own ambient light and probe reflections under the Shared HDRI lighting ([Own ambient light](#own-ambient-light)), with one review probe and no parallax; screen-space reflections and the scene's own probes are not drawn.
-- **Lighting classes in Blender:** classes 1, 2, 3 and 5 are lit with the class-0 BRDF there, class 4 with its own lobes (above); the viewer runs every class's own program ([Lighting classes](#lighting-classes)).
+- **Lighting classes in Blender:** class 3 (hair) is lit with the class-0 BRDF there; classes 1, 2, 4 and 5 have their own groups, with the projections and fits above ([In Blender](#in-blender)); the viewer runs every class's own program ([Lighting classes](#lighting-classes)).
 - **Skin:** the viewer does not draw the skin pass's screen-space blur, a seven-tap pass over a four-level pyramid of the diffuse light that other skin passes write. It does not draw the transmission through the shadow-map depth either (the model viewer has no shadow maps), which is the only path by which the skin profiles ([Skin profiles](#skin-profiles)) reach the light.
 - **Opaque materials on forward techniques** (245 materials, 44 of them eyes; [Techniques](#techniques)): 232 draw from their forward program.
   - 73 draw with its diffuse coefficient as albedo, 36 of them eyes (`basic_eye`, the crowd eyeballs, `eye_colortint_random`).
