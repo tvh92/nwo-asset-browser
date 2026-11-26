@@ -1593,9 +1593,11 @@ class AssetBrowserApp:
         reader = ModelExporter(Path(self.source_var.get()), output)
         no_index = ("This output folder has no usable archive index, which links models to their animation sets. "
                     "Press Scan archive with this output folder first, then export again.")
+        # Only R&C 2016 links models to animation sets through the scan's index; Rift Apart reads its own dag.
+        needs_index = self.game is None or not self.game.has_animation_library()
         threshold = self._picker_threshold()
         if threshold is None:   # every clip is exported, so nothing is read first
-            if records and reader.animation_index() is None and not self.messagebox.askokcancel(
+            if records and needs_index and reader.animation_index() is None and not self.messagebox.askokcancel(
                     "No animations found", f"{no_index}\n\nExport without animations?", icon="warning", parent=self.root):
                 return None
             return {}
@@ -1647,7 +1649,7 @@ class AssetBrowserApp:
         listed = [entry for entry in found if entry[1]]
         if not listed:
             # Say why nothing is offered instead of exporting without animations unannounced.
-            if records and reader.animation_index() is None:
+            if records and needs_index and reader.animation_index() is None:
                 reason = no_index
             elif errors:
                 reason = f"{errors[0][0].display_name} could not be read: {errors[0][1]}"
