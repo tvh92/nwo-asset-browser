@@ -133,12 +133,14 @@ class GlassPassTests(unittest.TestCase):
 class FailedShadedDrawTests(unittest.TestCase):
     def test_failed_draw_switches_every_attribute_array_off_and_the_next_mesh_retries(self):
         from nwo.viewer.viewport import ModelViewport
-        from nwo.viewer.shading import ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, RCRA_COLOUR_ATTRIBUTE, UV1_ATTRIBUTE
+        from nwo.viewer.shading import (ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, RCRA_BILLBOARD_ATTRIBUTE,
+                                        RCRA_COLOUR_ATTRIBUTE, UV1_ATTRIBUTE)
         disabled = []
         view = ModelViewport.__new__(ModelViewport)
         view._shading = type('Shading', (), {'glDisableVertexAttribArray': staticmethod(disabled.append)})()
         view._disable_shader_arrays()
-        expected = {14, 15, RCRA_COLOUR_ATTRIBUTE, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, UV1_ATTRIBUTE, *ATTRIBUTES.values()}
+        expected = {14, 15, RCRA_COLOUR_ATTRIBUTE, RCRA_BILLBOARD_ATTRIBUTE, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, UV1_ATTRIBUTE,
+                    *ATTRIBUTES.values()}
         self.assertEqual(set(disabled), expected)
 
 

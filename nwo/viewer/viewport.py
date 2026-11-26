@@ -563,6 +563,12 @@ class ModelViewport(_TkFrame):
         if colours is not None and len(colours) == len(payload.get('vertices', [])):
             import numpy as np
             self._rcra_colour = (ctypes.c_ubyte * (4 * len(colours))).from_buffer_copy(np.ascontiguousarray(colours, dtype=np.uint8))
+        self._rcra_billboard = None   # Rift Apart effect-quad corner and facing per vertex (loader._billboards)
+        billboards = payload.get('billboards')
+        if billboards is not None and len(billboards) == len(payload.get('vertices', [])):
+            import numpy as np
+            self._rcra_billboard = (ctypes.c_float * (4 * len(billboards))).from_buffer_copy(
+                np.ascontiguousarray(billboards, dtype=np.float32))
         self._bones, self._bone_count = None, 0
         try:
             prepared=payload.get("_prepared_viewport")
@@ -1649,7 +1655,7 @@ class ModelViewport(_TkFrame):
 
     def _draw_shaded(self, index_array, uv_array, joint_array, weight_array, batches, raw_vector_array=None, tangent_array=None):
         """GLSL path for every mode: GPU skinning, base colour, and the game BRDF."""
-        from nwo.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, BONE_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT, RCRA_COLOUR_ATTRIBUTE
+        from nwo.viewer.shading import TINT_DETAIL_TEXTURE_UNIT, ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, BONE_TEXTURE_UNIT, PICK_TEXTURE_UNIT, TINT_MASK_TEXTURE_UNIT, ARCH_SEQUENCE_TEXTURE_UNIT, BNG_DETAIL_TEXTURE_UNIT, VEHICLE_PALETTE_TEXTURE_UNIT, GLOW_PARALLAX_TEXTURE_UNIT, PARALLAX_HEIGHT_TEXTURE_UNIT, RCRA_COLOUR_ATTRIBUTE, RCRA_BILLBOARD_ATTRIBUTE
         gl, sh = self._gl, self._shading
         self.shading_warning = None
         effect_quads = self._effect_frame()
@@ -1712,6 +1718,13 @@ class ModelViewport(_TkFrame):
             sh.glVertexAttribPointer(RCRA_COLOUR_ATTRIBUTE, 4, self.GL_UNSIGNED_BYTE, 1, 0, self._vptr(colour))
         else:
             sh.glDisableVertexAttribArray(RCRA_COLOUR_ATTRIBUTE); sh.glVertexAttrib4f(RCRA_COLOUR_ATTRIBUTE, 1.0, 1.0, 1.0, 1.0)
+        # Rift Apart effect quads facing the view (rcra_glsl.BILLBOARD_VERTEX): corner offset and facing; 0 elsewhere.
+        billboard = getattr(self, '_rcra_billboard', None)
+        if billboard is not None:
+            sh.glEnableVertexAttribArray(RCRA_BILLBOARD_ATTRIBUTE)
+            sh.glVertexAttribPointer(RCRA_BILLBOARD_ATTRIBUTE, 4, self.GL_FLOAT, 0, 0, self._vptr(billboard))
+        else:
+            sh.glDisableVertexAttribArray(RCRA_BILLBOARD_ATTRIBUTE); sh.glVertexAttrib4f(RCRA_BILLBOARD_ATTRIBUTE, 0.0, 0.0, 0.0, 0.0)
         # Standalone models have no zone-keyed stream: retain uniform review controls.
         sh.glDisableVertexAttribArray(15); sh.glVertexAttrib4f(15,0.0,0.0,0.0,0.0)
         mode = self._mode
@@ -1846,9 +1859,11 @@ class ModelViewport(_TkFrame):
     def _disable_shader_arrays(self):
         """Turn every generic vertex attribute array the shaded path can enable off again. A shaded draw that raises
         part-way leaves them enabled, and the fixed-function fallback then reads their dangling pointers."""
-        from nwo.viewer.shading import ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, RCRA_COLOUR_ATTRIBUTE, UV1_ATTRIBUTE
+        from nwo.viewer.shading import (ATTRIBUTES, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, RCRA_BILLBOARD_ATTRIBUTE,
+                                        RCRA_COLOUR_ATTRIBUTE, UV1_ATTRIBUTE)
         sh = self._shading
-        for location in (14, 15, RCRA_COLOUR_ATTRIBUTE, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE, UV1_ATTRIBUTE, *ATTRIBUTES.values()):
+        for location in (14, 15, RCRA_COLOUR_ATTRIBUTE, RCRA_BILLBOARD_ATTRIBUTE, STATIC_VECTOR_ATTRIBUTE, TANGENT_ATTRIBUTE,
+                         UV1_ATTRIBUTE, *ATTRIBUTES.values()):
             sh.glDisableVertexAttribArray(location)
 
     def _effect_frame(self):

@@ -415,14 +415,51 @@ def _extra_arguments(emitter):
     return 'vec4(%s, %s, %s, %s)' % (t('extra.0'), t('extra.1'), t('extra.2'), t('extra.3')), t('extra.4')
 
 
+# Visual-effect nodes and particles that face the view (nwo.games.rcra.effects, the node facing byte +0x178). Every
+# vertex of such a quad or model sits at its centre; aRcraBillboard.xyz is its offset from the centre in the node's own
+# frame (native axes, model units, the node's scale and rotation and the particle rotation already applied) and .w the
+# facing: 1 kCamera, the camera's own axes (the facing switch at 0x14139e201 copies the camera matrix rows), 2
+# kBillboard, turned toward the eye with the native up (Y, the payload's +Z) as its up hint (0x14139e08c builds the
+# basis from centre - camera and (0, 1, 0)). The frame's +X is the view's right, +Y its up and +Z faces the viewer.
+# The stored normal and tangent (display basis) are read in the same frame. The offset is added after skinning, so the
+# centre follows the locator's joint and the node keeps facing the view. 0 leaves the vertex as stored.
+BILLBOARD_VERTEX = '''
+    if (aRcraBillboard.w > 0.5) {   // Rift Apart effect node facing the view (rcra_glsl.BILLBOARD_VERTEX)
+        vec3 rcraRight, rcraUp, rcraFacing;
+        if (aRcraBillboard.w < 1.5) {
+            rcraRight = normalize((gl_ModelViewMatrixInverse * vec4(1.0, 0.0, 0.0, 0.0)).xyz);
+            rcraUp = normalize((gl_ModelViewMatrixInverse * vec4(0.0, 1.0, 0.0, 0.0)).xyz);
+            rcraFacing = normalize((gl_ModelViewMatrixInverse * vec4(0.0, 0.0, 1.0, 0.0)).xyz);
+        } else {
+            vec3 rcraEyeAt = (gl_ModelViewMatrixInverse * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+            vec3 rcraAhead = p.xyz - rcraEyeAt;
+            rcraAhead = dot(rcraAhead, rcraAhead) > 1e-12 ? normalize(rcraAhead) : vec3(0.0, 1.0, 0.0);
+            vec3 rcraSide = cross(rcraAhead, vec3(0.0, 0.0, 1.0));
+            rcraRight = dot(rcraSide, rcraSide) > 1e-12 ? normalize(rcraSide) : vec3(1.0, 0.0, 0.0);
+            rcraUp = cross(rcraRight, rcraAhead);
+            rcraFacing = -rcraAhead;
+        }
+        mat3 rcraFrame = mat3(rcraRight, rcraUp, rcraFacing);
+        p.xyz += rcraFrame * aRcraBillboard.xyz;
+        n = rcraFrame * vec3(gl_Normal.x, gl_Normal.z, -gl_Normal.y);
+        tn = rcraFrame * vec3(aTangent.x, aTangent.z, -aTangent.y);
+    }
+'''
+
+
 @functools.lru_cache(maxsize=1)
 def vertex_source():
     """The vertex program of the translated materials: shading.VERTEX, plus the vertex colour squared into COLOUR_VARYING
-    (the engine squares its colour load in its vertex program, so the square is interpolated, not the colour)."""
+    (the engine squares its colour load in its vertex program, so the square is interpolated, not the colour) and the
+    effect-quad facing of BILLBOARD_VERTEX after skinning."""
     from nwo.viewer.shading import VERTEX
     head, body = VERTEX.split('void main() {', 1)
+    marker = '    vTangent = gl_NormalMatrix * tn;'
+    skinned, rest = body.split(marker, 1)
     return (head + 'attribute vec4 aRcraColour; varying vec4 %s;   // Rift Apart vertex colour (rcra_glsl)\n'
-            'void main() {\n    %s = aRcraColour * aRcraColour;' % (COLOUR_VARYING, COLOUR_VARYING) + body)
+            'attribute vec4 aRcraBillboard;   // Rift Apart effect quad corner and facing (BILLBOARD_VERTEX)\n'
+            'void main() {\n    %s = aRcraColour * aRcraColour;' % (COLOUR_VARYING, COLOUR_VARYING)
+            + skinned + BILLBOARD_VERTEX + marker + rest)
 
 
 SHELL_VERTEX = '''

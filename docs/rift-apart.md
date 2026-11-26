@@ -36,7 +36,7 @@ Rift Apart's capabilities are `models`, `textures`, `export`, `animation`, `root
   - The Textures tab.
   - Model export to GLB, glTF and OBJ (FBX, USD and `.blend` through Blender), with skin weights and animation clips (optionally with their root motion, and with face performances), and blend shapes as morph targets. Blender exports carry the game's own materials where the G-buffer writer or, for blended materials, the forward program translates ([Blender materials](#blender-materials)). Options -> Blender Scene (.blend) writes the `.blend` alone as a render-ready scene: the shared review lighting and HDRI, a framing camera and the Render Region ([viewer](viewer.md#portable-export-extract-selected)). The lighting is review lighting, or a level's atmosphere while the 3D view shows Game atmosphere ([Atmosphere lighting](#atmosphere-lighting)).
 - **Disabled:** the Level and Flash UI types, the backend choice, the Blender scene's group `.blend` and game tone curve (R&C 2016 captures), and the shading filter. Each is greyed out with the tip "Not yet available for Rift Apart". Rift Apart has no Flash UI to show there ([User interface](#user-interface)).
-- **Visual effects:** the model view draws the single-model nodes of the effects a model's actors start, such as the weapons vendor's holo logo ([Effects in the viewer](#effects-in-the-viewer)). Every other node type, and the exports, leave effects out.
+- **Visual effects:** the model view draws the quad and model nodes of the effects a model's actors start, with a still of each emitter's particles replayed from the game's spawn and update code, and camera-facing nodes turned toward the view ([Effects in the viewer](#effects-in-the-viewer)). Lights are decoded and listed, not drawn. Trails, decals, lens flares and child effects, and the exports, leave effects out.
 - **Clips:** found through the dag by `Game.animation_library`, without a scan's reference index.
 - **Model list:** read in-process through `Game.list_models`, without the pipeline subprocess.
 
@@ -1301,7 +1301,7 @@ Programs read the engine's per-object record, `g_SceneObjectView` (element `$Ele
 - **Values:** alpha, an fp16 object colour (`m_ColorRGFp16`, `m_ColorBMiscFp16`), custom XY, Z and random halves, creation time, LOD override.
 - **Interpolants:** the vertex program passes the custom values on as `TEXCOORD6 = (1, Misc, Rand, LOD factor)` and `TEXCOORD7 = (custom X, custom Y, custom Z, FX lighting index)`.
 
-The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain object: identity transform, alpha 1, white colour, and every custom value, time and bias 0. Both the G-buffer and the forward translations bind it, and a material that reads it says so in its limitations. A visual-effect mesh replaces its colour members with the node's ([Effects in the viewer](#effects-in-the-viewer)). Effects driven by the custom values, such as the particle quads `exp_quad` and `smk_quad`, come out at their zero state (often transparent).
+The game sets these per object at run time. `shaders.NEUTRAL_OBJECT` is a plain object: identity transform, alpha 1, white colour, and every custom value, time and bias 0. Both the G-buffer and the forward translations bind it, and a material that reads it says so in its limitations. A visual-effect mesh replaces its colour, alpha and custom members with its node's, and a particle quad binds its interpolants the way the engine's particle vertex program writes them ([Draw values](#draw-values)).
 
 ### Vertex programs
 
@@ -1610,7 +1610,7 @@ The asset is the 36-byte toc header and a DAT1 whose string pool holds "VisualEf
 | `0xAF650E9E` | 8 | Materials: u32 path offset, i32 −1 or the offset of an inline material's name (`materialnode: material_15, <graph path>`) |
 | `0xB40E134B` | 12 | Assets: u32 path offset, u32, u32 type hash (`vfx.ASSET_TYPES`: model, visualeffect, conduit, actor) |
 | `0x73CE6A3F` | 32 | One record, (1, 1, 1, 1) in the vendor's effects; meaning not traced |
-| `0x3F03BE86` | 120 | Not read |
+| `0x3F03BE86` | 120 | Spawn shapes ([Spawn](#spawn)); an emitter's u32 +0x118 indexes them |
 | `0xEFD8600D`, `0x01670690`, `0xECC0D7AF` (+ `0x4A868898` strings) | 16, 20, 24 | Not read |
 
 **Corpus:** 2,985 effects, 20,490 nodes and 9,698 emitters. `vfx.decode_effect` reads all of them.
@@ -1619,44 +1619,108 @@ The asset is the 36-byte toc header and a DAT1 whose string pool holds "VisualEf
 
 - **Render type:** byte +0x17A. The values follow the editor enum the exe reflects (`kSingleQuad` … `kSingleDecalTrail`), with its one asset pair split three ways: 0 SingleQuad, 1 MultiQuads, 2 SingleLight, 3 MultiLights, 4 SingleSwipe, 5 SingleTrail, 6 MultiTrails, 7 RadialBlur, 8 MultiSplines, 9/10 single and multi child effects, 11/12 models, 13/14 conduits or actors, 15 SunLensFlare, 16 ForceField, 17 SingleDecal, 18 MultiDecals, 19 SingleTube, 20 SingleDecalTrail.
 - **Names 9 to 14:** from the asset each node references. The asset entry's type hash agrees on every node.
-- **Asset ids:** +0x00 is the u64 id of the node's model or child asset, +0x08 its material and, for lights, +0x104 the light's asset. Each is the path CRC64 of an entry in the effect's own lists. For an inline material it is the CRC64 of the material's name. 6 node material ids match no entry. The game's unload routine (`0x1413703E0`) releases these ids by render type.
+- **Asset ids:** +0x00 is the u64 id of the node's model or child asset, +0x08 its material and, for lights, +0x104 an IES profile texture (loaded with the tag "VFX IES Profile"; the game builds an IES material from it over +0x08). Each is the path CRC64 of an entry in the effect's own lists. For an inline material it is the CRC64 of the material's name. 6 node material ids match no entry. The game's unload routine (`0x1413703E0`) releases these ids by render type.
 - **Emitter link:** a Multi node names its emitter by the u32 at +0x10, which equals the emitter's +0x100. Every Multi node has one, and no Single node does.
 - **Transform:** a 3×3 matrix at +0x20, a position at +0x44 and a scale at +0xC4. The vendor's holo logo plane sits 0.725 above its locator at scale (2, 2, 1).
 - **Draw order:** byte +0x17F. The draw routine shifts it into the sort key.
-- **Curve slots:** +0x180, eight (u32, u32) pairs. The low 16 bits of the first word index the curves; the high 16 bits are a flag or modifier number. Multi nodes leave them 0: their particles take the emitter's slots 12 to 19.
+- **Curve slots:** +0x180, eight (u32, u32) pairs. The low 16 bits of the first word index the curves; the high 16 bits name a run-time override of the effect instance (0 for none), which multiplies, replaces or adds its vector (`0x14138D350`). The half at byte +6 is the slot's time rate ([Curve keys](#curve-keys)). Multi nodes leave them 0: their particles take the emitter's slots 12 to 19.
+- **Facing:** byte +0x178, the reflected `kCamera`, `kLocal`, `kWorld`, `kBillboard` order. The facing switch (`0x14139E020`) gives a `kCamera` node the camera's own axes (it copies the camera matrix rows) and turns a `kBillboard` node toward the camera position, with the native up (0, 1, 0) as the up hint. `kLocal` keeps the parent's rotation without its scale.
 
-**Emitters:** a 3×3 matrix at +0x00, a position at +0x24, the name hash at +0x100 and twenty curve slots at +0x120. Their spawn and motion fields are not decoded.
+**Emitters:** a 3×3 matrix at +0x00 (rows: the local axes), a position at +0x24, the name hash at +0x100, twenty curve slots at +0x120, and the spawn and motion fields of [Spawn](#spawn) (`vfx.EMITTER_FIELDS`).
 
-**Curve slot names** (`vfx.NODE_CURVES`, `vfx.EMITTER_CURVES`) are read from the values across the corpus, not from code:
+**Curve slot names** (`vfx.EMITTER_CURVES`) come from the code that reads each slot: the spawn loop (`0x14137C7B0`) and the ten curve refs the particle update reads (built at `0x14137DC67`):
 
-- **Node slots 2 to 7:** luminance (1 to 16, random ranges), rotation in degrees ((0, 0, 30), (0, 0, 90)), custom, scales, colour ((0.69, 0.21, 1), (0, 0.65, 1)) and alpha (multi-key fades).
-- **Emitter slots 14 to 19:** the same six, in the same order.
-- **Emitter slots 7 and 8:** the emitter's rotation ((0, −90, 0)) and position.
-- **Other slots:** numbered. Their values include gravity-like 9.8 and 4.9, and lifetimes with random ranges.
+| Slot | Name | Read by |
+| --- | --- | --- |
+| 0 | size at spawn | update: a size factor, read at the particle's spawn time on the emitter's timeline |
+| 1 | speed | spawn: its x scales the direction |
+| 2 | burst | spawn: fires once each time the emitter time passes a key (`0x14138D570`) |
+| 3 | per metre | spawn: particles per metre the emitter moved |
+| 4 | rate | spawn: particles per second |
+| 5 | gap | spawn: forces a particle when the last one is too far from the emitter (name inferred) |
+| 6 | life | spawn: seconds, stored as a half at particle +0x3E |
+| 7, 8 | emitter rotation, emitter position | the emitter's transform (degrees, offset) |
+| 9 | shape scales | spawn: the vector handed to the shape sampler |
+| 10 | follow | update: how far a particle follows its emitter |
+| 11 | acceleration | update: times the acceleration direction (+0x30) |
+| 12 | turbulence | update: noise amplitude |
+| 13 | velocity | update: velocity multiplier |
+| 14 to 19 | luminance, rotation, custom, scales, colour, alpha | update: the render values ([Draw values](#draw-values)) |
 
-**Curve keys:**
+A Single node's slots 2 to 7 bind the same refs as emitter slots 14 to 19. A slot whose u16 at +4 is set reads the emitter's times instead of the particle's.
+
+### Curve keys
 
 - **Layout:** eight halves: base (x, y, z), a u16 key time, range (x, y, z) and a mode.
 - **Key times:** 0x0000 to 0xFFFF map to 0 to 1, with thirds and eighths common.
-- **Value:** the evaluator (`0x14138D0E0`) returns base + range × one of three random vectors, selected by comparing the mode with two thresholds. The corpus uses modes 1 (constant, range 0) and 2 (random range). The thresholds and vectors are set at run time and are not read.
-- **Between keys:** `vfx.curve_value` interpolates linearly. This is a viewer choice: the game's key-to-key evaluation is not traced.
+- **Key value:** the key evaluator (`0x14138D0E0`) returns base + range × a random vector that the mode picks against two fixed thresholds, 1.9 and 2.9 (static initialisers at `0x14015A740`). Each vector holds one value for x, y and z, from a table of 255 uniform numbers in [0, 1) (`0x141393A20`):
+  - mode 1: the particle's value u (table entry seed mod 255);
+  - mode 2: a value seeded by the particle and the effect instance;
+  - mode 3: a coin, 1 when u > 0.5, else 0.
+  The corpus has 286,962 mode 1 keys, 30,566 mode 2 and 1,168 mode 3.
+- **Between keys** (`0x14138D140`): the two keys around the time, interpolated linearly, times the header's |scale|. Scales run from 1 to 2,000 (rotations in degrees, rates). A negative scale makes the curve read the effect instance's times instead of the particle's (`0x14138D4C0`).
+- **Time rate:** the half at slot byte +6 picks the time. 0: the normalised age, clamped to 1. Above 0: `frac(rate × seconds)`, a loop at `rate` cycles per second. Below 0: `min(|rate| × seconds, 1)`, played once over 1 / |rate| seconds. About 16,000 of the corpus's 280,000 slots have a rate.
+- **In the reader:** `vfx.curve_value(curve, t, random, instance_random)` and `vfx.curve_time(rate, seconds, normalised)` follow these routines. The viewer evaluates with u = 0.5 (so a coin reads 0) and with its own still time ([Effects in the viewer](#effects-in-the-viewer)).
+
+### Spawn
+
+The spawn loop (`0x14137C7B0`) and particle init (`0x141395800`), traced:
+
+- **Count per frame:** `carry + rate × dt`, the fraction carried over, plus slot 2's bursts, capped at 4,096 per frame, by +0x108 (particles spawned in total) and +0x11C (alive). Nothing spawns while the emitter's age is below 0: it starts at minus the spawn delay (+0x6C, plus a random part up to +0x70). Rate spawning stops when the emitter's lifetime ends (+0x64, plus up to +0x68; 0 is infinite), except for the on-death burst (+0x10C).
+- **Time:** spawn-time curves read the emitter's age in seconds and its normalised age (0 for an infinite emitter).
+- **New particle:** the shape sampler returns a local position and direction. Both go through the emitter's rows and position (slot 8 adds its offset). Velocity = direction × slot 1's x, plus +0x48 × the emitter's velocity. Life = slot 6. Initial rotation = random × +0x80 + +0x8C per axis (radians). Size base 1 (or the effect scale with flag +0x104 bit 0x400).
+- **Particle space** (+0x115): 0 keeps particles in the emitter's frame; 1 and 2 are world.
+- **Shapes** (section `0x3F03BE86`, 120 bytes, type hash at +0x0C). Every analytic shape emits along local +Z. The names (`vfx.SHAPE_KINDS`) are read from the sampling maths; the hashes match no plain hash of the reflected names (`kCone`, `kDisc`, `kBoxEx`, `Plane`):
+  - `BD6A18A2` cone or sphere (the default): direction at an angle from +Z in [+0x38, +0x38 + +0x3C] degrees and a sweep in [+0x40, +0x40 + +0x44] + 180, position = direction × radius (+0x50 + random × +0x54).
+  - `323F9580` disc, ring or cylinder; `D8E0E141` plane (half sizes +0x58, +0x5C); `D6F48302` box by faces; `22FC61F3` box along the cone direction; `CEC6BE18` a model's surface.
+  - +0x48 + coin × +0x4C signs the direction (outward, inward or random), +0x68 spreads it (degrees per Euler angle), +0x6C to +0x74 offsets the origin.
+
+### Update
+
+The default particle update (`0x141391F00`), traced. Particles are 64 bytes:
+
+| Bytes | Content |
+| --- | --- |
+| +0x00, +0x0C | position (3 f32), age (f32 seconds) |
+| +0x10 | rotation, 3 s16 (32,768 = 2π) |
+| +0x16 | size base, u16 (512 = 1) |
+| +0x18, +0x1E, +0x1F | colour RGB (3 halves), alpha-test threshold and alpha (bytes /255) |
+| +0x20, +0x28 | tail vector, velocity (3 halves each) |
+| +0x2E, +0x37, +0x3E | spawn time (half), random byte, life (half) |
+| +0x30, +0x38 | size xyz, custom xyz (3 halves each) |
+
+- **Time:** t = min(age / life, 0.999999); a particle dies when its age passes its life.
+- **Motion:** velocity += dt × the acceleration direction (+0x30) × slot 11, then × the drag factor exp(−dt × +0x54), plus a gravity step (0, −dt × +0x4C, 0) in world axes. Position += dt × velocity × slot 13. Wind (+0x50 × a run-time vector), turbulence (slot 12, when the record's flag 2 is set) and following (slot 10) are added on top.
+- **Values:** colour = slot 18 × slot 14's x; alpha = slot 19's x, the threshold its y; custom = slot 16; size = base × slot 17 × slot 0, with random mirror flips; rotation integrates slot 15 as degrees per second, or reads it absolutely with node flag 0x800.
+
+Other updates share the layout: frozen emitters copy the particle, the first step of a new particle runs at t 0, and swipes and trails (render types 4 to 6) run their own per-point update (`0x14139F240`).
+
+### Draw values
+
+- **Model nodes** (`0x141377EC0`): the particle's colour halves, custom halves and alpha byte go to the draw object, and the object writer (`0x1410FDC00`) puts them in `g_SceneObjectView`: colour RGB in `m_ColorRGFp16` and the low half of `m_ColorBMiscFp16`, alpha / 255 in `m_Alpha`, custom X, Y, Z in `m_CustomXYFp16` and `m_CustomZRandFp16`. Misc and Rand are not particle values: Misc comes from an aux table the draw does not index (0), Rand from a fixed table by draw byte +0x9C.
+- **Quads** (render types 0 and 1) are expanded on the GPU: engine vertex programs in the exe read the 64-byte particles from `g_VisualEffectParticlesU4`, one particle per six vertices. They write TEXCOORD4 = (particle RGB × the object's custom X, Y, Z, 1), TEXCOORD.z = the alpha-test threshold, TEXCOORD.w = alpha × the object's Misc × a near fade, TEXCOORD6 = (max of the size × width and height, age / life, a random term, distance LOD) and TEXCOORD7 = (custom, FX lighting slot). The quad is |size x| × `m_Width` by |size y| × `m_Height` (`VfxMatInstanceCBuffer`), along `m_OrientA` (right) and `m_OrientB` (up), which the CPU fills per facing.
+- **Lights** (render types 2 and 3, `0x14137A1E0`): type byte +0x17B (`kPyramidLight`, `kPointLight`, `kSpotLight`), range +0x130, spot cone +0x120 / +0x124 degrees (defaults 15 and 45). Colour = the particle's hue at luminance 1, intensity = max(|size x|, |size y|) × |RGB| × alpha, 0 unless node flag bit 0 is set. Node +0x10C to +0x11C and +0x128, +0x12C go into the light record with unknown meanings.
 
 ### Effects in the viewer
 
 The view decode (`rcra_game.decode_model` with arrays) runs `nwo/games/rcra/effects.py`. The export decode does not.
 
 - **Which effects:** the model's actors (reverse dag), their conduits, and each conduit's `ActivatedEvent` responses that start an effect. A conduit counts only when every locator its activation responses name is a locator or joint of the model. This skips shared conduits such as the gallery's `hero_gallery_vfx`, which names the locators of many models. Identical (effect, locator) pairs from several actors attach once.
-- **What draws:** SingleModel nodes only. The node's model (highest LOD, look 0) gets the node's material as a new material entry. It is placed by the locator's rest transform (its joint's inverse bind, inverted, times the locator matrix), then the node's position, 3×3 and scale. Its vertices are weighted 1 to the locator's joint, so the mesh follows the animation. The node's rotation is applied with the nine floats as rows; that order is not traced (the vendor's plane has the identity).
-- **Object colour:** the node's colour curve times its luminance curve, at mid-life (t 0.5) with every random range at its middle, bound as the translation's per-object colour (`m_ColorRGFp16`, `m_ColorBMiscFp16`) through `shaders.draw_override`. The override is part of the translation's cache keys. This follows the decoded R&C 2016 path, where a particle's colour reaches a model draw as the instance colour; the Rift Apart draw routine (`0x141377EC0`) is not traced that far. The material's limitations give the values.
-- **Particle quads:** a MultiQuads node whose facing byte (+0x178, the reflected kCamera, kLocal, kWorld, kBillboard order) is kLocal or kWorld draws a still: round(rate × life) quads at evenly spaced ages, each in the effect's local XY plane at the emitter position plus its travel along the emitter's +Z, of full size node scale × the scales curve. Rate, life and speed are emitter slots 4, 6 and 1, read from corpus values and not traced; spawn shapes, turbulence and acceleration are not applied. The colour × luminance at mid-life binds TEXCOORD4 on every translation of the material (draw_override interpolants). Camera-facing quads are left out. The vendor's thrust rings (5 quads) draw this way but sit inside her lower shell in the rest pose, so they are hidden.
-- **Example:** the weapons vendor's holo logo plane draws 0.725 above `igLoc_projection_vfx` (head joint 13), 2 × 2 units, with the logo program at object colour (0, 6.52, 10). Its projector draws nothing (camera-facing quads, a multi-model emitter).
-- **Left out:** single and camera-facing quads, lights, trails, decals, lens flares and child effects. `decoded['effects']` lists, per attached effect, the nodes drawn and the nodes left out, and the material note repeats them.
+- **What draws:** SingleQuad, MultiQuads, SingleModel and MultiModels nodes, each as a mesh with its own material entry, weighted 1 to the locator's joint so it follows the animation. The effect is placed by the locator's rest transform (its joint's inverse bind, inverted, times the locator matrix), then the node's position and 3×3 (applied with the nine floats as rows; that order is not traced, and the vendor's nodes have the identity).
+- **Particles:** a Multi node's particles come from `nwo/games/rcra/particles.py`, a replay of [Spawn](#spawn) and [Update](#update) to a still emitter age: one particle life after the first spawn (a steady state), half a life for an emitter that only bursts, within the emitter's lifetime. The replay steps at 1/60 s. In place of the game's random table it uses a fixed low-discrepancy sequence per particle, so spreads are even rather than those of a given game frame. It follows the cone, disc and plane shapes (box and model-surface shapes spawn at the origin, noted), acceleration, gravity and drag; not wind, turbulence, following, inherited velocity, per-metre spawning, random flips or slot 7's emitter rotation.
+- **Single nodes:** their curves at mid-life (t 0.5), and slots with a time rate at 1 s.
+- **Facing:** `kLocal` and `kWorld` quads lie in the effect's XY plane. `kCamera` and `kBillboard` nodes and particles store every vertex at their centre, with the offset in their own frame as a vertex stream (`billboard`, `loader._billboards`). The Rift Apart vertex program turns them toward the view after skinning (`rcra_glsl.BILLBOARD_VERTEX`, attribute 11): `kCamera` along the view's axes, `kBillboard` toward the eye with the native up as its up hint, as the facing switch does.
+- **Values:** a model node binds its colour, alpha and custom values as per-object members, a quad node its interpolants as the particle vertex program writes them ([Draw values](#draw-values)), through `shaders.draw_override` on every translation of the material. One draw state stands for a node, so a Multi node takes the values of its particle nearest mid-life. The object custom and Misc factors of a quad, the near fade and the object Rand half are not traced: they read 1, 1, 1 and 0. Quad size = node scale × particle size, the reading of `m_Width` and `m_Height`, whose CPU writer is not traced.
+- **Lights:** listed in `decoded['effects']` rows (`lights`: type, colour, intensity, range, cone), not drawn: the translated programs read the game's light lists, which the review profile binds empty.
+- **Example:** the weapons vendor's holo logo plane draws 0.725 above `igLoc_projection_vfx` (head joint 13), 2 × 2 units, facing the view (`kBillboard`), with the logo program at object colour (0, 6.52, 10). Its projector draws a glow, two ray cones and 17 beam quads; her hover effect draws the thrust rings, glows and lit smoke. Its anamorphic lens flare quad (node scale 0.5 × 12) draws as a tall strip; whether the game swaps width and height for it is not traced.
+- **Left out:** lights, trails, swipes, decals, lens flares, radial blur, splines, tubes, force fields and child effects, and nodes whose material is an inline graph. `decoded['effects']` lists, per attached effect, the nodes drawn and those left out, and the material note repeats them.
 
 ### Not decoded
 
-- **Emitters:** their spawn shapes (the reflected `kCone`, `kDisc`, `kPlane`, `kBox`), counts, lifetimes and motion.
-- **Draw values:** how the renderer turns curve values into a draw's per-object colour, alpha and custom values ([Per-object values](#per-object-values)).
-- **Lights:** the light parameters.
+- **Quad draw state:** which object record a quad draw binds, who sets its custom and Misc halves (the effect instance's tint at +0xEC is the likely source), and the CPU writer of `VfxMatInstanceCBuffer` (`m_OrientA` to `m_OrientC`, `m_Width`, `m_Height`).
+- **Spawn:** the shape hash names, the difference between particle spaces 1 and 2, and the run-time globals (wind, the first-frame step).
+- **Lights:** the light record fields with unknown meanings, and the IES profiles.
+- **Trails and swipes:** their point layout and the 15 curves of their update.
 - **Render targets:** effects that show a render target, such as the vendor's weapon hologram (`gbl_gp_vendorrtt_01`), cannot be drawn from the files.
 
 ## Evidence tool
@@ -1680,6 +1744,6 @@ python -m nwo.games.rcra.inspect --game <install> --output-root <folder> --summa
 
 `tests/test_rcra_bake.py` checks the portable export's UV0 bake. Without game files, it checks the structural test (UV1, the normal, a cube map or volume block a group; the front-face flag does not), terms at the texel centres, sRGB decoding before filtering, bilinear wrap at a scaled UV, lookup tables, and that chunks and threads give the same values. With `RCRA_GAME` it checks that Ratchet's head material bakes to the scalar evaluator's values at random texels.
 
-`tests/test_rcra_vfx.py` checks the [visual effect](#visual-effects) reader on a synthetic effect: asset, material (also inline) and emitter links, curve keys, times and values, and failures on a broken curve chain or slot. It also checks the per-object override and an effect mesh's placement and joint weights. With `RCRA_GAME` it checks the vendor's holo logo, its projector's emitter links, the conduit's attachments, and that the vendor's view decode carries the logo mesh (head joint, every look and LOD, the override in its translation) while the export decode does not.
+`tests/test_rcra_vfx.py` checks the [visual effect](#visual-effects) reader on a synthetic effect: asset, material (also inline) and emitter links, emitter fields and slot names, curve keys, times and values, curve scale, key modes and time rates, and failures on a broken curve chain or slot. It also checks the particle replay (count, travel, gravity), quads lying flat or facing the view, a facing model's offsets, the quad interpolants, light values, the per-object override and an effect mesh's placement and joint weights. With `RCRA_GAME` it checks the vendor's holo logo, its projector's emitter links, the conduit's attachments, and that the vendor's view decode carries the effect meshes (the logo facing the view on the head joint in every look and LOD, the thrust rings flat, camera-facing smoke, one ray cone per particle, the logo's spot light, the override in the logo's translation) while the export decode does not.
 
 `tests/test_rcra_draw_skip.py` checks two things on synthetic flags blocks: the draw-skip rule (blended, additive, opaque, fur and distance-fade cases) and the packed draw alpha. It also checks the viewport and export wiring. With `RCRA_GAME` it checks that Ratchet's head lists only `compositeshell` as undrawn and that the texture entries mark its slot. It also checks that a glass of material alpha 0.3 gets forward alpha × 1228/4096. `tests/test_rcra_cube.py` checks the cube-map path without game files: the D3D cube lookup at texel centres, the equirectangular image against that lookup and Blender's mapping, the viewer's `samplerCube` emission, and (Windows OpenGL) that the viewport's GL cube map returns the same texels for the game direction. `tests/test_rcra_surface.py` checks the surface terms: packed again with the engine's formulas they give the writer's own G-buffer bits, on four real graphs. It also checks the texture writer and the export wiring, and, with Blender installed (`RC2016_BLENDER` or the default path), bakes an emitted material against its recipe. `tests/test_sm5.py` compiles small HLSL programs with Windows' `d3dcompiler_47` at test time, checks the decoder against `D3DDisassemble` and the translator against known results (branches, loops, switch, bit packing, discard, reflection names, UAV stores, raw stores and atomics, groupshared memory, domain-program inputs). It skips without the DLL. `tests/test_rcra_lighting.py` checks the lighting classes. Without game files it covers the class bits, the extra-field layout, the emitted `rcraLight` and `rcraClassLit`, and the forward programs' own light emitted per light. With `RCRA_GAME` it finds the six apply programs, checks class 0 against GGX with α = r⁴ and that every class recipe is the light's own term. It also checks the cloth and foliage writers' extra fields against their packed word, that the fur writer is class 3, the dome's own key light, the jellyfish domain program, and engine compute programs with groupshared memory. `tests/test_rcra_shaders.py` (`RCRA_GAME`) checks the pass table, the glass forward program against the hand decode on the trooper dome, and the `basic_normal_gloss` G-buffer writer.

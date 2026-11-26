@@ -64,6 +64,16 @@ def _vertex_colours(decoded, meshes):
     return dict(vertex_colours=np.clip(np.concatenate(parts),0,255).astype(np.uint8))
 
 
+def _billboards(decoded, meshes):
+    """{'billboards': (n, 4) float32} when a Rift Apart effect node or particle faces the view (nwo.games.rcra.effects,
+    mesh key 'billboard': the offset x, y, z from its centre in its own frame, then the facing, 1 kCamera or 2 kBillboard),
+    else {}. rcra_glsl turns it toward the view after skinning; other vertices read zeros and stay as stored."""
+    if decoded.get('game')!='rcra' or not any(_present(mesh.get('billboard')) for mesh in meshes):return {}
+    parts=[np.asarray(mesh['billboard'],dtype=np.float64).reshape(-1,4) if _present(mesh.get('billboard'))
+           else np.zeros((len(mesh['positions']),4)) for mesh in meshes]
+    return dict(billboards=np.concatenate(parts).astype(np.float32))
+
+
 def _morph_payload(decoded, meshes):
     """{'morphs': dict(names, hashes, targets)} for a model with blend shapes on the shown meshes (Rift Apart,
     ``rcra.model.attach_shapes``), else {}. ``targets`` holds one (payload vertex indices, position deltas, normal
@@ -158,6 +168,7 @@ def _mesh_payload_arrays(decoded, meshes, selected):
                 **({'uv1s':np.concatenate(uv1s)} if has_uv1 else {}),
                 skin_joints=np.concatenate(joints).ravel(),skin_weights=np.concatenate(weights).ravel(),
                 rock_alpha=np.concatenate(alpha),rock_alpha_sources=alpha_sources,**_vertex_colours(decoded,meshes),
+                **_billboards(decoded,meshes),
                 source_sha256=decoded['source_sha256'],selected_mesh_indices=sorted(selected),
                 source_exact_geometry=True,game_equivalence=False,material_preview='neutral geometry inspection')
 
@@ -241,6 +252,7 @@ def mesh_payload(decoded, lod='Highest', look=0):
                 static_vector_eligible=eligible,triangles=triangles,uvs=uvs,batches=batches,**({'uv1s':uv1s} if has_uv1 else {}),
                 skin_joints=skin_joints,skin_weights=skin_weights,rock_alpha=rock_alpha,rock_alpha_sources=rock_alpha_sources,
                 **_vertex_colours(decoded,[m for m in decoded['meshes'] if m['index'] in selected]),
+                **_billboards(decoded,[m for m in decoded['meshes'] if m['index'] in selected]),
                 source_sha256=decoded['source_sha256'],selected_mesh_indices=sorted(selected),
                 source_exact_geometry=True,game_equivalence=False,material_preview='neutral geometry inspection')
 

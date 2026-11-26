@@ -193,6 +193,9 @@ GROUND_BLEND_ATTRIBUTE = 15
 # Rift Apart vertex colour (rcra_glsl.vertex_source, model viewer only): the level viewer's aInst0 slot, aliasing texcoord 2,
 # which no model-viewer program reads.
 RCRA_COLOUR_ATTRIBUTE = 10
+# Rift Apart effect-quad corner and facing (rcra_glsl.BILLBOARD_VERTEX, model viewer only): the level viewer's aInst1 slot,
+# aliasing texcoord 3, which no model-viewer program reads.
+RCRA_BILLBOARD_ATTRIBUTE = 11
 GLOW_PARALLAX_TEXTURE_UNIT = 13   # prompt 08; existing unit 5 carries the light mask
 VEHICLE_PALETTE_TEXTURE_UNIT = 10   # EB1AC2CD second palette; prompt 05 reservation
 PICK_TEXTURE_UNIT = 4   # colour-pick palette (blarg_saucer_colorpick)
@@ -3004,7 +3007,7 @@ class Shading:
                 surface = rcra_glsl.fragment_source(translation)
                 names = (*OPAQUE_UNIFORMS, *surface['samplers'], rcra_glsl.PASS_UNIFORM, *rcra_glsl.SCENE_UNIFORMS,
                          *rcra_glsl.AMBIENT_UNIFORMS)
-                extra = {} if instanced else {'aRcraColour': RCRA_COLOUR_ATTRIBUTE}
+                extra = {} if instanced else {'aRcraColour': RCRA_COLOUR_ATTRIBUTE, 'aRcraBillboard': RCRA_BILLBOARD_ATTRIBUTE}
             else:
                 surface = fragment_source(translation, srgb, experimental=experimental, rule_preview=rule_preview,
                                           alpha_api=alpha_api, alpha_discard=alpha_discard, alpha_opacity=alpha_opacity)
@@ -3026,7 +3029,7 @@ class Shading:
                      *rcra_glsl.SHELL_UNIFORMS, *rcra_glsl.AMBIENT_UNIFORMS)
             attributes = dict(ATTRIBUTES, aRockAlpha=ROCK_ALPHA_ATTRIBUTE, aGroundBlend=GROUND_BLEND_ATTRIBUTE,
                               aStaticPackedVector=STATIC_VECTOR_ATTRIBUTE, aTangent=TANGENT_ATTRIBUTE, aUV1=UV1_ATTRIBUTE,
-                              aRcraColour=RCRA_COLOUR_ATTRIBUTE)
+                              aRcraColour=RCRA_COLOUR_ATTRIBUTE, aRcraBillboard=RCRA_BILLBOARD_ATTRIBUTE)
             self.programs[key] = self._link(vertex, surface['source'], attributes, names)
         return self.programs[key]
 

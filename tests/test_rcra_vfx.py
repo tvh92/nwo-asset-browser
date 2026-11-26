@@ -35,7 +35,8 @@ def half_key(base, time, rng, mode):
     return halves.tobytes()
 
 
-def node(kind, asset_id=0, material_id=0, emitter_hash=0, position=(0, 0, 0), scale=(1, 1, 1), slots=None, order=0):
+def node(kind, asset_id=0, material_id=0, emitter_hash=0, position=(0, 0, 0), scale=(1, 1, 1), slots=None, order=0,
+         rates=None):
     record = bytearray(vfx.RECORD)
     struct.pack_into('<QQI', record, 0, asset_id, material_id, emitter_hash)
     struct.pack_into('<9f', record, 0x20, 1, 0, 0, 0, 1, 0, 0, 0, 1)
@@ -45,6 +46,8 @@ def node(kind, asset_id=0, material_id=0, emitter_hash=0, position=(0, 0, 0), sc
     record[0x17F] = order
     for i, word in enumerate(slots or [0] * 8):
         struct.pack_into('<I', record, 0x180 + 8 * i, word)
+    for i, rate in enumerate(rates or []):
+        struct.pack_into('<e', record, 0x180 + 8 * i + 6, rate)
     return bytes(record)
 
 
@@ -80,7 +83,8 @@ def effect():
     curves = struct.pack('<IIIf', 0x11, 0, 1, 1.0) + struct.pack('<IIIf', 0x22, 1, 1, 1.0)
     curves += struct.pack('<IIIf', 0x33, 2, 3, 1.0)
     slots = [1, 1, 1, 0, 1, 1, 0, 2 | (6 << 16)]            # the alpha slot carries a flag in its high half
-    nodes = node(11, plane, glow, position=(0, 0.725, 0), scale=(2, 2, 1), slots=slots, order=3)
+    nodes = node(11, plane, glow, position=(0, 0.725, 0), scale=(2, 2, 1), slots=slots, order=3,
+                 rates=[0, 0, 0.5, 0, 0, 0, 0, -2])
     nodes += node(1, 0, inline, emitter_hash=0xABCD)
     emitters = emitter(0xABCD, [1] * 18 + [0, 2])
     settings = struct.pack('<3fI4I', 1, 1, 1, 1, 0, 0, 0, 0)
@@ -106,6 +110,7 @@ class EffectFormatTest(unittest.TestCase):
         self.assertEqual(single['sort_order'], 3)
         self.assertIsNone(single['emitter'])
         self.assertEqual(single['curves']['alpha'], (2, 6))
+        self.assertEqual((single['rates']['luminance'], single['rates']['alpha'], single['rates']['color']), (0.5, -2.0, 0.0))
         self.assertEqual(multi['render_type_name'], 'MultiQuads')
         self.assertEqual(multi['material'], 'materialnode: material_2, materialgraph/fx/flash.materialgraph')
         self.assertIsNone(multi['curves'])
@@ -120,10 +125,26 @@ class EffectFormatTest(unittest.TestCase):
         self.assertEqual(curves[0]['keys'][0]['base'], (0.0, 0.5, 1.0))
         self.assertEqual(curves[0]['keys'][0]['time'], 0.0)
         self.assertEqual([k['time'] for k in curves[2]['keys']], [0.0, 0x8000 / 65535, 1.0])
-        self.assertEqual(vfx.curve_value(curves[1], 0.0, (0.5, 0.5, 0.5)), (0.75, 0.75, 0.75))
+        self.assertEqual(vfx.curve_value(curves[1], 0.0, 0.5), (0.75, 0.75, 0.75))   # mode 2 reads the instance value
         self.assertAlmostEqual(vfx.curve_value(curves[2], 0.25)[0], 0.25 / (0x8000 / 65535), places=6)
         self.assertEqual(vfx.curve_value(curves[2], 1.0)[0], 0.0)
         self.assertEqual(vfx.curve_value(curves[2], -1.0)[0], 0.0)
+
+    def test_curve_scale_modes_and_time_rates(self):
+        """0x14138D140 and 0x14138D0E0: |scale| multiplies, the mode picks the random value (1 the particle's, 2 the
+        instance's, 3 a coin over 0.5), and a slot's rate loops, plays once or keeps the normalised age."""
+        key = dict(base=(1.0, 2.0, 3.0), time=0.0, range=(2.0, 2.0, 2.0), mode=1.0)
+        curve = dict(hash=0, scale=-10.0, keys=[key])
+        self.assertEqual(vfx.curve_value(curve, 0.0, 0.25, 0.75), (15.0, 25.0, 35.0))
+        self.assertEqual(vfx.curve_value(dict(curve, keys=[dict(key, mode=2.0)]), 0.0, 0.25, 0.75), (25.0, 35.0, 45.0))
+        coin = dict(curve, keys=[dict(key, mode=3.0)])
+        self.assertEqual(vfx.curve_value(coin, 0.0, 0.5, 0.9), (10.0, 20.0, 30.0))
+        self.assertEqual(vfx.curve_value(coin, 0.0, 0.6, 0.0), (30.0, 40.0, 50.0))
+        self.assertAlmostEqual(vfx.curve_time(0.4, 3.0, 0.9), 0.2)
+        self.assertEqual(vfx.curve_time(-2.0, 0.25, 0.9), 0.5)
+        self.assertEqual(vfx.curve_time(-2.0, 3.0, 0.9), 1.0)
+        self.assertEqual(vfx.curve_time(0.0, 3.0, 0.9), 0.9)
+        self.assertEqual(vfx.curve_time(0.0, 3.0, 1.5), 1.0)
 
     def test_broken_curve_chain_fails(self):
         data, _ids = effect()
@@ -163,17 +184,73 @@ class EffectMeshTest(unittest.TestCase):
         self.assertEqual(rshaders.object_words(reflection), neutral)
         self.assertEqual(rshaders.object_text('m_ColorRGFp16', (rshaders.half_pair(0.0, 6.5),)), '(0, 6.5)')
 
-    def test_particle_still_quads(self):
-        from nwo.games.rcra import effects
+    def test_emitter_fields_and_names(self):
         data, _ids = effect()
         decoded = vfx.decode_effect(data)
-        node = decoded['nodes'][1]                     # MultiQuads on the emitter; its slots all name curve 1 or 0
-        still = effects.particle_still(decoded, node)  # rate = life = speed = curve 1 at r 0.5: 0.75
-        self.assertEqual(len(still['particles']), 1)
-        mesh = effects.quad_mesh(still)
-        self.assertEqual((len(mesh['positions']), len(mesh['triangles'])), (4, 2))
-        self.assertEqual(len(set(mesh['positions'][:, 2].tolist())), 1)      # flat in the local XY plane
-        self.assertEqual(sorted(effects.quad_colour(decoded, node)), ['TEXCOORD4.%s' % c for c in 'wxyz'])
+        emitter = decoded['emitters'][0]
+        self.assertEqual(len(set(vfx.EMITTER_CURVES)), 20)
+        self.assertEqual((emitter['curves']['speed'], emitter['curves']['velocity']), ((1, 0), (1, 0)))
+        self.assertEqual((emitter['gravity'], emitter['lifetime'], emitter['shape'], emitter['space']), (0.0, 0.0, 0, 0))
+        self.assertEqual(decoded['shapes'], [])
+
+    def test_particle_replay(self):
+        """Rate 20 per second, life 0.5 s, speed 2 along +Z: at age 0.5 about ten particles, each 2 x its age along the
+        emitter axis; gravity pulls along world -Y."""
+        from nwo.games.rcra import particles
+        constant = [dict(hash=0, scale=1.0, keys=[dict(base=(v, v, v), time=0.0, range=(0, 0, 0), mode=1.0)])
+                    for v in (0.0, 1.0, 20.0, 0.5, 2.0)]
+        slots = dict.fromkeys(vfx.EMITTER_CURVES, 1)
+        slots.update(rate=2, life=3, speed=4, burst=0, per_metre=0, gap=0, emitter_rotation=0, emitter_position=0,
+                     follow=0, acceleration=0, turbulence=0, custom=0)
+        emitter = dict(index=0, rotation=(1, 0, 0, 0, 1, 0, 0, 0, 1), position=(0.0, 0.0, 0.0),
+                       curves={k: (v, 0) for k, v in slots.items()}, rates=dict.fromkeys(vfx.EMITTER_CURVES, 0.0),
+                       accel_direction=(0.0, 0.0, 0.0), gravity=0.0, drag=0.0, lifetime=0.0, rotation_range=(0, 0, 0),
+                       rotation_base=(0, 0, 0), shape=0, max_alive=8192)
+        effect = dict(curves=constant, shapes=[])
+        self.assertEqual(particles.still_age(effect, emitter), 0.5)
+        live, notes = particles.simulate(effect, emitter, np.eye(3))
+        self.assertEqual(notes, [])
+        self.assertIn(len(live), (9, 10, 11))
+        for p in live:
+            self.assertAlmostEqual(p['position'][2], 2.0 * p['age'], delta=2 * particles.STEP * 2.0)
+            self.assertAlmostEqual(p['t'], p['age'] / 0.5)
+        falling, _ = particles.simulate(effect, dict(emitter, gravity=9.8), np.eye(3))
+        oldest = max(falling, key=lambda p: p['age'])
+        self.assertLess(oldest['position'][1], -0.5 * 9.8 * oldest['age'] ** 2 * 0.8)
+
+    def test_quads_face_the_view_or_lie_flat(self):
+        from nwo.games.rcra import effects
+        quads = [dict(centre=(0.0, 1.0, 2.0), size=(2.0, 1.0), angle=0.0)]
+        flat = effects.quad_mesh(quads, 'local')
+        self.assertEqual((len(flat['positions']), len(flat['triangles'])), (4, 2))
+        self.assertEqual(set(flat['positions'][:, 2].tolist()), {2.0})        # in the local XY plane
+        self.assertNotIn('billboard', flat)
+        facing = effects.quad_mesh(quads, 'camera')
+        np.testing.assert_allclose(facing['positions'], [(0.0, 1.0, 2.0)] * 4)
+        np.testing.assert_allclose(facing['billboard'], [(-1, -0.5, 0, 1), (1, -0.5, 0, 1), (1, 0.5, 0, 1), (-1, 0.5, 0, 1)])
+        self.assertEqual(effects.quad_mesh(quads, 'billboard')['billboard'][0, 3], 2.0)
+        values = dict(colour=np.array([0.0, 2.0, 4.0]), alpha=0.5, alpha_test=0.1, custom=np.array([1.0, 2.0, 3.0]), t=0.25)
+        bound = effects.quad_interpolants(values)
+        self.assertEqual((bound['TEXCOORD4.y'], bound['TEXCOORD4.w'], bound['TEXCOORD.w'], bound['TEXCOORD.z']),
+                         (2.0, 1.0, 0.5, 0.1))
+        self.assertEqual((bound['TEXCOORD6.y'], bound['TEXCOORD7.z']), (0.25, 3.0))
+
+    def test_facing_model_keeps_its_offsets(self):
+        from nwo.games.rcra import effects
+        plane = dict(positions=np.array([[-0.5, -0.5, 0], [0.5, 0.5, 0]], float), normals=np.array([[0, 0, 1]] * 2, float),
+                     tangents=np.array([[1, 0, 0]] * 2, float))
+        mesh = effects.facing_mesh(plane, (0, 3, 0), np.diag((2.0, 2.0, 1.0)), 'billboard')
+        np.testing.assert_allclose(mesh['positions'], [(0, 3, 0)] * 2)
+        np.testing.assert_allclose(mesh['billboard'], [(-1, -1, 0, 2), (1, 1, 0, 2)])
+        np.testing.assert_allclose(mesh['normals'], [(0, 0, 1)] * 2)
+
+    def test_light_values(self):
+        from nwo.games.rcra import effects
+        light = effects.light_values(dict(colour=np.array([0.0, 0.5, 1.0]), size=np.array([2.0, 1.0, 1.0]), alpha=0.5), 1)
+        y = 0.7152 * 0.5 + 0.0722
+        np.testing.assert_allclose(light['colour'], (0.0, 0.5 / y, 1.0 / y))
+        self.assertAlmostEqual(light['intensity'], 2.0 * np.sqrt(1.25) * 0.5)
+        self.assertEqual(effects.light_values(dict(colour=np.ones(3), size=np.ones(3), alpha=1.0), 0)['intensity'], 0.0)
 
     def test_mesh_is_placed_and_weighted_to_the_joint(self):
         from nwo.games.rcra import effects
@@ -251,25 +328,34 @@ class VendorEffectsTest(unittest.TestCase):
         key = next(k for k in self.source.resolve(path) if self.source.entries[k]['type'] == 'model')
         decoded, _data = rcra_game.decode_model(self.source, key, path, True)
         extra = [m for m in decoded['meshes'] if m['index'] >= decoded['mesh_record_count']]
-        self.assertEqual(len(extra), 2)
-        logo, rings = extra
-        self.assertTrue(rings['material']['path'].endswith('enm_neo_nefarious_swarmer_thrust_ring.material'))
-        self.assertEqual(len(rings['positions']), 20)                         # 5 particle quads
+        by_name = {}
+        for mesh in extra:
+            by_name.setdefault(mesh['material']['path'].rsplit('/', 1)[-1], []).append(mesh)
+        logo, = by_name['npc_weapon_vendor_holo_logo.material']
+        rings, = by_name['enm_neo_nefarious_swarmer_thrust_ring.material']
+        self.assertEqual(len(rings['positions']), 20)                         # 5 particle quads, kLocal: stored flat
+        self.assertIsNone(rings.get('billboard'))
         self.assertEqual(set(rings['skin_joint_array'][:, 0].tolist()), {0})   # igLoc_hover's joint
-        self.assertTrue(logo['material']['path'].endswith('npc_weapon_vendor_holo_logo.material'))
         self.assertEqual(set(logo['skin_joint_array'][:, 0].tolist()), {13})   # igLoc_projection_vfx's joint
         self.assertGreater(np.asarray(logo['positions'])[:, 1].min(), 2.0)     # above the head
+        self.assertEqual(set(np.asarray(logo['billboard'])[:, 3].tolist()), {2.0})   # kBillboard: faces the view
+        smoke, = by_name['smk_quad_thn_01_lit.material']
+        self.assertEqual(set(np.asarray(smoke['billboard'])[:, 3].tolist()), {1.0})  # kCamera particles
+        self.assertEqual(len(by_name['gbl_hologram_source_rays_cone.material']), 2)   # MultiModels: one per particle
         for look in decoded['looks']:
             self.assertTrue(all(logo['index'] in level['meshes'] for level in look['lods'] if level['count']))
         rows = {r['effect'].rsplit('/', 1)[-1]: r for r in decoded['effects']}
         self.assertEqual(rows['npc_weapon_vendor_holo_logo.visualeffect']['drawn'], ['1 SingleModel'])
-        self.assertEqual(rows['weapons_vendor_hover_01.visualeffect']['drawn'], ['0 MultiQuads'])
+        self.assertEqual(rows['npc_weapon_vendor_holo_logo.visualeffect']['lights'][0]['type'], 'spot')
+        self.assertEqual(rows['npc_weapon_vendor_holo_logo_projector.visualeffect']['drawn'],
+                         ['0 SingleQuad', '1 MultiModels', '2 MultiQuads'])
+        self.assertIn('0 MultiQuads', rows['weapons_vendor_hover_01.visualeffect']['drawn'])
         entry = rmat.material_textures(self.source, [logo['material']], {})[logo['material']['index']]
         self.assertEqual(entry['forward']['kind'], rmat.TRANSLATED_KIND)
         self.assertIn('m_ColorRGFp16 (0, 6.52)', entry['forward']['limitation'])
         export, _data = rcra_game.decode_model(self.source, key, path, False)
         self.assertNotIn('effects', export)                       # the export decode leaves effects out
-        self.assertEqual(len(export['meshes']), len(decoded['meshes']) - 2)
+        self.assertEqual(len(export['meshes']), len(decoded['meshes']) - len(extra))
 
 
 if __name__ == '__main__':
