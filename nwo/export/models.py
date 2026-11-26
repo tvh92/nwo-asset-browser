@@ -846,7 +846,7 @@ class ModelExporter:
         ``AnimationLibrary.clip_notes``, which marks copies, additive layers and clips that do not play. With
         ``seconds`` as well, (labels, notes, lengths): ``AnimationLibrary.clip_seconds``."""
         empty = ([], [], []) if notes and seconds else ([], []) if notes else []
-        gltf_based = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd'))
+        gltf_based = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd', 'blend'))   # Blender imports the GLB
         if options.animations == 'none' or not (options.skeleton and gltf_based):
             return empty
         index_root = self.animation_index()
@@ -887,7 +887,7 @@ class ModelExporter:
             raise ValueError(f"{', '.join(FORMATS[f][1] for f in needs_blender)} needs Blender: set its path in Options")
         self.log(f'Decoding {source_path}')
         index_root = self.animation_index()
-        gltf_based = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd'))
+        gltf_based = any(f in options.formats for f in ('glb', 'gltf', 'fbx', 'usd', 'blend'))   # Blender imports the GLB
         load_animation = options.animations != 'none' and options.skeleton and gltf_based   # OBJ is the static rest pose only
         cutscenes = (options.cinematic or options.cinematic_only) and load_animation
         animset_root = index_root if load_animation and not options.cinematic_only else None

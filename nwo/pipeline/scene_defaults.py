@@ -40,9 +40,9 @@ def game_tonemap_stops(settings: Dict[str, Any]) -> float:
 REGION_PADDING_LONG = 0.10
 REGION_PADDING_SHORT = 0.07
 REGION_PADDING_SIDE = 0.25
-# Build camera: the exact orientation of the hand-framed reference npc_grimroth.blend (Euler XYZ, degrees).
-# Every pipeline build keeps this angle and only dollies the camera along its view axis.
-CAMERA_EULER_DEGREES = (77.90851178661542, -1.7045135013369456e-05, 21.765396705411746)
+# Build camera (Euler XYZ, degrees): a three-quarter view from the model's front right, 45 degrees round from the
+# front and 10 degrees down. Every build keeps this angle and only dollies the camera along its view axis.
+CAMERA_EULER_DEGREES = (80.0, 0.0, 45.0)
 
 
 def load_shared_lighting(path: Optional[Any] = None) -> Dict[str, Any]:
