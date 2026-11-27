@@ -20,9 +20,10 @@ O moves smoothly with a: a form that subtracts the display of the carried light,
 grain, since the display is steepest near black. And a is noisy over an additive surface: each Cycles sample either
 passes through it or continues from its lit closure, which ends the transparent path, so the film's alpha there is a
 binomial estimate of a small mean (0.017 +- 0.018 per pixel at 128 samples over the wasp's wings), and Cycles' denoiser
-leaves alpha alone. Where both the alpha's local mean (a Gaussian of SOFT_PIXELS) and the pixel's own alpha are below
-SOFT_BELOW, that mean is used for a; it eases back to the pixel's own alpha as the larger of the two reaches SOFT_ABOVE,
-so pixels with real coverage, thin features included, keep it exactly.
+leaves alpha alone. Where the alpha's local mean (a Gaussian of SOFT_PIXELS) is below SOFT_BELOW and the pixel is lit
+past its coverage (straight colour max(C) / a at least W), that mean is used for a. It eases back to the pixel's own
+alpha as the mean reaches SOFT_ABOVE or the straight colour falls to W / 2, so covered pixels, thin features included,
+keep their alpha exactly.
 
 W is the exposed grey whose display reaches COVERED_DISPLAY of display white: brighter straight colour is past what the
 display shows anyway, so the rest is light no coverage carries. Opaque pixels (a = 1) and pixels whose straight colour
@@ -110,18 +111,24 @@ def _coverage(N, L, colour, alpha, gain, limit, display):
     """The coverage nodes (module docstring) on premultiplied ``colour`` (three sockets) and ``alpha``; ``gain`` the
     exposure multiplier (socket or float) that brings C to the units of ``limit`` (W); ``display(rgb, alpha) -> rgb``
     builds the premultiplied display of a colour. Returns (rgb sockets O, alpha socket a')."""
+    peak = _math(N, L, 'MAXIMUM', _math(N, L, 'MAXIMUM', colour[0], colour[1]), colour[2])
+    peak = _math(N, L, 'MAXIMUM', _math(N, L, 'MULTIPLY', peak, gain), 1e-30)
     blur = N.new('CompositorNodeBlur')
     blur.inputs['Size'].default_value = (SOFT_PIXELS, SOFT_PIXELS)
     L.new(_combine(N, L, [alpha, alpha, alpha], 1.0), blur.inputs['Image'])
     mean = _separate(N, L, blur.outputs[0])[0]
-    level = _math(N, L, 'MAXIMUM', mean, alpha)   # thin features keep their own coverage: only faint pixels soften
-    weight = _math(N, L, 'DIVIDE', _math(N, L, 'SUBTRACT', SOFT_ABOVE, level), SOFT_ABOVE - SOFT_BELOW, clamp=True)
+    faint = _math(N, L, 'DIVIDE', _math(N, L, 'SUBTRACT', SOFT_ABOVE, mean), SOFT_ABOVE - SOFT_BELOW, clamp=True)
+    # straight colour / W: only pixels lit past their coverage soften (2 r - 1 from r = 1/2 to 1); covered pixels,
+    # thin features included, keep their alpha
+    ratio = _math(N, L, 'DIVIDE', peak, _math(N, L, 'MAXIMUM', _math(N, L, 'MULTIPLY', alpha, limit), 1e-30))
+    lit = _math(N, L, 'MULTIPLY_ADD', ratio, 2.0)
+    lit.node.inputs[2].default_value = -1.0
+    lit.node.use_clamp = True
+    weight = _math(N, L, 'MULTIPLY', faint, lit)
     soft = _math(N, L, 'MULTIPLY_ADD', _math(N, L, 'SUBTRACT', mean, alpha), weight)   # a + (mean - a) weight
     L.new(alpha, soft.node.inputs[2])
     alpha = soft
     covered = display(colour, alpha)                                    # N
-    peak = _math(N, L, 'MAXIMUM', _math(N, L, 'MAXIMUM', colour[0], colour[1]), colour[2])
-    peak = _math(N, L, 'MAXIMUM', _math(N, L, 'MULTIPLY', peak, gain), 1e-30)
     past = _math(N, L, 'MAXIMUM', _math(N, L, 'SUBTRACT', 1.0, _math(N, L, 'DIVIDE', _math(N, L, 'MULTIPLY', alpha, limit),
                                                                      peak)), 0.0)
     shown = display([_math(N, L, 'MULTIPLY', c, past) for c in colour], 1.0)   # disp(E)
