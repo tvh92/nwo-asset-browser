@@ -116,6 +116,8 @@ The default Action plays with Space and renders with F12. For clip selection, ru
 - **Load 24 clips from selected in order (fast)**: builds a temporary NLA track (`Clip range | temporary overview`) holding 24 overview strips; every other control removes it. Blender evaluates the channel domain of every unmuted strip each frame, so the full overview of a 520-clip library costs about 0.12 s per frame.
 - **Jump to selected boundary**, **Restore original rest pose**, play/pause, frame, and render current frame.
 
+A portable `.blend` export (Rift Apart, or any model through Extract selected) has the same overview and a panel of the same shape (`nwo/export/blend_controls.py`, [viewer](viewer.md#portable-export-extract-selected)); it registers when the file opens.
+
 The panel and catalog travel inside the blend: no add-on, script path or preference change is needed. Plain Action Editor selection skips a model's variant callback and clip timing, so use the panel.
 
 ### Python usage

@@ -19,6 +19,10 @@ through the game's display transform, metered from the level's probe (nwo.export
 When a translated material is additive, the display transform runs in the compositor and carries additive light over the
 transparent film as coverage (nwo.export.rcra_coverage), so a PNG keeps it.
 
+``--clips clips.json`` (the GLB's clips in animation order: name, kind, fps, frames) lays the clips out in the .blend as
+the research pipeline does: each clip on its own samples, one sequential NLA track with a marker per clip and the
+Animations panel (nwo.export.blend_animation, blend_controls). FBX and USD keep the importer's timing.
+
 Factory settings, nothing saved to the user's preferences. The .blend gets the repository's
 plain scene/render defaults (nwo.pipeline.scene_defaults.apply_new_scene_defaults, without the HDRI world or OptiX GPU setup) and packs its images.
 """
@@ -39,6 +43,7 @@ args.add_argument('--usd')
 args.add_argument('--blend')
 args.add_argument('--scene', action='store_true')
 args.add_argument('--atmosphere')   # with --scene: a Rift Apart atmosphere bake (.npz) replaces the review lighting
+args.add_argument('--clips')   # the GLB's clips (name, kind, fps, frames), laid out in the .blend by nwo.export.blend_animation
 args = args.parse_args(sys.argv[sys.argv.index('--') + 1:])
 
 if args.validate:
@@ -49,6 +54,9 @@ if args.validate:
     if 'shared_lighting' in bpy.context.scene:
         from nwo.pipeline.scene_defaults import check_shared_lighting
         problems += check_shared_lighting(bpy.context.scene)
+    from nwo.export import blend_animation
+    if blend_animation.CATALOG in bpy.data.texts:
+        problems += blend_animation.check(bpy.context.scene)
     if 'rcra_atmosphere' in bpy.context.scene:
         from nwo.export.rcra_atmosphere_blender import check as check_atmosphere
         problems += check_atmosphere(bpy.context.scene)
@@ -65,6 +73,8 @@ if args.validate:
 bpy.ops.wm.read_factory_settings(use_empty=True)
 # No bone-display Icosphere: FBX/USD would export it as a mesh.
 bpy.ops.import_scene.gltf(filepath=args.glb, disable_bone_shape=True)
+# The importer placed each key at time * this rate (its own expression); the .blend's clips are retimed from it.
+import_fps = bpy.context.scene.render.fps * bpy.context.scene.render.fps_base
 # One collection per model (named after it), so a combined file's models can be shown or hidden as a group.
 from nwo.export.model_collections import group_by_model
 group_by_model(bpy.context.scene)
@@ -119,6 +129,16 @@ if args.blend:
         if obj.type == 'ARMATURE':
             obj.hide_set(True)
             obj.hide_render = True
+    if args.clips and actions:
+        # The clips as the research pipeline lays them out: one sequential NLA track, markers and the Animations panel;
+        # the file opens on that overview (frame 1: the first clip's first sample, which the camera frames below).
+        from nwo.export import blend_animation
+        import json
+        catalog = blend_animation.setup(scene, json.loads(Path(args.clips).read_text(encoding='utf-8')), import_fps)
+        if catalog:
+            print('SCENE', '%d clips on the sequential timeline at %g fps%s' % (
+                len(catalog['clips']), catalog['overview_fps'],
+                ', not found: ' + ', '.join(catalog['left_out']) if catalog['left_out'] else ''), flush=True)
     if args.scene:
         # One camera at the reference angle, dollied so the visible meshes (at the current frame) fill the frame,
         # then the Render Region around them, as the research pipeline frames its scenes.

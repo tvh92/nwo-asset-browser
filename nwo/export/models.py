@@ -1119,7 +1119,9 @@ class ModelExporter:
                 notes.append(atmosphere['limitations'])
             written += self._blender_convert(folder, stem, doc, blob, needs_blender, options.blender,
                                              materials_json=translated[0] if translated else None,
-                                             scene=options.scene, atmosphere=atmosphere)
+                                             scene=options.scene, atmosphere=atmosphere,
+                                             clips=[dict(name=c['name'], kind=c['kind'], fps=c['fps'], frames=len(c['tracks']))
+                                                    for c in clips_out])
         if options.source_textures:
             paths = sorted({p for m in maps.values() for p in m['sources'].values()})
             rows = game.export_textures(archive, paths, tex_dir / 'game_dds', {'dds'})
@@ -1473,11 +1475,12 @@ class ModelExporter:
         return dict(env, record=record, limitations=A.LIMITATIONS, colour_correction=lut)
 
     def _blender_convert(self, folder, stem, doc, blob, formats, blender, materials_json=None, scene=False,
-                         atmosphere=None):
+                         atmosphere=None, clips=()):
         """GLB -> FBX/USD/.blend in a background Blender with factory settings and a private user folder; with
         ``materials_json`` the game's translated materials replace the imported ones; with ``scene`` the .blend gets
         the review lighting, camera and Render Region (blender_convert.py --scene), or with ``atmosphere`` (an
-        _atmosphere_bake) a Rift Apart atmosphere's lighting and the game's display."""
+        _atmosphere_bake) a Rift Apart atmosphere's lighting and the game's display. ``clips`` (the GLB's animations in
+        order: name, kind, fps, frames) are laid out in the .blend as the research pipeline does (blend_animation)."""
         with tempfile.TemporaryDirectory(prefix='rcps4-export-') as tmp:
             glb = Path(tmp) / f'{stem}.glb'
             tag_model(doc, stem)
@@ -1503,6 +1506,10 @@ class ModelExporter:
                              colour_correction=np.zeros(0) if atmosphere['colour_correction'] is None
                              else atmosphere['colour_correction'].astype(np.float32))
                     command += ['--atmosphere', str(bake)]
+            if clips and 'blend' in finals:
+                clip_list = Path(tmp) / 'clips.json'
+                clip_list.write_text(json.dumps(list(clips)), encoding='utf-8')
+                command += ['--clips', str(clip_list)]
             env = os.environ.copy()
             env['BLENDER_USER_RESOURCES'] = str(Path(tmp) / 'user')
             env['PYTHONPATH'] = str(Path(__file__).resolve().parents[2]) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
