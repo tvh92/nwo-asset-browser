@@ -16,6 +16,8 @@ one camera at the reference angle dollied so the model fills the frame, with the
 (scene_defaults.frame_camera_zoom, fit_render_region). Without it the .blend gets only the plain defaults below.
 With ``--atmosphere bake.npz`` as well, a Rift Apart atmosphere replaces the review lighting and the scene shows
 through the game's display transform, metered from the level's probe (nwo.export.rcra_atmosphere_blender).
+When a translated material is additive, the display transform runs in the compositor and carries additive light over the
+transparent film as coverage (nwo.export.rcra_coverage), so a PNG keeps it.
 
 Factory settings, nothing saved to the user's preferences. The .blend gets the repository's
 plain scene/render defaults (nwo.pipeline.scene_defaults.apply_new_scene_defaults, without the HDRI world or OptiX GPU setup) and packs its images.
@@ -50,6 +52,9 @@ if args.validate:
     if 'rcra_atmosphere' in bpy.context.scene:
         from nwo.export.rcra_atmosphere_blender import check as check_atmosphere
         problems += check_atmosphere(bpy.context.scene)
+        if 'rcra_coverage' in bpy.context.scene:
+            from nwo.export.rcra_coverage import check_atmosphere as check_coverage
+            problems += check_coverage(bpy.context.scene)
     for problem in problems:
         print('PROBLEM', problem, flush=True)
     if problems:
@@ -68,6 +73,7 @@ for action in actions:
     action.use_fake_user = True   # every clip stays in the file, not only the active one
 
 entries = None
+additive = False   # a translated additive material: the scene carries its light as coverage (nwo.export.rcra_coverage)
 if args.materials:
     import json
     from nwo.export.rcra_blender import TANGENT_FRAME, apply_recipe, build_fur_shells, store_tangent_frame
@@ -88,6 +94,7 @@ if args.materials:
         uv_maps = [layer.name for layer in mesh.uv_layers] if mesh is not None else []
         colour = mesh.color_attributes[0].name if mesh is not None and len(mesh.color_attributes) else None
         apply_recipe(material, entry, uv_maps, colour, tangent=mesh is not None and TANGENT_FRAME in mesh.attributes)
+        additive = additive or entry.get('blend') == 'additive'
         print('TRANSLATED', name, flush=True)
 
 if args.fbx:
@@ -142,12 +149,24 @@ if args.blend:
             bpy.ops.file.pack_all()
             display = rcra_atmosphere_blender.apply_display(scene, args.atmosphere)
             fill = rcra_atmosphere_blender.apply_fill(scene)   # a presentation light, after the metering
+            if additive:
+                import numpy as np
+                from nwo.export import rcra_coverage
+                with np.load(args.atmosphere) as bake:
+                    lut = bake['colour_correction'] if bake['colour_correction'].size else None
+                coverage = rcra_coverage.apply_atmosphere(scene, lut)
+                print('SCENE', 'additive light as coverage, W %.4g' % coverage['limit'], flush=True)
             print('SCENE', 'atmosphere %s, metered %.2f EV, exposure %.4f, fill %s, camera and render region'
                   % (lighting['path'], display['measured_ev'], display['exposure'],
                      '%.3f' % fill['energy'] if fill else 'none'), flush=True)
         else:
             scene_defaults.pack_scene_images(scene)   # packs the HDRI too, checked against the shared EXR
             print('SCENE', 'review lighting, camera and render region', flush=True)
+            if additive:
+                from nwo.export import rcra_coverage
+                coverage = rcra_coverage.apply_review(scene)
+                print('SCENE', 'additive light as coverage, W %.4g' % coverage['limit'] if coverage else
+                      'additive light not carried as coverage: the view is not one the compositor reproduces', flush=True)
     else:
         bpy.ops.file.pack_all()
     # relative_remap off: the default save turns the HDRI's absolute path relative to the temp build folder, which

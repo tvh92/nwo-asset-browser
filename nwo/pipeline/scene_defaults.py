@@ -215,6 +215,9 @@ def check_shared_lighting(scene: Any, expected: Optional[Dict[str, Any]] = None)
                 node.node_tree.get("rc_grade") != "identity" or
                 abs(node.inputs["Exposure (stops)"].default_value - game_tonemap_stops(expected)) > 1e-4):
             problems.append("colour_management.game_tonemap")
+    elif hasattr(scene, "get") and scene.get("rcra_coverage"):   # Rift Apart additive light: the view is in the compositor
+        from nwo.export.rcra_coverage import check_review
+        problems += check_review(scene, expected)
     elif (view.view_transform != expected["view_transform"] or view.look != expected["look"] or
             abs(view.exposure - float(expected["exposure"])) > 1e-5 or abs(view.gamma - float(expected["gamma"])) > 1e-5 or
             bool(scene.render.use_compositing) != bool(expected["use_compositing"])):
