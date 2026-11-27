@@ -5,20 +5,20 @@ Blender only (blender_convert.py --scene --atmosphere bake.npz).
 atmosphere's probe (equirectangular, Blender directions, world strength 1, no sun cap) and the review HDRI sun lamp
 becomes the key light (irradiance pi x KeyLightColor x KeyLightIntensity, visible in glossy rays: the game's key light
 has a specular term) that casts no shadows (a presentation choice: the game's gallery viewer shows models without
-self-shadowing; the probe still occludes). ``apply_display`` meters a small render from the scene camera the way the game meters its frame
-(atmosphere.meter, adapted_log2), and shows the result through Rift Apart's display transform as compositor nodes: the
+self-shadowing; the probe still occludes). ``apply_display`` meters the environment alone the way the game meters its
+frame (atmosphere.meter_environment, adapted_log2: a level camera turned through a full circle, no model), so every model
+and camera in one atmosphere gets the same exposure, the viewer's, and shows the result through Rift Apart's display
+transform as compositor nodes: the
 exposure 0.18 / adapted luminance, then the game's own 32^3 ACES lookup (nwo.games.rcra.display) with the
 atmosphere's colour-correction LUT mixed in at weight 1 (one fully active atmosphere), sampled trilinearly at its log2
 coordinate, as CS_ToneMap does; the view transform is Raw, so Blender adds nothing after it.
-The metered exposure stays fixed: moving the camera does not re-meter (the group's Exposure input can be changed).
+The group's Exposure input can be changed by hand.
 ``apply_fill`` then adds a presentation light that is not the game's: a soft, neutral sun shining up from below at a
 third of the key light's strength (it is added after the metering, so it brightens the shot; its strength can be
 changed on the lamp).
 Not reproduced in the .blend: bloom, vignette and film grain. ``check`` validates a reopened file.
 """
 import json
-import os
-import tempfile
 
 import bpy
 import numpy as np
@@ -34,8 +34,6 @@ PROBE_IMAGE = 'Rift Apart atmosphere probe'
 GROUP_NAME = 'Rift Apart display (compositor)'
 TREE_NAME = 'Rift Apart display compositor'
 LOOKUP_IMAGE = 'Rift Apart display 3D lookup (tiled)'
-METER_EDGE = 512        # long edge of the metering render
-METER_SAMPLES = 32
 FILL_NAME = 'Presentation fill from below (not game lighting)'
 FILL_ROLE = 'presentation_fill_below'
 FILL_ANGLE = 1.5708     # a 90-degree disc: soft shading and shadows
@@ -95,46 +93,6 @@ def apply_lighting(scene, bake_path):
                   key_cast_shadow=False)
     scene['rcra_atmosphere'] = json.dumps(record, sort_keys=True)
     return record
-
-
-def _render_pixels(scene):
-    """Render the scene camera's full frame (no Render Region, opaque film, no compositor) small; (h, w, 4) float32."""
-    r = scene.render
-    saved = dict(percentage=r.resolution_percentage, transparent=r.film_transparent, border=r.use_border,
-                 crop=r.use_crop_to_border, compositing=r.use_compositing, path=r.filepath,
-                 fmt=r.image_settings.file_format, depth=r.image_settings.color_depth, mode=r.image_settings.color_mode,
-                 samples=scene.cycles.samples if scene.render.engine == 'CYCLES' else None)
-    folder = tempfile.mkdtemp(prefix='rcra-meter-')
-    path = os.path.join(folder, 'meter.exr')
-    try:
-        r.resolution_percentage = max(1, min(100, round(100 * METER_EDGE / max(r.resolution_x, r.resolution_y))))
-        r.film_transparent = False
-        r.use_border = r.use_crop_to_border = False
-        r.use_compositing = False
-        if saved['samples'] is not None:
-            scene.cycles.samples = METER_SAMPLES
-        r.image_settings.file_format, r.image_settings.color_depth, r.image_settings.color_mode = 'OPEN_EXR', '32', 'RGBA'
-        r.filepath = path
-        bpy.ops.render.render(write_still=True, scene=scene.name)
-        image = bpy.data.images.load(path)
-        try:
-            pixels = np.array(image.pixels[:], np.float32).reshape(image.size[1], image.size[0], 4)
-        finally:
-            bpy.data.images.remove(image)
-        return pixels
-    finally:
-        r.resolution_percentage, r.film_transparent = saved['percentage'], saved['transparent']
-        r.use_border, r.use_crop_to_border, r.use_compositing = saved['border'], saved['crop'], saved['compositing']
-        r.filepath = saved['path']
-        r.image_settings.file_format, r.image_settings.color_depth = saved['fmt'], saved['depth']
-        r.image_settings.color_mode = saved['mode']
-        if saved['samples'] is not None:
-            scene.cycles.samples = saved['samples']
-        try:
-            os.remove(path)
-            os.rmdir(folder)
-        except OSError:
-            pass
 
 
 def lookup_image(lut=None):
@@ -197,16 +155,13 @@ def build_group(lut=None):
     return group
 
 
-def apply_display(scene, bake_path=None):
-    """Meter the scene camera's frame, then install the display group with its exposure and the bake's
-    colour-correction LUT; returns the record stored in scene['rcra_display']."""
+def apply_display(scene, bake_path):
+    """Meter the bake's environment (atmosphere.meter_environment), then install the display group with its exposure
+    and the bake's colour-correction LUT; returns the record stored in scene['rcra_display']."""
     record = json.loads(scene['rcra_atmosphere'])
-    lut = None
-    if bake_path is not None:
-        with np.load(bake_path) as bake:
-            lut = bake['colour_correction'] if bake['colour_correction'].size else None
-    pixels = _render_pixels(scene)
-    measured = A.meter(pixels[..., :3])
+    with np.load(bake_path) as bake:
+        lut = bake['colour_correction'] if bake['colour_correction'].size else None
+        measured = A.meter_environment(bake['equirect'])
     adapted = A.adapted_log2(measured, record['anchor'], record['range'])
     exposure = A.exposure(adapted)
     group = build_group(lut)
@@ -230,7 +185,7 @@ def apply_display(scene, bake_path=None):
             if area.type == 'VIEW_3D':
                 area.spaces.active.shading.use_compositor = 'ALWAYS'
     display = dict(measured_ev=measured + A.EV_OFFSET, adapted_ev=adapted + A.EV_OFFSET, exposure=exposure,
-                   meter_size=list(pixels.shape[:2]), view='Rift Apart display (compositor)', view_transform='Raw',
+                   meter='environment alone: level camera turned through a full circle', view='Rift Apart display (compositor)', view_transform='Raw',
                    colour_correction=record.get('colour_correction'), colour_correction_weight=1.0 if lut is not None else 0.0)
     scene['rcra_display'] = json.dumps(display, sort_keys=True)
     return display

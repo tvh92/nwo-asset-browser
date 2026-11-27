@@ -63,6 +63,19 @@ class ExposureTests(unittest.TestCase):
         self.assertAlmostEqual(A.exposure(math.log2(0.18)), 1.0)
         self.assertAlmostEqual(A.exposure(math.log2(0.36)), 0.5)
 
+    def test_meter_environment_ignores_the_view(self):
+        self.assertAlmostEqual(A.meter_environment(np.full((32, 64, 3), 2.0)), 1.0)
+        # sky 4 above the horizon, ground 1 below: a level camera sees half of each, whichever way the world is turned
+        sky = np.ones((32, 64, 3))
+        sky[:16] = 4.0
+        self.assertAlmostEqual(A.meter_environment(sky), 1.0, places=1)
+        self.assertAlmostEqual(A.meter_environment(np.roll(sky, 23, axis=1)), A.meter_environment(sky), places=6)
+        # a bright patch in one direction counts once, not more for the side the camera faces
+        patch = np.ones((32, 64, 3))
+        patch[10:16, 0:8] = 64.0
+        turned = [A.meter_environment(np.roll(patch, k, axis=1)) for k in (0, 16, 40)]
+        self.assertLess(max(turned) - min(turned), 0.05)
+
 
 class CubeTests(unittest.TestCase):
     def test_each_axis_reads_its_d3d_face(self):

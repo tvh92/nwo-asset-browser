@@ -420,7 +420,7 @@ class AssetBrowser:
         atmosphere_label.pack(side='left')
         lighting_box.bind('<<ComboboxSelected>>',lambda _e:self._atmosphere_changed(),add='+')
         tip("The Rift Apart atmosphere that lights the model: atm_malinon_day, Corson V's Megalopolis by day. Its key light, "
-            "environment probe and colour-correction LUT, with the game's auto-exposure metered from the view. The environment is "
+            "environment probe and colour-correction LUT, with the game's auto-exposure metered from the environment without the model, so every model gets the same exposure. The environment is "
             "turned so the key light comes from the review sun's side. The Blender Scene export uses this atmosphere while it is the "
             'lighting. Not shown: the level around the model, its shadows, local lights and fog.',atmosphere_label)
         self.atmospheres_available=True

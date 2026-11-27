@@ -16,7 +16,10 @@ What the lighting is made of:
   in scene radiance. The viewer convolves it with the engine's probe program as it does the review HDRI.
 - **Exposure:** the game meters the frame (CS_AverageLumAccum: centre-weighted mean of log2 luminance) and soft-clamps
   the result to the atmosphere's AdaptationAnchor +- AdaptationRange (CS_AverageLumFinalize); the display exposes by
-  0.18 / adapted luminance; scene EV = log2 + 13. ``meter`` and ``adapted_log2`` port those programs.
+  0.18 / adapted luminance; scene EV = log2 + 13. ``meter`` and ``adapted_log2`` port those programs. The model
+  browser meters the environment without the model, from a level camera turned through a full circle
+  (``meter_environment``), so every model and camera in one atmosphere gets the same exposure: in the game the frame
+  is mostly the level, and metering a frame the model fills would brighten dark models and darken pale ones.
 
 The model has no place in the level, so the environment is turned about the vertical until the key light comes from the
 review lighting's sun azimuth (``environment``): the same side of the model is lit as under the review HDRI. That turn
@@ -57,6 +60,9 @@ MIDDLE_GREY = 0.18      # ToneMapCBuffer.m_AcesMiddleGray (the basic tone-map pr
 EV_OFFSET = 13.0        # displayed EV = log2(luminance) + 13 (RiftApart.exe 0x1412391e8)
 ADAPT_SLOPE = 3.749     # CS_AverageLumFinalize: slope 1 at the anchor
 LUMINANCE = np.array([0.2126, 0.7152, 0.0722])
+REFERENCE_FOV = 40.0    # meter_environment's level camera: vertical field of view (degrees), 3:2, 16 turns
+REFERENCE_ASPECT = 1.5
+REFERENCE_TURNS = 16
 PROBE_LEVEL = 1         # decode the probe's mip 1 (512 x 512 per face for the 1024 probes)
 VERSION = 2             # bump when the baked environment changes; it names the cache files
 LIMITATIONS = ('Atmosphere lighting: the level\'s key light and default env probe, with the game\'s auto-exposure. '
@@ -260,6 +266,28 @@ def meter(scene):
     return float((np.log2(lum) * weight).sum() / weight.sum())
 
 
+def meter_environment(equirect, turns=REFERENCE_TURNS, fov=REFERENCE_FOV, aspect=REFERENCE_ASPECT, rows=64):
+    """``meter`` of the environment alone, the same for every model and camera: the mean of the metered log2 luminance
+    of a level camera (``fov`` degrees high, ``aspect`` wide) turned through a full circle in ``turns`` steps.
+    ``equirect`` is (h, w, 3) radiance in Blender's equirectangular layout (rows top first, +Z up,
+    u = 0.5 - atan2(y, x) / 2 pi). A presentation choice: the game meters the level it shows, which a model has not."""
+    equirect = np.asarray(equirect, np.float64)
+    h, w = equirect.shape[:2]
+    cols = max(1, round(rows * aspect))
+    half = math.tan(math.radians(fov) / 2)
+    ys, xs = np.meshgrid(np.linspace(1, -1, rows) * half, np.linspace(-1, 1, cols) * half * aspect, indexing='ij')
+    total = 0.0
+    for k in range(turns):
+        a = 2 * math.pi * k / turns
+        forward, right = np.array([math.cos(a), math.sin(a), 0.0]), np.array([math.sin(a), -math.cos(a), 0.0])
+        rays = forward + xs[..., None] * right + ys[..., None] * np.array([0.0, 0.0, 1.0])
+        rays /= np.linalg.norm(rays, axis=-1, keepdims=True)
+        u = (0.5 - np.arctan2(rays[..., 1], rays[..., 0]) / (2 * math.pi)) % 1.0
+        v = np.arcsin(np.clip(rays[..., 2], -1, 1)) / math.pi + 0.5
+        total += meter(equirect[np.clip(((1 - v) * h).astype(int), 0, h - 1), np.clip((u * w).astype(int), 0, w - 1)])
+    return total / turns
+
+
 def adapted_log2(measured, anchor_ev, range_ev):
     """CS_AverageLumFinalize's soft clamp of the measured log2 luminance to (anchor - 13) +- range (EVs)."""
     a = anchor_ev - EV_OFFSET
@@ -274,4 +302,4 @@ def exposure(adapted):
 
 
 __all__ = ['DEFAULT', 'LIMITATIONS', 'adapted_log2', 'cube_sample', 'environment', 'exposure', 'key_direction',
-           'key_light', 'label', 'list_paths', 'meter', 'probe_blocks', 'probe_faces', 'read', 'read_lut']
+           'key_light', 'label', 'list_paths', 'meter', 'meter_environment', 'probe_blocks', 'probe_faces', 'read', 'read_lut']
