@@ -726,7 +726,15 @@ class _Emitter:
         if op == 'rcp':
             return self.math('DIVIDE', 1.0, a[0])
         if op == 'log2':
-            return self.math('LOGARITHM', a[0], 2.0)
+            # Blender's Logarithm is a safe log, 0 for x <= 0; D3D gives -inf at 0, so a pow(0, k) compiled as
+            # exp2(k log2 x) is 0, not 1. min(log, +-inf) keeps the log for x > 0 and is -inf otherwise (D3D: NaN below 0,
+            # which Cycles does not keep).
+            x = a[0]
+            if isinstance(x, float):
+                return math.log2(x) if x > 0 else -math.inf if x == 0 else math.nan
+            sign = self.math('MULTIPLY_ADD', self.math('GREATER_THAN', x, 0.0), 2.0, -1.0)
+            return self.math('MINIMUM', self.math('LOGARITHM', x, 2.0),
+                             self.math('MULTIPLY', sign, self.non_finite(math.inf)))
         if op == 'exp2':
             return self.math('POWER', 2.0, a[0])
         if op == 'ge':
