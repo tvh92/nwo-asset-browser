@@ -61,8 +61,8 @@ def atmosphere_maps(spec):
     """The "Game atmosphere" lighting maps of a Rift Apart atmosphere (``spec``: ModelViewport.set_atmosphere's): the
     environment_maps contract built from the atmosphere's probe and key light (nwo.games.rcra.atmosphere.environment,
     turned so the key comes from the review sun's side), plus 'residual' (the probe the Rift Apart ambient light is
-    prefiltered from) and 'atmosphere'. The exposure is the game's auto-exposure of the environment alone
-    (atmosphere.meter_environment, adapted_log2): the same for every model and camera in the atmosphere."""
+    prefiltered from) and 'atmosphere'. The exposure is the game's auto-exposure of the probe as captured
+    (atmosphere.environment's 'metered', adapted_log2): the same for every model and camera in the atmosphere."""
     import numpy as np
     from nwo.games.rcra import atmosphere as A
     from nwo.viewer import environment as E
@@ -73,7 +73,7 @@ def atmosphere_maps(spec):
     env = A.environment(archive, spec['path'], review['sun_direction'], width=1024, cache_dir=E.CACHE_DIR)
     equi = env['equirect']
     record = env['atmosphere']
-    adapted = A.adapted_log2(A.meter_environment(equi), record['anchor'], record['range'])
+    adapted = A.adapted_log2(env['metered'], record['anchor'], record['range'])
     lut = A.read_lut(archive, record['colour_correction']) if record.get('colour_correction') else None
     return dict(sh=E.sh_irradiance(equi), bands=E.prefiltered_bands(equi), sun_direction=env['sun_direction'],
                 colour_correction=lut,
@@ -417,7 +417,7 @@ class ModelViewport(_TkFrame):
     """Interactive fixed-pipeline preview for decoded source triangles."""
     LIGHTINGS = ("Viewer rig", "Shared HDRI", "Game atmosphere")   # nwo.viewer.environment.LIGHTINGS + atmospheres
     # The lightings that draw from lighting maps (SH, bands, sun). "Game atmosphere" is a Rift Apart atmosphere's key
-    # light and probe (nwo.games.rcra.atmosphere, set_atmosphere), exposed by the game's metering of the environment alone.
+    # light and probe (nwo.games.rcra.atmosphere, set_atmosphere), exposed by the game's metering of its probe.
     ENVIRONMENT_LIGHTINGS = ("Shared HDRI", "Game atmosphere")
     ATMOSPHERE_LIGHTING = "Game atmosphere"
     atmosphere = None   # {'path', 'archive': callable returning the open Rift Apart source} (set_atmosphere)
@@ -732,7 +732,7 @@ class ModelViewport(_TkFrame):
     def _environment_note(self, lighting, maps):
         """Status text shown with the lighting once its maps are ready, or None."""
         if lighting == self.ATMOSPHERE_LIGHTING and maps:
-            return f"{maps['hdri']}: exposure {2 ** maps['exposure']:.2f} (EV {maps['adapted_ev']:.1f}, metered without the model)"
+            return f"{maps['hdri']}: exposure {2 ** maps['exposure']:.2f} (EV {maps['adapted_ev']:.1f}, metered from the level probe)"
         return None
 
     def set_atmosphere(self, path, archive):

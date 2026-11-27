@@ -5,9 +5,9 @@ Blender only (blender_convert.py --scene --atmosphere bake.npz).
 atmosphere's probe (equirectangular, Blender directions, world strength 1, no sun cap) and the review HDRI sun lamp
 becomes the key light (irradiance pi x KeyLightColor x KeyLightIntensity, visible in glossy rays: the game's key light
 has a specular term) that casts no shadows (a presentation choice: the game's gallery viewer shows models without
-self-shadowing; the probe still occludes). ``apply_display`` meters the environment alone the way the game meters its
-frame (atmosphere.meter_environment, adapted_log2: a level camera turned through a full circle, no model), so every model
-and camera in one atmosphere gets the same exposure, the viewer's, and shows the result through Rift Apart's display
+self-shadowing; the probe still occludes). ``apply_display`` exposes by the game's metering of the probe as captured
+(the record's 'metered': atmosphere.meter_environment, a level camera turned through a full circle, no model;
+adapted_log2), so every model and camera in one atmosphere gets the same exposure, the viewer's, and shows the result through Rift Apart's display
 transform as compositor nodes: the
 exposure 0.18 / adapted luminance, then the game's own 32^3 ACES lookup (nwo.games.rcra.display) with the
 atmosphere's colour-correction LUT mixed in at weight 1 (one fully active atmosphere), sampled trilinearly at its log2
@@ -156,12 +156,12 @@ def build_group(lut=None):
 
 
 def apply_display(scene, bake_path):
-    """Meter the bake's environment (atmosphere.meter_environment), then install the display group with its exposure
-    and the bake's colour-correction LUT; returns the record stored in scene['rcra_display']."""
+    """Expose by the record's metered probe (atmosphere.environment's 'metered'), then install the display group with
+    its exposure and the bake's colour-correction LUT; returns the record stored in scene['rcra_display']."""
     record = json.loads(scene['rcra_atmosphere'])
     with np.load(bake_path) as bake:
         lut = bake['colour_correction'] if bake['colour_correction'].size else None
-        measured = A.meter_environment(bake['equirect'])
+    measured = record['metered']
     adapted = A.adapted_log2(measured, record['anchor'], record['range'])
     exposure = A.exposure(adapted)
     group = build_group(lut)
@@ -185,7 +185,7 @@ def apply_display(scene, bake_path):
             if area.type == 'VIEW_3D':
                 area.spaces.active.shading.use_compositor = 'ALWAYS'
     display = dict(measured_ev=measured + A.EV_OFFSET, adapted_ev=adapted + A.EV_OFFSET, exposure=exposure,
-                   meter='environment alone: level camera turned through a full circle', view='Rift Apart display (compositor)', view_transform='Raw',
+                   meter='level probe as captured: level camera turned through a full circle', view='Rift Apart display (compositor)', view_transform='Raw',
                    colour_correction=record.get('colour_correction'), colour_correction_weight=1.0 if lut is not None else 0.0)
     scene['rcra_display'] = json.dumps(display, sort_keys=True)
     return display

@@ -15,7 +15,7 @@ lighting with its HDRI world (assets/lighting/shared_lighting.json, packed), the
 one camera at the reference angle dollied so the model fills the frame, with the Render Region cropped around it
 (scene_defaults.frame_camera_zoom, fit_render_region). Without it the .blend gets only the plain defaults below.
 With ``--atmosphere bake.npz`` as well, a Rift Apart atmosphere replaces the review lighting and the scene shows
-through the game's display transform, metered from the environment alone (nwo.export.rcra_atmosphere_blender).
+through the game's display transform, metered from the level's probe (nwo.export.rcra_atmosphere_blender).
 
 Factory settings, nothing saved to the user's preferences. The .blend gets the repository's
 plain scene/render defaults (nwo.pipeline.scene_defaults.apply_new_scene_defaults, without the HDRI world or OptiX GPU setup) and packs its images.
@@ -135,7 +135,7 @@ if args.blend:
                     area.spaces.active.lock_camera = True
                     area.spaces.active.region_3d.view_perspective = 'CAMERA'
         if args.atmosphere:
-            # A Rift Apart atmosphere instead of the review lighting, metered without the model and shown through the
+            # A Rift Apart atmosphere instead of the review lighting, metered from the level's probe and shown through the
             # game's display transform (nwo.export.rcra_atmosphere_blender).
             from nwo.export import rcra_atmosphere_blender
             lighting = rcra_atmosphere_blender.apply_lighting(scene, args.atmosphere)

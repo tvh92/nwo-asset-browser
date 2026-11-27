@@ -17,7 +17,8 @@ What the lighting is made of:
 - **Exposure:** the game meters the frame (CS_AverageLumAccum: centre-weighted mean of log2 luminance) and soft-clamps
   the result to the atmosphere's AdaptationAnchor +- AdaptationRange (CS_AverageLumFinalize); the display exposes by
   0.18 / adapted luminance; scene EV = log2 + 13. ``meter`` and ``adapted_log2`` port those programs. The model
-  browser meters the environment without the model, from a level camera turned through a full circle
+  browser meters the probe as the game captured it (the level seen from the probe, sunlit surfaces and sky; not the
+  light-grid world, which holds no direct sunlight), from a level camera turned through a full circle
   (``meter_environment``), so every model and camera in one atmosphere gets the same exposure: in the game the frame
   is mostly the level, and metering a frame the model fills would brighten dark models and darken pale ones.
 
@@ -230,7 +231,8 @@ def environment(source, path, sun_direction, width=2048, cache_dir=None):
 
     {'atmosphere': read(), 'equirect': (width / 2, width, 3) float32 probe radiance in Blender's equirectangular layout
     (nwo.viewer.environment.equirect_directions, rows top first), 'sun_direction': Blender unit vector towards the key,
-    'sun_irradiance': pi x LIGHT (RGB), 'turn_degrees', 'light_grid': light_grid.world's record, or None when the
+    'sun_irradiance': pi x LIGHT (RGB), 'turn_degrees', 'metered': meter_environment of the probe before the light
+    grid relights it (log2 luminance), 'light_grid': light_grid.world's record, or None when the
     probe's level has no light grid, 'sha256': of the equirect}. With a light grid the equirect is the probe relit by it."""
     from nwo.viewer.environment import equirect_directions
     atm = read(source, path)
@@ -245,12 +247,13 @@ def environment(source, path, sun_direction, width=2048, cache_dir=None):
     faces = probe_faces(source, atm['probe'], cache_dir=cache_dir)
     dirs = equirect_directions(width, width // 2).astype(np.float64)
     equi = cube_sample(faces, turn_about_up(blender_to_game(dirs), turn)).astype(np.float32)
+    metered = meter_environment(equi)   # the level as the probe saw it, sunlight included
     from nwo.games.rcra import light_grid
     cell = light_grid.street_cell(source, atm['probe'], cache_dir=cache_dir)
     grid = None
     if cell is not None:
         equi, grid = light_grid.world(cell, equi, turn)
-    return dict(atmosphere=atm, equirect=equi, light_grid=grid, sun_direction=(sun_b / np.linalg.norm(sun_b)).astype(np.float32),
+    return dict(atmosphere=atm, equirect=equi, light_grid=grid, metered=metered, sun_direction=(sun_b / np.linalg.norm(sun_b)).astype(np.float32),
                 sun_irradiance=(math.pi * key_light(atm)).astype(np.float32), turn_degrees=math.degrees(turn),
                 sha256=hashlib.sha256(equi.tobytes()).hexdigest())
 
