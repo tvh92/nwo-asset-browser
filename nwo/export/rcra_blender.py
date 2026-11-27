@@ -50,11 +50,13 @@ Class 3 (hair) takes the class-0 group (labelled by the export).
 Blended materials (entry ``blend`` additive, blended or modulate) carry a forward recipe: the colour and alpha the game
 blends, with every engine light source zero, and a background tint B where the program passes the scene behind it
 through (colour = A + B x background). ``apply_recipe`` composes it with a Transparent BSDF by the mode, and for 'blended'
-adds the G-buffer surface lit by Blender (its emission left to the forward colour, which already holds it). A lit
+adds the G-buffer surface lit by Blender (its emission left to the forward colour, which already holds it), as for an
+'additive' entry with ``forward_lit`` (its forward colour reads the key light, which is 0 in the recipe). A lit
 background term arrives folded into B at a unit light (nwo.games.rcra.surface.unit_irradiance):
 - blended: Transparent(mix(white, B, alpha)) + alpha x (BRDF + Emission(colour)), i.e. mix(Transparent, body, alpha)
   when B = 0
-- additive: Transparent(1 + alpha B) + Emission(colour, strength alpha)
+- additive: Transparent(1 + alpha B) + Emission(colour, strength alpha); lit: Transparent(1 + alpha B) +
+  alpha x (BRDF + Emission(colour))
 - modulate: Transparent tinted by mix(white, colour, alpha)
 """
 import hashlib
@@ -1226,15 +1228,17 @@ def _forward_shader(tree, entry, images, uv_maps, colour_attribute, lit, tangent
         links.new(f.outputs['Alpha'], through.inputs[1])
         through.inputs[2].default_value = (1.0, 1.0, 1.0)
         links.new(through.outputs[0], clear.inputs['Color'])
-        links.new(f.outputs['Alpha'], emit.inputs['Strength'])
-        links.new(emit.outputs[0], total.inputs[1])
-        return total.outputs[0], group
-    through = nodes.new('ShaderNodeMix')   # mix(white, B, alpha) = 1 - alpha + alpha B
-    through.data_type, through.location = 'RGBA', (120, -600)
-    links.new(f.outputs['Alpha'], through.inputs['Factor'])
-    through.inputs['A'].default_value = (1.0, 1.0, 1.0, 1.0)
-    links.new(f.outputs['Background'], through.inputs['B'])
-    links.new(through.outputs['Result'], clear.inputs['Color'])
+        if lit is None:
+            links.new(f.outputs['Alpha'], emit.inputs['Strength'])
+            links.new(emit.outputs[0], total.inputs[1])
+            return total.outputs[0], group
+    else:
+        through = nodes.new('ShaderNodeMix')   # mix(white, B, alpha) = 1 - alpha + alpha B
+        through.data_type, through.location = 'RGBA', (120, -600)
+        links.new(f.outputs['Alpha'], through.inputs['Factor'])
+        through.inputs['A'].default_value = (1.0, 1.0, 1.0, 1.0)
+        links.new(f.outputs['Background'], through.inputs['B'])
+        links.new(through.outputs['Result'], clear.inputs['Color'])
     body = emit.outputs[0]
     if lit is not None:
         combine = nodes.new('ShaderNodeAddShader')
@@ -1255,7 +1259,8 @@ def apply_recipe(material, entry, uv_maps, colour_attribute=None, tangent=False)
 
     ``entry``: dict(blend, recipe (G-buffer surface), forward (blended materials), images {binding: row}, limitations,
     double_sided (the flags word's DoubleSided, which sets the back-face culling)).
-    An opaque entry needs ``recipe``; a blended one needs ``forward`` and uses ``recipe`` for its lit part when present.
+    An opaque entry needs ``recipe``; a blended one needs ``forward`` and uses ``recipe`` for its lit part when present
+    (an additive one only with ``forward_lit``).
     ``tangent``: the mesh carries the decoded tangent (``store_tangent_frame``); else the UV0 frame stands in, labelled."""
     mode = entry.get('blend', 'opaque')
     if mode not in BLEND_MODES:
@@ -1270,8 +1275,9 @@ def apply_recipe(material, entry, uv_maps, colour_attribute=None, tangent=False)
     if entry.get('recipe'):
         shader, surface = _surface_shader(tree, entry, images, uv_maps, colour_attribute, mode != 'opaque', tangent)
     if mode != 'opaque':
-        shader, forward = _forward_shader(tree, entry, images, uv_maps, colour_attribute,
-                                          shader if mode == 'blended' else None, tangent)
+        lit = mode == 'blended' or (mode == 'additive' and entry.get('forward_lit'))
+        shader, forward = _forward_shader(tree, entry, images, uv_maps, colour_attribute, shader if lit else None,
+                                          tangent)
         if hasattr(material, 'surface_render_method'):   # EEVEE draws it sorted and blended
             material.surface_render_method = 'BLENDED'
     if shader is None:

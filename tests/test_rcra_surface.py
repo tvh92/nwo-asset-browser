@@ -640,6 +640,21 @@ class RealSurfaceTests(unittest.TestCase):
             return terms['alpha']
         self.assertLess(alpha((0.0, -3.0, 0.0)), alpha((2.9, -0.3, 0.0)))   # glass is clearer face-on than at its rim
 
+    def test_lit_additive_takes_its_surface_only_where_the_forward_light_is_that_surface(self):
+        """The unicroid wasp's wing is additive and lit: its forward colour with every light 0 is black, and its key-light
+        term is its G-buffer surface under the class-0 apply program, so Blender adds that surface lit. The star field's
+        key-light term is not its surface, so it keeps its forward colour alone."""
+        wing = 'material/characters/ambient/test/greg_b/test_amb_Humminbird_BlurryWing/test_amb_Humminbird_BlurryWing.material'
+        stars = 'material/global/planetary_travel_stars_ardolis/planetary_travel_stars_ardolis.material'
+        with tempfile.TemporaryDirectory() as tmp:
+            entries = {path: blender_export.material_entry(self.source, path, Path(tmp)) for path in (wing, stars)}
+        for path, lit in ((wing, True), (stars, False)):
+            entry = entries[path]
+            self.assertEqual((entry['blend'], 'recipe' in entry), ('additive', True), path)
+            self.assertEqual(entry.get('forward_lit', False), lit, path)
+            self.assertEqual(any(line.startswith('Additive and unlit by the renderer') for line in entry['limitations']),
+                             not lit, path)
+
     def forward_of(self, path):
         key = self.source.resolve(path)[0]
         graph = next(r['path'] for r in self.source.asset_references(key) if r['path'].endswith('.materialgraph'))

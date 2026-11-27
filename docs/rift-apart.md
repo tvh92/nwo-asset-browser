@@ -1537,9 +1537,12 @@ A blended material's entry carries `blend` and a `forward` recipe ([Forward prof
 | --- | --- |
 | Blended | Transparent(mix(white, B, alpha)) + alpha × (BRDF + Emission(colour)); with B = 0 this is mix(Transparent, BRDF + Emission(colour), alpha). The BRDF's own emission input is left unlinked, because the forward colour already holds it. |
 | Additive | Transparent(1 + alpha B) + Emission(colour, strength alpha) |
+| Additive, lit | Transparent(1 + alpha B) + alpha × (BRDF + Emission(colour)), the BRDF's emission input unlinked as for Blended |
 | Modulate | Transparent tinted by mix(white, colour, alpha) |
 
 A material that lights the scene behind it (`lit_background`, [The scene behind](#forward-profile)) needs the diffuse light reaching the point, which Cycles has no node for. `surface.unit_irradiance` folds it at a unit white light, B = background + lit_background, and the material's limitations say so (`UNIT_IRRADIANCE_NOTE`).
+
+A lit additive material is drawn with its lit surface when its forward program lights that surface as the deferred apply does (the entry's `forward_lit`, `blender_export.forward_light_matches_surface`): the program's key-light term (`surface.forward_lighting`, colour(L, LIGHT) − colour(L, 0)) equals the class-0 apply program run on the G-buffer surface's terms, at 24 random normals, lights, views and texels, within 2 % (the G-buffer's 8-bit F0 and gloss). The hummingbird wing on the unicroid wasp agrees within 0.9 %; its forward colour with every light at 0 is black, so without its surface it added nothing. Star fields and the wine glass light other terms (14 and 44 times off) and keep their forward colour alone, with the reason in their limitations, as do unlit additive materials.
 
 B is the background tint of a program that passes the scene behind it through ([Forward profile](#forward-profile)); a modulate material that does so is not linear in it and keeps its opaque surface.
 

@@ -7,7 +7,9 @@ reason and keeps the glTF importer's material.
 
 A blended material (nwo.games.rcra.material.material_blend: additive, blended or modulate) also gets its forward program
 translated (nwo.games.rcra.surface.forward) as ``forward``: the colour and alpha the game blends, with every light source
-zero. Its G-buffer surface, when it translates, stays as ``recipe`` and is lit by the renderer. A blended material whose
+zero. Its G-buffer surface, when it translates, stays as ``recipe`` and is lit by the renderer; an additive material's
+only when its forward program's key-light term is that surface under the class-0 apply program (``forward_lit``,
+forward_light_matches_surface), as on the unicroid wasp's wings. A blended material whose
 forward program does not translate keeps the opaque surface and says why.
 
 Unit textures keep their stored values. 8-bit formats are written as RGBA PNG with the D3D defaults for channels a format
@@ -431,9 +433,88 @@ def _reads_background(recipe):
                for k in ('background.r', 'background.g', 'background.b') if k in recipe['terms'])
 
 
+# A lit additive material's G-buffer surface stands in for its forward program's lighting in Blender only where the two
+# agree: the forward colour's key-light term (surface.forward_lighting: colour(L, LIGHT) - colour(L, 0)) equals the class-0
+# apply program (lighting.direct) run on the surface's terms, at random inputs and texels, within the G-buffer's 8-bit F0
+# and gloss (relative, with a floor). The unicroid wasp's hummingbird wing agrees within 0.9 %; star fields and the wine
+# glass light other terms (14 and 44 times off) and stay unlit.
+FORWARD_LIT_TOLERANCE = 0.02
+FORWARD_LIT_FLOOR = 0.05
+FORWARD_LIT_TRIALS = 24
+
+
+def _unit(rng):
+    v = [rng.gauss(0.0, 1.0) for _ in range(3)]
+    n = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / n for x in v]
+
+
+def forward_light_matches_surface(forward_lit, surface, apply, trials=FORWARD_LIT_TRIALS, seed=3):
+    """None when the forward key-light term (recipe ``forward_lit``, terms colour.r/g/b of L and LIGHT) equals ``apply``
+    (lighting.direct of class 0) on the terms of ``surface`` (a G-buffer recipe), else the reason. Each trial draws a
+    normal (TEXCOORD2), a tangent (TEXCOORD3) and UVs, a key light on the normal's side and a camera in front, and one
+    texel per binding shared by both recipes; inputs neither names are uniform in [-1, 1]."""
+    import random
+    rng = random.Random(seed)
+    names = set(forward_lit['inputs']) | set(surface['inputs'])
+    compared, worst = 0, 0.0
+    for _trial in range(trials):
+        texels = {}
+
+        def sample(node, _args):
+            return texels.setdefault(node.get('binding'), [rng.uniform(0.1, 0.9) for _ in range(4)])
+        values = {name: rng.uniform(-1.0, 1.0) for name in sorted(names)}
+        n, light, view = _unit(rng), _unit(rng), _unit(rng)
+        if sum(a * b for a, b in zip(n, light)) < 0.0:
+            light = [-x for x in light]
+        if sum(a * b for a, b in zip(n, view)) > 0.0:   # VIEW is camera to point: the camera on the normal's side
+            view = [-x for x in view]
+        t = _unit(rng)
+        t = [a - sum(x * y for x, y in zip(t, n)) * b for a, b in zip(t, n)]
+        tn = math.sqrt(sum(x * x for x in t)) or 1.0
+        depth = rng.uniform(1.0, 5.0)
+        values.update({'SV_IsFrontFace': True, 'TEXCOORD3.w': 1.0, 'CAMERA.x': 0.0, 'CAMERA.y': 0.0, 'CAMERA.z': 0.0})
+        for k, c in enumerate('xyz'):
+            values.update({'TEXCOORD2.' + c: n[k], 'TEXCOORD3.' + c: t[k] / tn, 'L.' + c: light[k],
+                           'VIEW.' + c: view[k] * depth})
+        for name in ('TEXCOORD.x', 'TEXCOORD.y', 'TEXCOORD1.x', 'TEXCOORD1.y'):
+            values[name] = rng.random()
+        off = rsurface.evaluate_recipe(forward_lit, dict(values, **{'LIGHT.' + c: 0.0 for c in 'rgb'}), sample)
+        on = rsurface.evaluate_recipe(forward_lit, dict(values, **{'LIGHT.' + c: 1.0 for c in 'rgb'}), sample)
+        terms = rsurface.evaluate_recipe(surface, values, sample)
+        if terms.get('class', 0.0) != 0.0:
+            return 'its G-buffer surface is not lighting class 0'
+        inputs = {name: terms[name] for name in lighting.INPUTS if name in terms}
+        inputs.update({name: values[name] for name in ('L.x', 'L.y', 'L.z', 'VIEW.x', 'VIEW.y', 'VIEW.z')})
+        inputs.update({'LIGHT.r': 1.0, 'LIGHT.g': 1.0, 'LIGHT.b': 1.0, 'DEPTH': depth})
+        want = lighting.evaluate(apply, inputs)
+        got = [on['colour.' + c] - off['colour.' + c] for c in 'rgb']
+        if not all(math.isfinite(x) for x in got + want):
+            continue
+        compared += 1
+        worst = max([worst] + [abs(a - b) / max(FORWARD_LIT_FLOOR, abs(b)) for a, b in zip(got, want)])
+    if not compared:
+        return 'no finite trial'
+    if worst > FORWARD_LIT_TOLERANCE:
+        return 'its key-light term is not its G-buffer surface under the class-0 apply program (%.3g relative)' % worst
+    return None
+
+
+def _forward_lit(source, graph, data, surface):
+    """True when an additive material's G-buffer surface lit by the renderer is its forward program's lighting
+    (forward_light_matches_surface), else the reason."""
+    try:
+        lit = rsurface.fold_nan(rsurface.export_recipe(
+            rsurface.forward_lighting(graph, data, texture_sizes=lambda path: texture_size(source, path))))
+    except (rsurface.Unsupported, ValueError, KeyError) as error:
+        return str(error)
+    apply = lighting.direct(source.root, 0, disk=getattr(source, 'translation_disk_cache', None))
+    return forward_light_matches_surface(lit, surface, apply) or True
+
+
 def material_entry(source, material_path, folder, texture_cache=None, graph_cache=None):
     """The Blender entry of one material: dict(blend, recipe, forward, images, limitations), or dict(error)."""
-    from nwo.games.rcra.material import _graphs, _material_key, double_sided, material_blend
+    from nwo.games.rcra.material import _graphs, _material_key, double_sided, draw_flags, material_blend
     key = _material_key(source, material_path)
     if key is None:
         return dict(error='material asset not found')
@@ -462,7 +543,7 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
         blend = material_blend(data)
     except ValueError as error:
         return dict(error='ValueError: %s' % error, graph=graph_path)
-    errors, results, limitations = {}, {}, []
+    errors, results, limitations, forward_lit = {}, {}, [], None
     passes = (('forward', rsurface.forward), ('recipe', rsurface.surface)) if blend != 'opaque' else \
         (('recipe', rsurface.surface),)
     if program is not None:   # an engine program replaces the graph: its G-buffer writer only
@@ -508,6 +589,11 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
             if 'recipe' not in results:
                 limitations.append('The G-buffer surface does not translate (%s): only the forward colour is drawn, '
                                    'unlit by the renderer.' % errors['recipe'])
+            elif blend == 'additive' and draw_flags(data):
+                forward_lit = _forward_lit(source, graph, data, recipes['recipe'])
+                if forward_lit is not True:
+                    limitations.append('Additive and unlit by the renderer, though the material is lit: %s, so only its '
+                                       'forward colour (every light 0) is added.' % forward_lit)
         else:
             limitations.append('The game draws this material %s in its forward pass, which does not translate (%s): '
                                'Blender gets its opaque G-buffer surface.' % (blend, errors['forward']))
@@ -538,6 +624,8 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
     entry = dict(graph=graph_path, blend=blend if 'forward' in results else 'opaque', game_blend=blend, images=images,
                  limitations=limitations, double_sided=double_sided(data))
     entry.update(recipes)
+    if forward_lit is True:   # an additive material lit as its G-buffer surface: Blender adds that surface, lit
+        entry['forward_lit'] = True
     if skin is not None:
         entry['skin_profile'] = skin
     if program is not None:
