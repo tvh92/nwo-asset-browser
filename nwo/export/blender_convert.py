@@ -86,11 +86,13 @@ entries = None
 additive = False   # a translated additive material: the scene carries its light as coverage (nwo.export.rcra_coverage)
 if args.materials:
     import json
-    from nwo.export.rcra_blender import TANGENT_FRAME, apply_recipe, build_fur_shells, store_tangent_frame
+    from nwo.export.rcra_blender import (TANGENT_FRAME, VERTEX_COLOUR, apply_recipe, build_fur_shells, store_tangent_frame,
+                                         store_vertex_colour)
     entries = json.loads(Path(args.materials).read_text(encoding='utf-8'))['materials']
     users = {}
     for mesh in bpy.data.meshes:   # the decoded tangent as coordinates in the UV0 frame, before any material reads it
         store_tangent_frame(mesh)
+        store_vertex_colour(mesh)   # TEXCOORD4: the colour section squared
     for obj in bpy.data.objects:
         if obj.type == 'MESH':
             for slot in obj.material_slots:
@@ -102,7 +104,7 @@ if args.materials:
             continue
         mesh = users.get(name)
         uv_maps = [layer.name for layer in mesh.uv_layers] if mesh is not None else []
-        colour = mesh.color_attributes[0].name if mesh is not None and len(mesh.color_attributes) else None
+        colour = VERTEX_COLOUR if mesh is not None and VERTEX_COLOUR in mesh.attributes else None
         apply_recipe(material, entry, uv_maps, colour, tangent=mesh is not None and TANGENT_FRAME in mesh.attributes)
         additive = additive or entry.get('blend') == 'additive'
         print('TRANSLATED', name, flush=True)

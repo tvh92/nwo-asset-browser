@@ -388,6 +388,43 @@ class VolumeTests(unittest.TestCase):
         self.assertLess(float(np.abs(got['albedo'][:, :3] - want['albedo']).max()), 3e-3)   # 8-bit atlas, float bake
 
     @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
+    def test_blender_lookups_follow_the_sampler_state(self):
+        """A texture sampled from about -1.4 to 2.4 on both axes under its header's sampler (texture.sampler_state): clamp U
+        with mirror V (folded by hand), mirror on both axes (the MIRROR extension) and point filtering with clamp (Closest,
+        EXTEND). The bake matches the D3D reference lookup (blender_check.lookup)."""
+        rng = np.random.default_rng(11)
+        tex = rng.random((4, 5, 4)).astype(np.float32)
+        tex[..., 3] = 1.0
+        nodes = [dict(op='input', type='f', name='TEXCOORD.x', args=[]), dict(op='input', type='f', name='TEXCOORD.y', args=[]),
+                 dict(op='const', type='f', value=12.0, args=[]), dict(op='const', type='f', value=-5.0, args=[]),
+                 dict(op='const', type='f', value=-6.0, args=[]), dict(op='const', type='f', value=0.0, args=[]),
+                 dict(op='const', type='f', value=1.0, args=[])]
+        nodes.append(dict(op='mul', type='f', args=[0, 2]))   # 7: 12 u
+        nodes.append(dict(op='mul', type='f', args=[1, 2]))   # 8: 12 v
+        nodes.append(dict(op='add', type='f', args=[7, 3]))   # 9: 12 u - 5
+        nodes.append(dict(op='add', type='f', args=[8, 4]))   # 10: 12 v - 6
+        nodes.append(dict(op='sample', type='v', args=[9, 10, 5, 5], binding='textureUnit5', opcode='sample', dimension=3,
+                          sampler=None, offsets=[], controls=None))   # 11
+        nodes += [dict(op='channel', type='f', args=[11], index=c) for c in range(3)]   # 12, 13, 14
+        terms = {'albedo.r': 12, 'albedo.g': 13, 'albedo.b': 14, 'f0.r': 5, 'f0.g': 5, 'f0.b': 5, 'gloss': 5, 'normal.x': 5,
+                 'normal.y': 6, 'normal.z': 5, 'occlusion': 6, 'emission': 5, 'clip': 5}
+        for filtering, address in ((1, (3, 2, 1)), (1, (2, 2, 1)), (0, (3, 3, 3))):
+            with self.subTest(filter=filtering, address=address), tempfile.TemporaryDirectory() as tmp:
+                sampler = dict(filter=filtering, anisotropy=1, address=address, mip_bias=0.0)
+                row = blender_export._save(tex, dict(format=28, sampler=sampler), 'unit', Path(tmp) / 'units', 'synthetic')
+                entry = dict(recipe=dict(version=1, nodes=nodes, terms=terms, textures={}, inputs=[], limitations=[]),
+                             images={'textureUnit5': row})
+                want = blender_check.expected(entry, 47)
+                wrap = blender_check.expected(dict(entry, images={'textureUnit5': dict(row, sampler=None)}), 47)
+                self.assertGreater(float(np.abs(wrap['albedo'] - want['albedo']).max()), 0.1)   # the window leaves 0..1
+                got = blender_check.bake(entry, BLENDER, 47, tmp)
+                error = np.abs(got['albedo'][:, :3] - want['albedo']).max(axis=1)
+                if filtering:
+                    self.assertLess(float(error.max()), 3e-3)   # 8-bit unit, float bake
+                else:   # a pixel centre within the bake's jitter of a texel edge may take the neighbour
+                    self.assertLess(float(np.mean(error > 3e-3)), 0.02)
+
+    @unittest.skipUnless(os.path.isfile(BLENDER), 'Blender is not installed')
     def test_blender_division_by_a_constant_zero_is_infinite(self):
         """D3D x / 0 is sign(x) inf, so sat(x / 0) is a step; Blender's Divide alone would return 0."""
         nodes = [dict(op='input', type='f', name='TEXCOORD.x', args=[]), dict(op='const', type='f', value=-0.5, args=[]),

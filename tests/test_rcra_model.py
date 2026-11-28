@@ -123,6 +123,25 @@ class SyntheticModelTests(unittest.TestCase):
         np.testing.assert_allclose(data[:, :3], mesh['tangents'], rtol=1e-6)
         np.testing.assert_allclose(data[:, 3], mesh['tangent_w'], rtol=1e-6)
 
+    def test_export_carries_the_colour_section(self):
+        """A Rift Apart mesh's colour bytes / 255 go out as the custom VEC4 float attribute COLOUR_ATTRIBUTE (never
+        COLOR_0, which glTF readers multiply into the base colour); without ``colours`` (R&C 2016) nothing is written."""
+        from nwo.export import models
+        mesh = rm.decode_model('synthetic', data=build_model())['meshes'][0]
+        parts = [dict(name='a', material=None, arrays=models.mesh_arrays(mesh, 0, colours=True)),
+                 dict(name='b', material=None, arrays=models.mesh_arrays(mesh, 0))]
+        exporter = models.ModelExporter.__new__(models.ModelExporter)
+        doc, blob = exporter._build_gltf('m', parts, {}, None, []).finish(embed=True)
+        first, second = doc['meshes'][0]['primitives']
+        self.assertNotIn(models.COLOUR_ATTRIBUTE, second['attributes'])
+        self.assertFalse(any(k.startswith('COLOR_') for p in (first, second) for k in p['attributes']))
+        accessor = doc['accessors'][first['attributes'][models.COLOUR_ATTRIBUTE]]
+        tangent = doc['accessors'][first['attributes'][models.TANGENT_ATTRIBUTE]]
+        self.assertEqual((accessor['type'], accessor['componentType']), (tangent['type'], tangent['componentType']))
+        view = doc['bufferViews'][accessor['bufferView']]
+        data = np.frombuffer(bytes(blob), np.float32, 16, view['byteOffset'] + accessor.get('byteOffset', 0)).reshape(4, 4)
+        np.testing.assert_allclose(data, [[1.0, 0.0, 0.0, 128 / 255]] * 4, rtol=1e-6)
+
     def test_tangent_round_trip(self):
         rng = np.random.default_rng(3)
         vectors = rng.normal(size=(200, 3))

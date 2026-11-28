@@ -4,7 +4,8 @@
 
 For each material: the Blender entry (nwo.games.rcra.blender_export) is built, nwo/export/rcra_blender_check.py
 bakes every surface output of the emitted node tree on a UV-unit plane in Cycles, and the result is compared with the
-recipe evaluated by nwo.shaders.sm5 for the same inputs and the same unit textures (bilinear repeat on both sides). A cube
+recipe evaluated by nwo.shaders.sm5 for the same inputs and the same unit textures (each texture's sampler state on both
+sides: point or bilinear, with its wrap, mirror or clamp addressing). A cube
 map is compared with the exact D3D cube lookup of the stored faces (blender_export.cube_lookup), not with the equirectangular
 image Blender reads, so its difference includes the resampling.
 A blended material's forward colour and alpha are baked too, with the view inputs held at FORWARD_VIEW.
@@ -103,16 +104,38 @@ def read_png16(path):
     return rows[:, 1:].copy().view('>u2').reshape(h, w, 4).astype(np.float32) / 65535.0
 
 
-def bilinear(image, u, v):
-    """Bilinear repeat lookup at game (u, v), texel centres at (k + 0.5) / size, as Blender's 'Linear'."""
+def texel(k, n, mode=1):
+    """Texel index k of an axis of n texels under a D3D address mode: 1 wrap, 2 mirror, 3 clamp."""
+    if mode == 3:
+        return min(max(k, 0), n - 1)
+    if mode == 2:
+        m = k % (2 * n)
+        return m if m < n else 2 * n - 1 - m
+    return k % n
+
+
+def bilinear(image, u, v, address=(1, 1)):
+    """Bilinear lookup at game (u, v), texel centres at (k + 0.5) / size, as Blender's 'Linear', with the D3D address
+    modes (U, V) (default wrap)."""
     h, w = image.shape[:2]
     x, y = u * w - 0.5, v * h - 0.5
     x0, y0 = math.floor(x), math.floor(y)
     fx, fy = x - x0, y - y0
-    rows, cols = [y0 % h, (y0 + 1) % h], [x0 % w, (x0 + 1) % w]
+    rows = [texel(y0, h, address[1]), texel(y0 + 1, h, address[1])]
+    cols = [texel(x0, w, address[0]), texel(x0 + 1, w, address[0])]
     top = image[rows[0], cols[0]] * (1 - fx) + image[rows[0], cols[1]] * fx
     bottom = image[rows[1], cols[0]] * (1 - fx) + image[rows[1], cols[1]] * fx
     return [float(c) for c in top * (1 - fy) + bottom * fy]
+
+
+def lookup(image, u, v, sampler=None):
+    """A 2D lookup under the texture's sampler state (blender_export row 'sampler'): the texel holding (u, v) for point
+    filtering, else bilinear; both with the address modes. Without one, bilinear wrap."""
+    address = tuple((sampler or {}).get('address', (1, 1))[:2])
+    if sampler and sampler.get('filter') == 0:
+        h, w = image.shape[:2]
+        return [float(c) for c in image[texel(math.floor(v * h), h, address[1]), texel(math.floor(u * w), w, address[0])]]
+    return bilinear(image, u, v, address)
 
 
 def window(entry, size):
@@ -129,6 +152,7 @@ def expected(entry, size, source=None):
     """{term: (size*size, 3)} from the recipe, pixel rows from Blender v = 0, plane normal +Z, tangent +X. ``source`` reads a
     cube map's faces."""
     units = {b: load_unit(row, source) for b, row in entry['images'].items()}
+    samplers = {b: row.get('slices', [row])[0].get('sampler') for b, row in entry['images'].items()}
 
     def sample(node, args):
         if not all(math.isfinite(a) for a in args[:3]):
@@ -143,7 +167,7 @@ def expected(entry, size, source=None):
             return [x + (s - k) * (y - x) for x, y in zip(a, b)]
         if isinstance(image, list):
             image = image[int(min(max(math.floor(args[2] + 0.5), 0), len(image) - 1))]
-        return bilinear(image, args[0], args[1])
+        return lookup(image, args[0], args[1], samplers[node['binding']])
     out = defaultdict(list)
     origin, span = window(entry, size)
     for j in range(size):

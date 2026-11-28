@@ -16,7 +16,9 @@ Inputs the recipe reads, in Blender:
   T from the Normal Map node's tangent and the geometry normal, so it turns with the armature as both do. A mesh without
   the attribute gets Blender's UV0 frame itself, bitangent along Blender's +v (the game's -v, the orientation of the stored
   tangents), labelled.
-- ``TEXCOORD4`` (vertex colour): the mesh's first colour attribute, else 1.
+- ``TEXCOORD4`` (vertex colour): the model's colour section squared per channel, as the engine model vertex program
+  passes it on: exported as the glTF point attribute COLOUR_ATTRIBUTE (the bytes / 255) and squared after import into the
+  float colour attribute VERTEX_COLOUR (``store_vertex_colour``); 1 for a mesh without one.
 - ``SV_IsFrontFace``: not Geometry Backfacing.
 - ``VIEW.xyz`` and ``CAMERA.xyz`` (forward recipes): the offset from the camera to the shaded point, -Incoming x View
   Distance, and the camera position, Position + Incoming x View Distance, both converted to game space.
@@ -76,6 +78,11 @@ BLEND_MODES = ('opaque', 'additive', 'blended', 'modulate')
 TANGENT_ATTRIBUTE = '_RCRA_TANGENT'    # nwo.export.models: point domain, native tangent xyz and TEXCOORD3.w
 TANGENT_FRAME = 'rcra_tangent_frame'   # corner domain: the tangent's coordinates in the UV0 tangent frame
 TANGENT_W_ATTRIBUTE = 'rcra_tangent_w'   # point domain: TEXCOORD3.w
+COLOUR_ATTRIBUTE = '_RCRA_COLOUR'   # nwo.export.models: point domain, the model's colour bytes / 255 (RGBA)
+VERTEX_COLOUR = 'rcra_vertex_colour'   # point domain float colour: TEXCOORD4, the colour squared per channel
+SAMPLER_FILTER, SAMPLER_ADDRESS = 'rc_rcra_filter', 'rc_rcra_address'   # image properties: texture.sampler_state
+# D3D address mode (texture.ADDRESS_*) -> Image Texture extension when both axes share it.
+EXTENSIONS = {1: 'REPEAT', 2: 'MIRROR', 3: 'EXTEND'}
 NO_TANGENT_NOTE = ('This mesh has no decoded tangent attribute: the tangent frame is Blender\'s UV0 tangent space and the '
                    'bitangent sign its +v side (the game\'s -v).')
 # Blender's node creation slows as a tree grows (3,000 nodes in one tree take about 35 s, in groups of 100 about 0.6 s), so a
@@ -836,7 +843,7 @@ class _Emitter:
     def colour(self):
         if 'colour' not in self.inputs:
             if self.colour_attribute:
-                attr = self.node('ShaderNodeVertexColor', layer_name=self.colour_attribute)
+                attr = self.node('ShaderNodeAttribute', attribute_type='GEOMETRY', attribute_name=self.colour_attribute)
                 sep = self.node('ShaderNodeSeparateColor')
                 self.link(attr.outputs['Color'], sep.inputs[0])
                 self.inputs['colour'] = [sep.outputs[0], sep.outputs[1], sep.outputs[2], attr.outputs['Alpha']]
@@ -939,13 +946,35 @@ class _Emitter:
             self.samples[index] = self.volume(image, u, v, self.value(n['args'][2]), n['binding'])
             return self.samples[index]
         combine = self.node('ShaderNodeCombineXYZ')
+        flipped = self.math('SUBTRACT', 1.0, v) if not isinstance(v, float) else 1.0 - v
         self.feed(u, combine.inputs[0])
-        self.feed(self.math('SUBTRACT', 1.0, v) if not isinstance(v, float) else 1.0 - v, combine.inputs[1])
+        self.feed(flipped, combine.inputs[1])
 
         def lookup(img, label):
-            tex = self.node('ShaderNodeTexImage', image=img, interpolation=self.interpolation, extension='REPEAT')
+            # The texture's own sampler (texture.sampler_state): Closest for point filtering; one extension when both axes
+            # share an address mode, else each axis folded by hand into a repeating lookup: mirror ping-pongs, and mirror
+            # and clamp hold the coordinate between the edge texels' centres, where a bilinear read clamps to the edge
+            # texel (Blender's v = 1 - the game's v, and both folds are symmetric about 0.5).
+            point = img.get(SAMPLER_FILTER, 1) == 0
+            interpolation = 'Closest' if point else self.interpolation
+            address = list(img.get(SAMPLER_ADDRESS, (1, 1)))
+            vector = combine.outputs[0]
+            if address[0] == address[1]:
+                extension = EXTENSIONS.get(address[0], 'REPEAT')
+            else:
+                extension = 'REPEAT'
+                folded = self.node('ShaderNodeCombineXYZ')
+                for axis, (mode, coordinate, size) in enumerate(zip(address, (u, flipped), img.size)):
+                    if mode in (2, 3):
+                        if mode == 2:
+                            coordinate = self.math('PINGPONG', coordinate, 1.0)
+                        edge = 0.5 / max(1, size)
+                        coordinate = self.math('MINIMUM', self.math('MAXIMUM', coordinate, edge), 1.0 - edge)
+                    self.feed(coordinate, folded.inputs[axis])
+                vector = folded.outputs[0]
+            tex = self.node('ShaderNodeTexImage', image=img, interpolation=interpolation, extension=extension)
             tex.name = label
-            self.link(combine.outputs[0], tex.inputs['Vector'])
+            self.link(vector, tex.inputs['Vector'])
             sep = self.node('ShaderNodeSeparateColor')
             self.link(tex.outputs['Color'], sep.inputs[0])
             return [sep.outputs[0], sep.outputs[1], sep.outputs[2], tex.outputs['Alpha']]
@@ -1150,7 +1179,12 @@ def _load_row(row):
         v = row['volume']
         image = load_image(row['path'], row['colourspace'], row.get('kind', 'png'), row.get('width', 0), row.get('height', 0))
         return Volume(image, v['depth'], v['columns'], v['width'], v['height'])
-    return load_image(row['path'], row['colourspace'], row.get('kind', 'png'), row.get('width', 0), row.get('height', 0))
+    image = load_image(row['path'], row['colourspace'], row.get('kind', 'png'), row.get('width', 0), row.get('height', 0))
+    sampler = row.get('sampler')
+    if sampler:   # the texture's own sampler state, read by _Emitter.sample
+        image[SAMPLER_FILTER] = int(sampler['filter'])
+        image[SAMPLER_ADDRESS] = [int(a) for a in sampler['address'][:2]]
+    return image
 
 
 def load_images(rows):
@@ -1297,6 +1331,24 @@ def apply_recipe(material, entry, uv_maps, colour_attribute=None, tangent=False)
     return material
 
 
+def store_vertex_colour(mesh):
+    """Rewrite an imported mesh's colour section (point attribute COLOUR_ATTRIBUTE: the bytes / 255, RGBA) as TEXCOORD4,
+    the engine model vertex program's colour squared per channel, in the float colour attribute VERTEX_COLOUR: Cycles
+    interpolates it across the triangle as the game interpolates the square. Returns the attribute name, or None when
+    the mesh has no colour section (the material then reads 1, the engine's value without a colour stream)."""
+    import numpy as np
+    source = mesh.attributes.get(COLOUR_ATTRIBUTE)
+    if source is None or source.domain != 'POINT':
+        return None
+    values = np.empty(len(mesh.vertices) * 4, np.float32)
+    source.data.foreach_get('color' if source.data_type in ('FLOAT_COLOR', 'BYTE_COLOR') else 'vector', values)
+    if mesh.attributes.get(VERTEX_COLOUR) is not None:
+        mesh.attributes.remove(mesh.attributes[VERTEX_COLOUR])
+    mesh.attributes.new(VERTEX_COLOUR, 'FLOAT_COLOR', 'POINT').data.foreach_set('color', values * values)
+    mesh.attributes.remove(mesh.attributes[COLOUR_ATTRIBUTE])
+    return VERTEX_COLOUR
+
+
 def store_tangent_frame(mesh):
     """Rewrite an imported mesh's decoded tangent (point attribute TANGENT_ATTRIBUTE: native xyz and TEXCOORD3.w, which
     the glTF importer makes a float colour attribute) as its coordinates (a, b, c) in Blender's UV0 tangent frame at each
@@ -1433,7 +1485,7 @@ def build_fur_shells(entries):
         uv_maps = [layer.name for layer in mesh.uv_layers]
         if not uv_maps:
             continue
-        colour = mesh.color_attributes[0].name if len(mesh.color_attributes) else None
+        colour = VERTEX_COLOUR if VERTEX_COLOUR in mesh.attributes else None
         height = bpy.data.textures.new(name + ' fur shell height', 'IMAGE')
         height.image = _load_row(entry['shell_height'])
         height.use_interpolation, height.extension = False, 'REPEAT'   # point-sampled; a modifier reads the top mip

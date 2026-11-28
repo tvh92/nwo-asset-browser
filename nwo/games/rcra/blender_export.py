@@ -113,6 +113,9 @@ ANISOTROPIC_LIMITATION = ('Lighting class 4 (anisotropic): Blender averages two 
                           'a separable approximation, makes the tangent orthogonal to the normal, and caps the ratio of '
                           'the two alphas at 10, keeping their product.')
 CUBE_LIMITATION = 'Cube map %s resampled to an equirectangular image (filtering differs at face seams and poles).'
+SAMPLER_NOTE = ('Texture sampling follows each texture\'s own sampler state (its header, nwo.games.rcra.texture.sampler_state): '
+                'point or linear filtering and wrap, mirror or clamp addressing per axis. Cycles reads the top mip only, so the '
+                'mip filtering, anisotropy and mip LOD bias have no effect; cube maps and 3D textures keep their own lookups.')
 # D3D / GL cube lookup (the same table): per face +X, -X, +Y, -Y, +Z, -Z, the major axis and the (sc, tc) axes with signs.
 CUBE_FACE_AXES = (((0, 1.0), (2, -1.0), (1, -1.0)), ((0, -1.0), (2, 1.0), (1, -1.0)),
                   ((1, 1.0), (0, 1.0), (2, 1.0)), ((1, -1.0), (0, 1.0), (2, -1.0)),
@@ -302,8 +305,11 @@ def _save(data, texture, stem, folder, path, colourspace=None):
         target = folder / (stem + '.png')
         Image.fromarray(np.round(data * 255.0).astype(np.uint8), 'RGBA').save(target)
         kind = 'png'
+    from nwo.games.rcra.texture import DEFAULT_SAMPLER
+    sampler = texture.get('sampler') or DEFAULT_SAMPLER   # the texture header's sampler (texture.sampler_state)
     return dict(path=str(target), colourspace=colourspace, kind=kind, width=int(data.shape[1]), height=int(data.shape[0]),
-                source=path, format=int(texture['format']))
+                source=path, format=int(texture['format']),
+                sampler=dict(filter=int(sampler['filter']), address=[int(a) for a in sampler['address']]))
 
 
 def cube_index(recipe, node):
@@ -620,7 +626,7 @@ def material_entry(source, material_path, folder, texture_cache=None, graph_cach
     limitations += [
         'Tangent frame: the decoded vertex tangent and TEXCOORD3.w, carried as coordinates in Blender\'s UV0 tangent '
         'frame so they turn with the armature; the draw is unmirrored (render flag 0x10000 clear).',
-        'Texture filtering is Blender\'s linear repeat; the game\'s sampler states are not in the program.']
+        SAMPLER_NOTE]
     entry = dict(graph=graph_path, blend=blend if 'forward' in results else 'opaque', game_blend=blend, images=images,
                  limitations=limitations, double_sided=double_sided(data))
     entry.update(recipes)

@@ -482,6 +482,11 @@ def vertex_frames(motion, parts, seconds=VERTEX_SECONDS, fps=VERTEX_FPS):
 # importer keeps it as a point attribute of this name (nwo.export.rcra_blender.TANGENT_ATTRIBUTE). One attribute, since
 # the importer pairs two custom attributes of a primitive with each other's data when its set order differs.
 TANGENT_ATTRIBUTE = '_RCRA_TANGENT'
+# Rift Apart's colour section (the bytes / 255, RGBA) as a second custom VEC4 float attribute, not COLOR_0: glTF readers
+# multiply the base colour by COLOR_0, and these colours are material data (many models store 0). The importer's set-order
+# pairing of custom attributes is harmless while both share one accessor type (VEC4 float), which the empty arrays it
+# starts from depend on. nwo.export.rcra_blender.store_vertex_colour squares it into the material's TEXCOORD4.
+COLOUR_ATTRIBUTE = '_RCRA_COLOUR'
 
 
 def _unit_normals(normals):
@@ -489,10 +494,11 @@ def _unit_normals(normals):
     return np.where(length > 1e-8, normals / np.maximum(length, 1e-8), np.array([0, 1, 0], np.float32))
 
 
-def mesh_arrays(mesh, joint_count):
+def mesh_arrays(mesh, joint_count, colours=False):
     """Native positions/normals, game UVs (top row first), triangles, skin sets (or None), the stored vertices and
     normals of a mesh the decoder moved (``stored``, or None), and a Rift Apart mesh's tangent and TEXCOORD3.w
-    (``tangents``, ``tangent_w``, or None)."""
+    (``tangents``, ``tangent_w``, or None). With ``colours`` (Rift Apart), ``colours`` is the model's colour section as
+    stored, (n, 4) bytes / 255 in R, G, B, A order, or None for a mesh without one."""
     positions = np.asarray(mesh['positions'], np.float32).reshape(-1, 3)
     normals = np.asarray(mesh['normals'], np.float32).reshape(-1, 3) if len(mesh.get('normals') if mesh.get('normals') is not None else ()) else None
     if normals is not None:
@@ -528,8 +534,11 @@ def mesh_arrays(mesh, joint_count):
         skin = dict(joints=joints[:, :4 * sets], weights=weights[:, :4 * sets].astype(np.float32), sets=sets, unweighted=unweighted)
     morphs = {number: (np.asarray(vertices, np.int64), np.asarray(deltas, np.float32), np.asarray(normal_deltas, np.float32))
               for number, vertices, deltas, normal_deltas in mesh.get('morphs') or ()}
+    vertex_colours = None
+    if colours and mesh.get('colors') is not None and len(mesh['colors']) == len(positions):
+        vertex_colours = np.asarray(mesh['colors'], np.float32).reshape(-1, 4)
     return dict(positions=positions, normals=normals, uvs=uvs, triangles=triangles, skin=skin, stored=stored,
-                tangents=tangents, tangent_w=tangent_w, morphs=morphs)
+                tangents=tangents, tangent_w=tangent_w, morphs=morphs, colours=vertex_colours)
 
 
 def _quat_from_matrix(m):
@@ -987,7 +996,8 @@ class ModelExporter:
         parts = []
         for mesh in meshes:
             material = (mesh.get('material') or {}).get('index')
-            parts.append(dict(name=f"{stem}_mesh{mesh['index']:02d}", material=material, arrays=mesh_arrays(mesh, joint_count),
+            parts.append(dict(name=f"{stem}_mesh{mesh['index']:02d}", material=material,
+                              arrays=mesh_arrays(mesh, joint_count, colours=decoded.get('game') == 'rcra'),
                               mesh_index=mesh['index']))
         baked = []
         if options.vertex_animation and decoded.get('vertex_motion') is not None:
@@ -1204,7 +1214,7 @@ class ModelExporter:
                 part_materials = {m.get('index', i): m for i, m in enumerate(cached['materials'])}
                 made = []
                 for mesh in meshes:
-                    arrays = mesh_arrays(mesh, len(joints))
+                    arrays = mesh_arrays(mesh, len(joints), colours=cached.get('game') == 'rcra')
                     if arrays['skin'] is None:
                         raise ValueError('it has no skin weights')
                     arrays['positions'] = (arrays['positions'] + shift).astype(np.float32)
@@ -1271,6 +1281,8 @@ class ModelExporter:
                 attributes[f'TEXCOORD_{n}'] = g.accessor(uv.astype(np.float32), 'VEC2', 34962)
             if a.get('tangents') is not None:
                 attributes[TANGENT_ATTRIBUTE] = g.accessor(np.column_stack((a['tangents'], a['tangent_w'])), 'VEC4', 34962)
+            if a.get('colours') is not None:
+                attributes[COLOUR_ATTRIBUTE] = g.accessor(a['colours'].astype(np.float32), 'VEC4', 34962)
             if skinned:
                 skin = a['skin']
                 for s in range(skin['sets']):

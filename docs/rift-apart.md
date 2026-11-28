@@ -672,8 +672,24 @@ and moves it, that the thug's strafe aim starts over the forward strafe run, and
 | +16 | u16 array size |
 | +18 | u8 Insomniac format, u8 planes |
 | +20 | u16 DXGI format |
+| +24 | f32 mip LOD bias ([Sampler state](#sampler-state)) |
+| +28 | u16 filter |
 | +30 | u8 SD mip count |
 | +32 | u8 HD mip count |
+| +33 | u8 address modes U, V, W |
+
+### Sampler state
+
+The header carries the texture's sampler. The engine fills a D3D sampler description from it (`0x14134efe0`, `texture.sampler_state`); the material programs bind one sampler per texture unit (`textureSampler5`, ...) beside the engine's own (`g_PointClampSampler`, `g_LinearClampSampler`, `g_ShadowCompSampler`).
+
+| Field | Values |
+| --- | --- |
+| Filter (u16 at +28) | 0 `MIN_MAG_MIP_POINT`; 2, 3, 4 `ANISOTROPIC` at 2, 4, 8; anything else `MIN_MAG_MIP_LINEAR` (max anisotropy 1) |
+| AddressU, V, W (u8 at +33, +34, +35) | copied as D3D modes: 1 wrap, 2 mirror, 3 clamp |
+| MipLODBias (f32 at +24) | copied |
+| MinLOD, MaxLOD | unbounded (−FLT_MAX, FLT_MAX); comparison never |
+
+Over the 12,502 installed textures: filter 1 on 12,244, 0 on 241 (the vertex-animation tables among them), 2 to 4 on 17; U clamp on 612 and mirror on 7, the rest wrap; a non-zero bias on 8.
 
 ### Storage on PC
 
@@ -1480,6 +1496,8 @@ Each unit texture is written as stored. Missing channels follow D3D: green and b
 
 The colourspace follows the DXGI format: sRGB formats are `sRGB` (decoded when written, as above), everything else `Non-Color`. Some material and graph strings double their path separators; they are normalised.
 
+**Sampling** follows each texture's sampler state ([Sampler state](#sampler-state)): Closest for point filtering, and the Image Texture extension for the address mode (wrap `REPEAT`, mirror `MIRROR`, clamp `EXTEND`). Where U and V differ, each axis is folded by hand into a repeating lookup: mirror ping-pongs, and mirror and clamp hold the coordinate between the edge texels' centres, where a bilinear read clamps to the edge texel. Cycles reads the top mip only, so mip filtering, anisotropy and the mip LOD bias have no effect. Cube maps and 3D textures keep their own lookups.
+
 ### In Blender
 
 The emitter reads its inputs from the mesh:
@@ -1487,12 +1505,12 @@ The emitter reads its inputs from the mesh:
 - **UVs:** the first and second UV maps, with game `v = 1 − v_blender`; every texture lookup flips back.
 - **Normal:** Geometry Normal, un-flipped on back faces.
 - **Tangent frame:** the decoded tangent and `TEXCOORD3.w`.
-  - **Export:** the glTF export writes them as one custom point attribute, `_RCRA_TANGENT` (native xyz, w). Blender's importer swaps the data of two custom attributes on one primitive when its set order differs from its list order, so there is only one. The importer makes a VEC4 a float colour attribute.
+  - **Export:** the glTF export writes them as one custom point attribute, `_RCRA_TANGENT` (native xyz, w). Blender's importer builds each custom attribute's starting array in the primitive's list order and fills them in set order, so two custom attributes of different accessor types would trade data; the tangent and the vertex colour are both VEC4 float. The importer makes a VEC4 a float colour attribute.
   - **Conversion:** `rcra_blender.store_tangent_frame` turns the attribute into the tangent's coordinates (a, b, c) at each corner, `T = a t + b (n × t) + c n`, where t is Blender's UV0 tangent (MikkTSpace) and n is the corner normal. They are stored as the corner attribute `rcra_tangent_frame`, w as the point attribute `rcra_tangent_w`, and the colour attribute is removed. The coordinates are solved in that basis, so they also hold where Blender's tangent is not orthogonal to the normal (degenerate UV triangles), and they keep c, the part of the game's tangent along the normal.
   - **Material:** rebuilds T from the Normal Map node's tangent and the geometry normal, so T turns with the armature as both do. On a back face, Cycles and EEVEE negate both the geometry normal and the Normal Map node's output. The material un-flips both, as the game's interpolants are not turned. The UV0-frame fallback does the same.
   - **Without the attribute:** a mesh gets Blender's UV0 frame, with the bitangent sign on Blender's +v (the game's −v), labelled (`NO_TANGENT_NOTE`).
   - **Draw state:** render flag 0x10000 is clear (unmirrored draw).
-- **Vertex colour:** the first colour attribute, else 1.
+- **Vertex colour:** the model's colour section ([Vertex colour](#in-the-viewer)), the bytes / 255, exported as the custom point attribute `_RCRA_COLOUR` rather than `COLOR_0` (glTF readers multiply the base colour by `COLOR_0`, and many models store 0). `rcra_blender.store_vertex_colour` squares it into the float colour attribute `rcra_vertex_colour`, the `TEXCOORD4` the engine vertex program passes on, so Cycles interpolates the square as the game does. A mesh without the section reads 1.
 - **Vertices:** where the material's vertex program places them at rest, with the stored vertices as the shape key `stored vertices` ([Vertex programs](#vertex-programs)).
 - **Vectors:** game `(x, y, z)` is Blender `(x, −z, y)`.
 

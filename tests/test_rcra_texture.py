@@ -92,6 +92,20 @@ class TextureTests(unittest.TestCase):
         self.assertEqual(info['faces'], 6)
         self.assertEqual(len(rt.read_top_mip(FakeSource({'c.texture': data}), 'c.texture', True)['slices']), 6)
 
+    def test_sampler_state_from_header(self):
+        """The engine's sampler description (0x14134efe0): filter u16 at +28, address bytes at +33..35, bias f32 at +24."""
+        header = bytearray(44)
+        self.assertEqual(rt.sampler_state(header), dict(filter=rt.FILTER_POINT, anisotropy=1, address=(0, 0, 0), mip_bias=0.0))
+        struct.pack_into('<fH', header, 24, -1.0, 4)
+        header[33:36] = bytes((rt.ADDRESS_CLAMP, rt.ADDRESS_WRAP, rt.ADDRESS_MIRROR))
+        self.assertEqual(rt.sampler_state(header), dict(filter=rt.FILTER_TRILINEAR, anisotropy=8, address=(3, 1, 2), mip_bias=-1.0))
+        struct.pack_into('<H', header, 28, 1)
+        self.assertEqual(rt.sampler_state(header)['anisotropy'], 1)
+        self.assertEqual(rt.sampler_state(header[:34]), rt.DEFAULT_SAMPLER)
+        data, _ = texture_asset(hd_mips=0)
+        texture = rt.read_top_mip(FakeSource({'t.texture': data}), 't.texture', full=True)
+        self.assertEqual(texture['sampler'], rt.parse_header(data)['sampler'])
+
     def test_rejects_wrong_sizes(self):
         data, _ = texture_asset(hd_mips=0)
         with self.assertRaisesRegex(ValueError, 'bytes after its header'):
@@ -240,6 +254,17 @@ class RealTextureTests(unittest.TestCase):
     def test_cube_map(self):
         info = rt.parse_header(self.source.asset_data(self.source.resolve('required/atmospheres/default_day/default_day.texture')[0]))
         self.assertEqual(info['faces'], 6)
+
+    def test_sampler_states(self):
+        """Character maps are trilinear and wrap; vertex-animation tables are point-sampled and clamped."""
+        def sampler(path):
+            return rt.parse_header(self.source.asset_data(self.source.resolve(path)[0]))['sampler']
+        body = sampler('characters/enemy/enm_toxic_crab/textures/enm_toxiccrab_rce_body_c.texture')
+        self.assertEqual((body['filter'], body['address'], body['mip_bias']), (rt.FILTER_TRILINEAR, (1, 1, 1), 0.0))
+        table = sampler('characters/enemy/enm_neo_nefarious_shooter/animations/vertex_animations/'
+                        'enm_neo_nefarious_shooter_aggressive_hover_forward_vertexanim/materials/'
+                        'enm_neo_nef_shooter_aggressive_hover_forward_vertexanim_dials_vat.texture')
+        self.assertEqual((table['filter'], table['address']), (rt.FILTER_POINT, (3, 3, 3)))
 
 
 class PreviewMipTests(unittest.TestCase):

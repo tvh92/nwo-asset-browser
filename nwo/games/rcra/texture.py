@@ -8,6 +8,11 @@ an array texture stores each slice's whole chain back to back, and a cube map (a
 six chains long: sky and probe textures) its six faces the same way. Header fields (shared with the 2016
 game): u32 SD bytes, u32 HD bytes, u16 HD width, height, u16 SD width, height, u16 array size,
 u8 Insomniac format, u8 planes, u16 DXGI format, ..., u8 SD mip count at +30, u8 HD mip count at +32.
+
+The header also holds the texture's sampler state, which the engine turns into a D3D sampler description
+(RiftApart.exe 0x14134efe0; ``sampler_state``): f32 mip LOD bias at +24, u16 filter at +28 (0 point, 1 trilinear,
+2 / 3 / 4 anisotropic x2 / x4 / x8), and u8 address modes U, V, W at +33, +34, +35 (D3D values: 1 wrap, 2 mirror,
+3 clamp). The material programs bind one sampler per texture unit (``textureSampler5`` ...) beside the engine's own.
 """
 import struct
 from pathlib import Path
@@ -23,6 +28,25 @@ MAX_PREVIEW_SIZE = 0       # 0: the top mip; else the largest mip no wider or ta
 HEADER_FACTS = ('format', 'hd_width', 'hd_height', 'sd_width', 'sd_height', 'array_size')
 # Data formats seen only in vertex-animation, probe and lookup textures: sized, never previewed.
 DATA_BPP = {2: 16, 10: 8, 16: 8, 34: 4, 35: 4, 54: 2}   # RGBA32F, RGBA16F, RG32F, RG16F, RG16, R16F
+# Sampler state (sampler_state): the engine's filter switch and the D3D address modes it copies.
+FILTER_POINT, FILTER_TRILINEAR = 0, 1
+FILTER_ANISOTROPY = {2: 2, 3: 4, 4: 8}
+ADDRESS_WRAP, ADDRESS_MIRROR, ADDRESS_CLAMP = 1, 2, 3
+DEFAULT_SAMPLER = dict(filter=FILTER_TRILINEAR, anisotropy=1, address=(ADDRESS_WRAP,) * 3, mip_bias=0.0)
+
+
+def sampler_state(header):
+    """The sampler a texture header section describes (bytes from its start), as the engine fills the D3D sampler
+    description (RiftApart.exe 0x14134efe0): filter u16 at +28 (0 MIN_MAG_MIP_POINT; 2, 3, 4 ANISOTROPIC with 2, 4, 8;
+    anything else MIN_MAG_MIP_LINEAR), AddressU/V/W the bytes at +33, +34, +35, MipLODBias the f32 at +24, MinLOD and
+    MaxLOD unbounded. A header too short to hold them gets DEFAULT_SAMPLER."""
+    if len(header) < 36:
+        return dict(DEFAULT_SAMPLER)
+    code = struct.unpack_from('<H', header, 28)[0]
+    anisotropy = FILTER_ANISOTROPY.get(code, 1)
+    kind = FILTER_POINT if code == 0 else FILTER_TRILINEAR
+    return dict(filter=kind, anisotropy=anisotropy, address=tuple(header[33:36]),
+                mip_bias=struct.unpack_from('<f', header, 24)[0])
 
 
 def parse_header(data):
@@ -50,7 +74,8 @@ def parse_header(data):
             faces = 6
         elif sd_len != chain:
             raise ValueError('SD payload is %d bytes, its mip chain %d' % (sd_len, chain))
-    return dict(format=fmt, insomniac_format=stex, planes=planes, array_size=array, faces=faces,
+    sampler = sampler_state(dat1[offset:offset + length])
+    return dict(format=fmt, insomniac_format=stex, planes=planes, array_size=array, faces=faces, sampler=sampler,
                 sd_width=sd_w, sd_height=sd_h, sd_mips=sd_mips, sd_size=sd_len,
                 hd_width=hd_w if hd_len else 0, hd_height=hd_h if hd_len else 0, hd_mips=hd_mips if hd_len else 0,
                 stream_size=hd_len, payload_offset=payload)
@@ -191,7 +216,8 @@ def read_top_mip(source, texture_path, full, chain=False):
     full_size = (info['hd_width'], info['hd_height']) if info['hd_width'] else (info['sd_width'], info['sd_height'])
     width, height = max(1, width >> level), max(1, height >> level)
     texture = dict(path=texture_path, width=width, height=height, format=fmt, pixels=slices[0], slices=slices,
-                   array_size=count, faces=info['faces'], full_size=full_size, srgb=fmt in SRGB_FORMATS)
+                   array_size=count, faces=info['faces'], full_size=full_size, srgb=fmt in SRGB_FORMATS,
+                   sampler=info['sampler'])
     if chain and count == 1 and below:
         texture['mip_chain'] = below
     return texture
