@@ -14,6 +14,14 @@ What the lighting is made of:
   the probes are brightest (Megalopolis day: key 220 degrees, probe 209); the code that converts the angles is not traced.
 - **Environment:** the atmosphere's FillLightCubeMap, the level's default env probe: a BC6H cube (nwo.formats.bc6h)
   in scene radiance. The viewer convolves it with the engine's probe program as it does the review HDRI.
+- **Ambient intensity:** EnvLightingDef's LightGridIntensity (block offset 184) is the apply programs'
+  GlobalWorldCBuffer.m_LightGridIntensity: it multiplies the whole ambient light, the light grid's and the probe's,
+  diffuse and reflections alike (Megalopolis day 0.6; most atmospheres 1). ``environment`` scales the baked
+  environment by it after metering. The block offsets of the EnvLightingDef floats follow the type record's field
+  order (KeyLightColor at 112 to CsmLodCount at 148, TimeOfDay 152, SunDiameter 156, then LightGridIntensity,
+  LightGridSkyMultiplier, LightGridAORadius and KeylightMaterialScale at 184 to 196, AmbientFillColor 200 to 208 and
+  AmbientFillIntensity 212); the loader that places them is not traced. The UI atmospheres set LightGridIntensity and
+  LightGridSkyMultiplier to 0 and light with an ambient fill instead.
 - **Exposure:** the game meters the frame (CS_AverageLumAccum: centre-weighted mean of log2 luminance) and soft-clamps
   the result to the atmosphere's AdaptationAnchor +- AdaptationRange (CS_AverageLumFinalize); the display exposes by
   0.18 / adapted luminance; scene EV = log2 + 13. ``meter`` and ``adapted_log2`` port those programs. The model
@@ -56,7 +64,8 @@ BLOCK = 0x02F06D4E
 REFERENCE_TAG = 0x95A3A227
 # Built-block byte offsets (f32 unless named a reference).
 FIELDS = dict(sky=64, probe=88, key_colour=112, key_intensity=124, key_azimuth=128, key_elevation=132,
-              anchor=636, range=640, bias=644, adjust_time=648, colour_correction=768)
+              time_of_day=152, sun_diameter=156, light_grid_intensity=184, light_grid_sky=188, ambient_fill=200,
+              ambient_fill_intensity=212, anchor=636, range=640, bias=644, adjust_time=648, colour_correction=768)
 MIDDLE_GREY = 0.18      # ToneMapCBuffer.m_AcesMiddleGray (the basic tone-map program inlines 0.18)
 EV_OFFSET = 13.0        # displayed EV = log2(luminance) + 13 (RiftApart.exe 0x1412391e8)
 ADAPT_SLOPE = 3.749     # CS_AverageLumFinalize: slope 1 at the anchor
@@ -65,11 +74,12 @@ REFERENCE_FOV = 40.0    # meter_environment's level camera: vertical field of vi
 REFERENCE_ASPECT = 1.5
 REFERENCE_TURNS = 16
 PROBE_LEVEL = 1         # decode the probe's mip 1 (512 x 512 per face for the 1024 probes)
-VERSION = 2             # bump when the baked environment changes; it names the cache files
+VERSION = 3             # bump when the baked environment changes; it names the cache files
 LIMITATIONS = ('Atmosphere lighting: the level\'s key light and default env probe, with the game\'s auto-exposure. '
                'The environment is turned so the key light comes from the review sun\'s side (the model has no place '
                'in the level). Its colour-correction LUT is applied at weight 1, as for one fully active atmosphere. '
-               'The level\'s light grid replaces the probe\'s diffuse light where the level has one. '
+               'The level\'s light grid replaces the probe\'s diffuse light where the level has one, and the ambient '
+               'light is scaled by the atmosphere\'s LightGridIntensity. '
                'Not reproduced: the level\'s shadows, local lights, fog, AdaptationBias and ExposureBias.')
 
 
@@ -104,7 +114,12 @@ def parse(data, resolve=lambda offset: None):
     o = FIELDS
     return dict(key_colour=[f(o['key_colour']), f(o['key_colour'] + 4), f(o['key_colour'] + 8)],
                 key_intensity=f(o['key_intensity']), key_azimuth=f(o['key_azimuth']),
-                key_elevation=f(o['key_elevation']), anchor=f(o['anchor']), range=f(o['range']), bias=f(o['bias']),
+                key_elevation=f(o['key_elevation']), time_of_day=f(o['time_of_day']),
+                sun_diameter=f(o['sun_diameter']), light_grid_intensity=f(o['light_grid_intensity']),
+                light_grid_sky=f(o['light_grid_sky']),
+                ambient_fill=[f(o['ambient_fill']), f(o['ambient_fill'] + 4), f(o['ambient_fill'] + 8)],
+                ambient_fill_intensity=f(o['ambient_fill_intensity']),
+                anchor=f(o['anchor']), range=f(o['range']), bias=f(o['bias']),
                 adjust_time=f(o['adjust_time']), sky=resolve(o['sky']), probe=resolve(o['probe']),
                 colour_correction=resolve(o['colour_correction']))
 
@@ -251,8 +266,11 @@ def environment(source, path, sun_direction, width=2048, cache_dir=None):
     from nwo.games.rcra import light_grid
     cell = light_grid.street_cell(source, atm['probe'], cache_dir=cache_dir)
     grid = None
+    intensity = atm['light_grid_intensity']   # m_LightGridIntensity: the whole ambient, grid and probe (see the module)
     if cell is not None:
-        equi, grid = light_grid.world(cell, equi, turn)
+        equi, grid = light_grid.world(cell, equi, turn, intensity)
+    else:
+        equi = (equi * np.float32(intensity)).astype(np.float32)
     return dict(atmosphere=atm, equirect=equi, light_grid=grid, metered=metered, sun_direction=(sun_b / np.linalg.norm(sun_b)).astype(np.float32),
                 sun_irradiance=(math.pi * key_light(atm)).astype(np.float32), turn_degrees=math.degrees(turn),
                 sha256=hashlib.sha256(equi.tobytes()).hexdigest())

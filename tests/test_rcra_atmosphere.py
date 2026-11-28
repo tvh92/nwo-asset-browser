@@ -25,7 +25,8 @@ class BlockTests(unittest.TestCase):
     def test_parse_reads_the_documented_offsets(self):
         data = bytearray(800)
         for name, value in (('key_intensity', 6.0), ('key_azimuth', 220.0), ('key_elevation', 45.0), ('anchor', 12.0),
-                            ('range', 10.0), ('bias', -0.5), ('adjust_time', 1.0)):
+                            ('range', 10.0), ('bias', -0.5), ('adjust_time', 1.0), ('light_grid_intensity', 0.6),
+                            ('light_grid_sky', 1.0), ('sun_diameter', 0.5), ('time_of_day', 0.5)):
             struct.pack_into('<f', data, A.FIELDS[name], value)
         struct.pack_into('<3f', data, A.FIELDS['key_colour'], 1.0, 1.0, 0.83)
         struct.pack_into('<Q', data, A.FIELDS['probe'], 0x1234)
@@ -33,6 +34,8 @@ class BlockTests(unittest.TestCase):
         fields = A.parse(bytes(data), lambda offset: names.get(offset) if struct.unpack_from('<Q', data, offset)[0] else None)
         self.assertEqual((fields['key_intensity'], fields['key_azimuth'], fields['key_elevation']), (6.0, 220.0, 45.0))
         self.assertEqual((fields['anchor'], fields['range'], fields['bias']), (12.0, 10.0, -0.5))
+        self.assertAlmostEqual(fields['light_grid_intensity'], 0.6, places=6)
+        self.assertEqual((fields['light_grid_sky'], fields['sun_diameter'], fields['time_of_day']), (1.0, 0.5, 0.5))
         self.assertAlmostEqual(fields['key_colour'][2], 0.83, places=6)
         self.assertEqual(fields['probe'], 'probe.texture')
         self.assertIsNone(fields['colour_correction'])
@@ -166,6 +169,16 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((atm['anchor'], atm['range'], atm['bias']), (12.0, 10.0, 0.0))
         self.assertEqual(atm['probe'], 'levels/i29/instance/malinon_intro/malinon_intro/envprobes_day/0xe54a425db9195aba.texture')
         self.assertEqual(atm['colour_correction'], 'textures/lut/lut_megalopolis_warm9.texture')
+        # EnvLightingDef: TimeOfDay, SunDiameter, LightGridIntensity (0.6 in gameplay, 1 in the marketing hero shot),
+        # LightGridSkyMultiplier, and no ambient fill
+        self.assertEqual((atm['time_of_day'], atm['sun_diameter'], atm['light_grid_sky']), (0.5, 0.5, 1.0))
+        self.assertAlmostEqual(atm['light_grid_intensity'], 0.6, places=6)
+        self.assertEqual(atm['ambient_fill_intensity'], 0.0)
+        hero = A.read(self.source, 'atmosphere/atm_malinon/atm_malinon_day_marketing_hero_shot_only.atmosphere')
+        self.assertEqual(hero['light_grid_intensity'], 1.0)
+        ui = A.read(self.source, 'atmosphere/atm_ui/atm_ui_map.atmosphere')   # lit by an ambient fill, not the grid
+        self.assertEqual((ui['light_grid_intensity'], ui['light_grid_sky']), (0.0, 0.0))
+        self.assertGreater(ui['ambient_fill_intensity'], 0.0)
         self.assertIn(A.DEFAULT, A.list_paths(self.source))
         lut = A.read_lut(self.source, atm['colour_correction'])
         self.assertEqual(lut.shape, (33, 33, 33, 3))
@@ -189,7 +202,9 @@ class InstallTests(unittest.TestCase):
         grid = env['light_grid']
         self.assertEqual(grid['position'], [861.5, -117.5, 1891.5])
         self.assertTrue(0.1 < grid['reflection_scale'] < 0.3 and grid['fit_rms'] < 0.08, grid)
-        # The world's diffuse light straight up and down is the street cell's (within the fit's error).
+        self.assertAlmostEqual(grid['intensity'], 0.6, places=6)
+        # The world's diffuse light straight up and down is the street cell's x LightGridIntensity (within the fit's
+        # error).
         from nwo.viewer.environment import equirect_directions
         d = equirect_directions(256, 128).reshape(-1, 3).astype(np.float64)
         lat = (0.5 - (np.arange(128) + 0.5) / 128) * np.pi
@@ -197,7 +212,7 @@ class InstallTests(unittest.TestCase):
         radiance = env['equirect'].reshape(-1, 3).astype(np.float64)
         for z, axis in ((1.0, 2), (-1.0, 3)):
             diffuse = (np.maximum(d[:, 2] * z, 0) * omega) @ radiance / np.pi
-            np.testing.assert_allclose(diffuse, grid['axis_rgb'][axis], rtol=0.2)
+            np.testing.assert_allclose(diffuse, grid['intensity'] * np.asarray(grid['axis_rgb'][axis]), rtol=0.2)
 
 
 if __name__ == '__main__':

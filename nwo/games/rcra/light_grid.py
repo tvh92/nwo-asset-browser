@@ -17,7 +17,7 @@ the bleed term).
 the three fields of the directions the normal faces, weighted by n|n|, then decode u = (b / 992 - 1)|.|, v = (c / 31744 -
 1)|.| (signed squares) to (Y (1 - u + v), Y (1 + u), Y (1 - u - v)) x scale / 63, the diffuse light with no 1 / pi. They
 blend it with the default probe by the probe weight max(cell weight << 6, lookup word & 0x3FC) / 960 and multiply by
-m_LightGridIntensity.
+m_LightGridIntensity, the atmosphere's LightGridIntensity (nwo.games.rcra.atmosphere), which ``world`` takes.
 
 **The spot** (``street_cell``): a model has no place in the level, so the light comes from one stored cell that stands on a
 surface (a blocked cell directly below it, in the same brick), across every grid of the probe's level folder and time of
@@ -25,8 +25,8 @@ day: the one nearest the median log luminance of all such cells in each of the s
 presentation choice; the cell's values are the game's.
 
 Not reproduced: the GPU fill passes (the chosen cell is a stored one, so they do not change it), the trilinear blend and
-bleed term between cells, the lookup words' probe weight (taken as 0: not traced), LightGridIntensity (1: its place in the
-built atmosphere block is not traced), and the local probes and screen-space reflections the game reflects at street level.
+bleed term between cells, the lookup words' probe weight (taken as 0: not traced), and the local probes and screen-space
+reflections the game reflects at street level.
 """
 from __future__ import annotations
 
@@ -43,13 +43,12 @@ CELLS = BRICK ** 3
 CODE_BYTES = CELLS // 4
 BLOCKED, FILL, STORED = 0x83F80000, 0x8008003F, 0x83F8003F
 BLEED_MASK = 0xFFFFC03F
-INTENSITY = 1.0           # m_LightGridIntensity (not traced; the apply programs' review value)
 DIRECTIONS = ('+X', '-X', '+Y', '-Y', '+Z', '-Z')
 LUMINANCE = np.array([0.2126, 0.7152, 0.0722])
 VERSION = 1               # bump when street_cell's choice changes; it names the cache files
 NOTE = ('Light grid: the level\'s bounce light at one stored cell standing on a surface, the one nearest the median of '
         'all such cells (the model has no place in the level). Not reproduced: the trilinear blend and bleed term between '
-        'cells, LightGridIntensity (1), the lookup\'s probe weight (0), and the local probes and screen-space reflections '
+        'cells, the lookup\'s probe weight (0), and the local probes and screen-space reflections '
         'the game reflects at street level.')
 
 
@@ -135,7 +134,7 @@ def decode(y, b, c):
 
 def irradiance(cell, normals):
     """The light grid's diffuse light (no 1 / pi) of one cell (a ``street_cell`` record) for game-space unit ``normals``
-    (..., 3), as the apply programs decode it, x INTENSITY."""
+    (..., 3), as the apply programs decode it, before m_LightGridIntensity."""
     f = np.asarray(cell['fields'], np.float64)            # (6, 3)
     n = np.asarray(normals, np.float64)
     w = np.abs(n) * n
@@ -143,7 +142,7 @@ def irradiance(cell, normals):
     for axis in range(3):
         pos = w[..., axis:axis + 1] > 0
         total += np.abs(w[..., axis:axis + 1]) * np.where(pos, f[2 * axis], f[2 * axis + 1])
-    return decode(total[..., 0], total[..., 1], total[..., 2]) * (cell['scale'] / 63.0 * INTENSITY)
+    return decode(total[..., 0], total[..., 1], total[..., 2]) * (cell['scale'] / 63.0)
 
 
 def grids_for_probe(source, probe_path):
@@ -204,7 +203,7 @@ def ground_cells(source, paths):
 def axis_colours(found):
     """(n, 6, 3) RGB of each cell for the six axis normals."""
     f = found['fields']
-    return decode(f[..., 0], f[..., 1], f[..., 2]) * (found['scale'][:, None, None] / 63.0 * INTENSITY)
+    return decode(f[..., 0], f[..., 1], f[..., 2]) * (found['scale'][:, None, None] / 63.0)
 
 
 def pick(found):
@@ -291,11 +290,12 @@ def fit_world(target, probe, directions, solid_angle, lobes=None, tolerance=0.00
     return dict(k=k, weights=weights, lobes=lobes, rms=rms, max=mx, rms_without_probe=rms0)
 
 
-def world(cell, probe_equirect, turn, coarse=(32, 16)):
+def world(cell, probe_equirect, turn, intensity=1.0, coarse=(32, 16)):
     """The probe equirect (Blender directions, rows top first, already turned by ``turn`` radians about the vertical)
     relit by the light-grid ``cell``: (equirect, record). The diffuse target is (1 - weight) x the cell's irradiance +
     weight x the probe's diffuse light; ``fit_world`` gives the probe share k and the smooth lobes, evaluated at full
-    resolution."""
+    resolution. The result is scaled by ``intensity`` (m_LightGridIntensity), which the apply programs apply to the
+    blended ambient light, diffuse and reflections alike."""
     from nwo.games.rcra import atmosphere as A
     from nwo.viewer.environment import equirect_directions
     h, w, _ = probe_equirect.shape
@@ -311,8 +311,8 @@ def world(cell, probe_equirect, turn, coarse=(32, 16)):
     fit = fit_world(target, probe, d, omega)
     full = equirect_directions(w, h).reshape(-1, 3).astype(np.float64)
     lobe_light = (_lobe_field(full, fit['lobes']) @ fit['weights']).reshape(h, w, 3)
-    out = (fit['k'] * probe_equirect.astype(np.float64) + lobe_light).astype(np.float32)
+    out = (intensity * (fit['k'] * probe_equirect.astype(np.float64) + lobe_light)).astype(np.float32)
     record = dict(grid=cell['grid'], position=cell['position'], probe_weight=weight, cells=cell['cells'],
                   axis_rgb=cell['axis_rgb'], reflection_scale=fit['k'], fit_rms=fit['rms'], fit_max=fit['max'],
-                  intensity=INTENSITY)
+                  intensity=float(intensity))
     return out, record
